@@ -107,7 +107,9 @@ export class Api extends Construct {
       entry: path.join(LAMBDA_DIR, 'heartbeat', 'index.ts'),
       environment: { REGISTRY_TABLE: registryTable.tableName },
     });
-    registryTable.grantWriteData(heartbeatFn);
+    // Read as well as write: the heartbeat response carries credentials and
+    // camera assignments back to the agent, both of which require Query.
+    registryTable.grantReadWriteData(heartbeatFn);
     // Needed to turn the certificate id in the caller's ARN into a thing name.
     heartbeatFn.addToRolePolicy(
       new iam.PolicyStatement({

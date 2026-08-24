@@ -1,6 +1,7 @@
 package online.camstream.agent;
 
 import online.camstream.agent.config.AgentConfig;
+import online.camstream.agent.control.CameraRegistry;
 import online.camstream.agent.control.StreamManager;
 import online.camstream.agent.control.WatchListener;
 import online.camstream.agent.credentials.CredentialEnvelope;
@@ -65,17 +66,20 @@ public final class Main {
                 config.discoveryMaxHosts,
                 credentialStore::candidates);
 
+        CameraRegistry registry = new CameraRegistry(config, discovery);
+
         try (S3Client s3 = S3Client.builder()
                 .region(Region.of(config.region))
                 .credentialsProvider(awsCredentials)
                 .httpClientBuilder(UrlConnectionHttpClient.builder())
                 .build();
-             StreamManager manager = new StreamManager(config, s3);
+             StreamManager manager = new StreamManager(config, s3, registry);
              Supervisor supervisor = new Supervisor(3)) {
 
             HeartbeatClient heartbeat = new HeartbeatClient(
                     config, awsCredentials, keypair::publicKeyBase64, discovery::redactedResults,
-                    envelope, credentialStore);
+                    envelope, credentialStore, registry,
+                    () -> List.copyOf(supervisor.health()));
 
             // Announce before subscribing, so the control plane already knows
             // this device's cameras when the first viewer asks for them.
@@ -92,7 +96,12 @@ public final class Main {
                             "discovery",
                             Duration.ofMinutes(config.discoveryIntervalMinutes),
                             true,
-                            discovery::scan));
+                            () -> {
+                                discovery.scan();
+                                // Approved cameras the agent had not yet seen
+                                // become streamable as soon as a sweep finds them.
+                                registry.refresh();
+                            }));
                 } else {
                     log.info("camera discovery is disabled");
                 }

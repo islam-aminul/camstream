@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# Builds the distributable agent bundles.
+#
+#   ./packaging/build-dist.sh [version]
+#
+# Produces, under dist/:
+#   camstream-agent-<version>-linux.tar.gz
+#   camstream-agent-<version>-windows.zip
+#   camstream-agent-<version>-macos.tar.gz
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+VERSION="${1:-$(sed -n 's:.*<version>\(.*\)</version>.*:\1:p' "$ROOT/agent/pom.xml" | head -1)}"
+OUT="$ROOT/dist"
+JAR="$ROOT/agent/target/camstream-agent.jar"
+
+echo "Building agent $VERSION..."
+(cd "$ROOT/agent" && mvn -B -q package -DskipTests)
+[ -f "$JAR" ] || { echo "Build produced no jar." >&2; exit 1; }
+
+# The licence check is advisory at build time but the notice must ship.
+echo "Collecting licence notices..."
+rm -rf "$OUT"; mkdir -p "$OUT"
+
+stage() {
+  local platform="$1"; shift
+  local dir="$OUT/stage-$platform"
+  rm -rf "$dir"; mkdir -p "$dir"
+  cp "$JAR" "$dir/"
+  cp "$ROOT/packaging/agent.yaml.example" "$dir/"
+  cp "$ROOT/docs/licensing.md" "$dir/LICENSING.md"
+  cp "$ROOT/LICENSE" "$dir/"
+  cp "$ROOT/NOTICE" "$dir/"
+  cp "$ROOT/scripts/check-ffmpeg-license.sh" "$dir/"
+  for f in "$@"; do cp "$f" "$dir/"; done
+  echo "$dir"
+}
+
+linux_dir="$(stage linux \
+  "$ROOT/packaging/linux/install.sh" \
+  "$ROOT/packaging/linux/uninstall.sh" \
+  "$ROOT/packaging/linux/camstream-agent.service")"
+# install.sh resolves the licence checker relative to itself in the repo; in a
+# bundle it sits alongside, so point at that copy.
+sed -i 's#"$HERE/../../scripts/check-ffmpeg-license.sh"#"$HERE/check-ffmpeg-license.sh"#' "$linux_dir/install.sh"
+tar -czf "$OUT/camstream-agent-$VERSION-linux.tar.gz" -C "$linux_dir" .
+
+windows_dir="$(stage windows \
+  "$ROOT/packaging/windows/install.ps1" \
+  "$ROOT/packaging/windows/uninstall.ps1" \
+  "$ROOT/packaging/windows/camstream-agent.xml")"
+(cd "$windows_dir" && zip -qr "$OUT/camstream-agent-$VERSION-windows.zip" .)
+
+macos_dir="$(stage macos "$ROOT/packaging/macos/online.camstream.agent.plist")"
+tar -czf "$OUT/camstream-agent-$VERSION-macos.tar.gz" -C "$macos_dir" .
+
+rm -rf "$OUT"/stage-*
+echo
+ls -lh "$OUT" | tail -n +2 | awk '{printf "  %-46s %s\n", $9, $5}'
