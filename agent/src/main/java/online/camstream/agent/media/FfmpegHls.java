@@ -3,6 +3,8 @@ package online.camstream.agent.media;
 import online.camstream.agent.config.AgentConfig;
 import online.camstream.agent.config.CameraConfig;
 import online.camstream.agent.config.StreamProfile;
+import online.camstream.agent.control.Rendition;
+import online.camstream.agent.control.Variant;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -42,25 +44,32 @@ public final class FfmpegHls implements AutoCloseable {
      */
     private final String runId;
 
-    public FfmpegHls(AgentConfig config, CameraConfig camera, StreamProfile profile, Path outputDir)
+    public FfmpegHls(AgentConfig config, CameraConfig camera, Rendition rendition, Path outputDir)
             throws IOException {
-        this.label = camera.id + "/" + profile.key();
+        StreamProfile profile = rendition.profile();
+        this.label = rendition.toString();
         this.runId = Long.toString(System.currentTimeMillis(), 36);
 
-        List<String> command = new ArrayList<>(List.of(
-                config.ffmpegPath,
-                "-nostdin",
-                "-hide_banner",
-                "-loglevel", "warning",
+        double segmentSeconds = config.segmentDurationMs / 1000.0;
+        EncoderProfile encoder = resolveEncoder(camera, rendition);
+
+        List<String> command = new ArrayList<>();
+        command.add(config.ffmpegPath);
+        command.addAll(List.of("-nostdin", "-hide_banner", "-loglevel", "warning"));
+        // Hardware contexts must be created before the input is opened.
+        command.addAll(EncoderArguments.beforeInput(encoder, camera.encoderDevice));
+        command.addAll(List.of(
                 // TCP where the camera supports it: UDP packet loss becomes
                 // macroblocking that is then baked into every viewer's stream.
                 "-rtsp_transport", camera.rtspTransport,
                 "-timeout", "5000000",
                 "-i", camera.urlFor(profile),
-                "-an",
-                "-c:v", "copy",
+                "-an"));
+        command.addAll(EncoderArguments.video(
+                encoder, camera.encoderArgs, camera.encoderBitrateKbps, camera.encoderMaxHeight, segmentSeconds));
+        command.addAll(List.of(
                 "-f", "hls",
-                "-hls_time", String.valueOf(config.segmentDurationMs / 1000.0),
+                "-hls_time", String.valueOf(segmentSeconds),
                 "-hls_list_size", String.valueOf(config.playlistWindow),
                 // delete_segments keeps the working directory bounded; temp_file
                 // stops the uploader seeing half-written segments.
@@ -70,7 +79,7 @@ public final class FfmpegHls implements AutoCloseable {
                 "-hls_segment_filename", outputDir.resolve(runId + "_%06d.m4s").toString(),
                 outputDir.resolve("index.m3u8").toString()));
 
-        log.info("[{}] starting ffmpeg", label);
+        log.info("[{}] starting ffmpeg ({})", label, encoder.isTranscode() ? encoder.key() : "stream copy");
         ProcessBuilder builder = new ProcessBuilder(command);
         builder.redirectErrorStream(true);
         this.process = builder.start();
@@ -85,6 +94,28 @@ public final class FfmpegHls implements AutoCloseable {
                 // Process ended; nothing useful left to read.
             }
         });
+    }
+
+    /**
+     * A transcode only happens when one is genuinely needed: the viewer asked
+     * for H.264, the camera does not already produce it, and an encoder is
+     * configured. Anything else copies.
+     */
+    private static EncoderProfile resolveEncoder(CameraConfig camera, Rendition rendition) {
+        if (rendition.variant() == Variant.SOURCE) {
+            return EncoderProfile.COPY;
+        }
+        boolean alreadyH264 = camera.sourceCodec != null
+                && camera.sourceCodec.toLowerCase(java.util.Locale.ROOT).matches("h264|avc1?");
+        if (alreadyH264) {
+            return EncoderProfile.COPY;
+        }
+        EncoderProfile configured = EncoderProfile.fromKey(camera.encoder);
+        if (configured == EncoderProfile.COPY) {
+            log.warn("[{}] H.264 requested but no encoder configured for camera {} — copying instead",
+                    rendition, camera.id);
+        }
+        return configured;
     }
 
     public boolean isAlive() {

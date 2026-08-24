@@ -111,6 +111,9 @@ public final class HeartbeatClient {
             ObjectNode node = cameras.addObject();
             node.put("cameraId", camera.id);
             node.put("displayName", camera.name);
+            if (camera.sourceCodec != null && !camera.sourceCodec.isBlank()) {
+                node.put("sourceCodec", camera.sourceCodec);
+            }
             ArrayNode profiles = node.putArray("profiles");
             for (StreamProfile profile : StreamProfile.values()) {
                 if (camera.supports(profile)) {

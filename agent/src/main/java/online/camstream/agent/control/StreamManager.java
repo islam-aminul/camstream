@@ -143,10 +143,10 @@ public final class StreamManager implements AutoCloseable {
         }
         try {
             Path directory = Files.createDirectories(
-                    workRoot.resolve(rendition.cameraId()).resolve(rendition.profile().key()));
+                    workRoot.resolve(rendition.keySuffix().replace('/', java.io.File.separatorChar)));
             clean(directory);
 
-            FfmpegHls ffmpeg = new FfmpegHls(config, camera, rendition.profile(), directory);
+            FfmpegHls ffmpeg = new FfmpegHls(config, camera, rendition, directory);
             HlsPublisher publisher = new HlsPublisher(
                     s3, config.bucket, config.keyPrefix() + rendition.keySuffix(), directory, rendition.toString());
 

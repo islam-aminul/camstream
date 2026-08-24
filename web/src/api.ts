@@ -1,4 +1,5 @@
 import { currentSession } from './auth';
+import { supportedCodecs, supports } from './codecs';
 
 export interface Camera {
   thingName: string;
@@ -7,7 +8,21 @@ export interface Camera {
   resolution?: string;
   online: boolean;
   profiles: string[];
-  manifestUrl: { sub: string; main: string };
+  /** Codec the camera emits natively. */
+  sourceCodec: string;
+  manifestUrl: { sub: string; main: string; subH264: string; mainH264: string };
+}
+
+/**
+ * The URL this browser should actually load: the camera's own stream when it
+ * can decode it, the transcoded one only when it cannot.
+ */
+export function manifestFor(camera: Camera, profile: 'sub' | 'main'): string {
+  const native = supports(camera.sourceCodec ?? 'h264');
+  if (profile === 'main') {
+    return native ? camera.manifestUrl.main : camera.manifestUrl.mainH264;
+  }
+  return native ? camera.manifestUrl.sub : camera.manifestUrl.subH264;
 }
 
 export interface SessionInfo {
@@ -82,6 +97,8 @@ export function watch(
 ): Promise<WatchResult> {
   return call<WatchResult>('/api/watch', {
     method: 'POST',
-    body: JSON.stringify({ sessionId, grid, main }),
+    // Declaring capabilities here is what lets the agent skip encoding for
+    // viewers who do not need it.
+    body: JSON.stringify({ sessionId, grid, main, codecs: supportedCodecs() }),
   });
 }

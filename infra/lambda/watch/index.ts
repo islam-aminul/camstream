@@ -24,13 +24,36 @@ interface DemandRecord {
   grid: boolean;
   mainThingName?: string;
   mainCameraId?: string;
+  /** Codecs this viewer's browser can actually decode. */
+  codecs?: string[];
   expiresAt: number;
 }
+
+interface CameraRecord {
+  thingName: string;
+  cameraId: string;
+  /** What the camera emits natively, reported by the agent. */
+  sourceCodec?: string;
+}
+
+type Variant = 'source' | 'h264';
 
 /** What a single agent should be publishing right now. */
 interface DesiredState {
   thingName: string;
-  renditions: { cameraId: string; profile: 'sub' | 'main' }[];
+  renditions: { cameraId: string; profile: 'sub' | 'main'; variant: Variant }[];
+}
+
+/**
+ * H.264 is the universal floor: every browser that can play HLS at all can
+ * decode it, so a camera already emitting it never needs transcoding.
+ */
+function needsTranscode(sourceCodec: string | undefined, viewerCodecs: string[]): boolean {
+  const codec = (sourceCodec ?? 'h264').toLowerCase();
+  if (codec === 'h264' || codec === 'avc' || codec === 'avc1') {
+    return false;
+  }
+  return !viewerCodecs.map((c) => c.toLowerCase()).includes(codec);
 }
 
 export async function handler(
@@ -63,6 +86,12 @@ export async function handler(
 
   const grid = body.grid !== false;
 
+  // Declared by the player from MediaSource.isTypeSupported. Absent means we
+  // assume the conservative floor and transcode anything exotic.
+  const codecs = Array.isArray(body.codecs)
+    ? body.codecs.filter((c): c is string => typeof c === 'string' && /^[a-z0-9]{1,12}$/i.test(c)).slice(0, 8)
+    : [];
+
   // At most one full-resolution stream per viewer — this is the cap that keeps
   // main-stream bandwidth predictable.
   let mainThingName: string | undefined;
@@ -94,6 +123,7 @@ export async function handler(
         grid,
         mainThingName,
         mainCameraId,
+        codecs,
         expiresAt: now + DEMAND_TTL_SECONDS,
       },
     }),
@@ -102,7 +132,7 @@ export async function handler(
   const [demands, devices, cameras] = await Promise.all([
     queryPrefix<DemandRecord>(tenantId, 'DEMAND#'),
     queryPrefix<{ thingName: string }>(tenantId, 'DEVICE#'),
-    queryPrefix<{ thingName: string; cameraId: string }>(tenantId, 'CAMERA#'),
+    queryPrefix<CameraRecord>(tenantId, 'CAMERA#'),
   ]);
 
   const desired = resolveDesiredState(now, demands, devices, cameras);
@@ -138,33 +168,56 @@ export function resolveDesiredState(
   now: number,
   demands: DemandRecord[],
   devices: { thingName: string }[],
-  cameras: { thingName: string; cameraId: string }[],
+  cameras: CameraRecord[],
 ): DesiredState[] {
   const live = demands.filter((d) => d.expiresAt > now);
-  const anyGrid = live.some((d) => d.grid);
 
-  const byThing = new Map<string, Map<string, 'sub' | 'main'>>();
+  const codecByCamera = new Map<string, string | undefined>();
+  for (const camera of cameras) {
+    codecByCamera.set(`${camera.thingName}/${camera.cameraId}`, camera.sourceCodec);
+  }
+
+  // Keyed by camera+profile+variant: two viewers with different browsers can
+  // legitimately require the same camera in two codecs at once.
+  const byThing = new Map<string, Map<string, { cameraId: string; profile: 'sub' | 'main'; variant: Variant }>>();
   for (const device of devices) {
     byThing.set(device.thingName, new Map());
   }
 
-  if (anyGrid) {
-    for (const camera of cameras) {
-      byThing.get(camera.thingName)?.set(camera.cameraId, 'sub');
-    }
-  }
+  const want = (thingName: string, cameraId: string, profile: 'sub' | 'main', viewerCodecs: string[]) => {
+    const bucket = byThing.get(thingName);
+    if (!bucket) return;
+    const variant: Variant =
+      needsTranscode(codecByCamera.get(`${thingName}/${cameraId}`), viewerCodecs) ? 'h264' : 'source';
+    bucket.set(`${cameraId}/${profile}/${variant}`, { cameraId, profile, variant });
+  };
 
   for (const demand of live) {
-    if (!demand.mainThingName || !demand.mainCameraId) continue;
-    // main wins over sub for the same camera — one rendition per camera.
-    byThing.get(demand.mainThingName)?.set(demand.mainCameraId, 'main');
+    const viewerCodecs = demand.codecs ?? [];
+    const pinned = demand.mainThingName && demand.mainCameraId
+      ? `${demand.mainThingName}/${demand.mainCameraId}`
+      : null;
+
+    if (demand.grid) {
+      for (const camera of cameras) {
+        // This viewer's pinned camera is served by its main rendition; asking
+        // for the sub as well would make the agent encode the same camera
+        // twice for one person. Another viewer still on the grid will
+        // independently keep the sub alive.
+        if (pinned === `${camera.thingName}/${camera.cameraId}`) continue;
+        want(camera.thingName, camera.cameraId, 'sub', viewerCodecs);
+      }
+    }
+    if (demand.mainThingName && demand.mainCameraId) {
+      want(demand.mainThingName, demand.mainCameraId, 'main', viewerCodecs);
+    }
   }
 
   return [...byThing.entries()].map(([thingName, renditions]) => ({
     thingName,
-    renditions: [...renditions.entries()]
-      .map(([cameraId, profile]) => ({ cameraId, profile }))
-      .sort((a, b) => a.cameraId.localeCompare(b.cameraId)),
+    renditions: [...renditions.values()].sort(
+      (a, b) => a.cameraId.localeCompare(b.cameraId) || a.profile.localeCompare(b.profile) || a.variant.localeCompare(b.variant),
+    ),
   }));
 }
 

@@ -53,6 +53,41 @@ neither. The camera encodes — its manufacturer licensed that. The viewer's
 browser decodes — Google, Apple, Microsoft and Mozilla licensed that. CamStream
 only moves already-encoded bytes between the two and never inspects a frame.
 
+## Transcoding, when it is unavoidable
+
+Some cameras only emit H.265, which Firefox and older Chrome cannot decode. The
+agent can transcode to H.264 for exactly those viewers — without reintroducing
+copyleft, because it never uses libx264.
+
+`libx264` and `libx265` are GPL and force `--enable-gpl` onto the whole FFmpeg
+binary. The *hardware* encoders do not:
+
+| Profile | Encoder | Platform | Licence |
+|---|---|---|---|
+| `vaapi` | `h264_vaapi` | Linux, Intel/AMD iGPU | LGPL |
+| `nvenc` | `h264_nvenc` | Linux/Windows, NVIDIA | LGPL |
+| `v4l2m2m` | `h264_v4l2m2m` | Raspberry Pi, ARM SoCs | LGPL |
+| `qsv` | `h264_qsv` | Windows, Intel Quick Sync | LGPL |
+| `amf` | `h264_amf` | Windows, AMD | LGPL |
+
+`libx264` is deliberately absent from the profile list. An operator who wants it
+must express it through the `custom` profile and supply their own GPL FFmpeg —
+moving the obligation to their deployment, never to a CamStream distribution.
+
+The AVC *patent* position is separate from the copyleft one and does not
+disappear when transcoding: encoding H.264 exercises claims that stream-copying
+does not. Hardware encoders run on silicon whose vendor licensed the encoder
+block, which is the usual basis for relying on it — confirm with counsel before
+enabling transcode in a sold product.
+
+### A dependency to avoid
+
+`org.bytedeco:ffmpeg` (JavaCV) bundles a prebuilt FFmpeg. Its build script
+enables `--enable-gpl --enable-libx264 --enable-libx265 --enable-version3`, so
+the shipped native binary is GPL-3 even though the Java wrapper is Apache-2.0.
+Anything reusing JavaCV for media work inherits that. CamStream invokes an
+external FFmpeg instead, which is why `ffmpegPath` is configurable.
+
 ## Decision 2 — dynamic linking and attribution for FFmpeg
 
 Because FFmpeg is LGPL and invoked out-of-process, the obligations are limited
