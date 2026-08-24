@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Player } from './Player';
-import { SessionSuperseded, listCameras, startSession, watch, type Camera, type SessionInfo } from './api';
+import { SessionSuperseded, listCameras, manifestFor, startSession, watch, type Camera, type SessionInfo } from './api';
 import { NewPasswordRequired, completeNewPassword, currentSession, signIn, signOut } from './auth';
 import type { CognitoUser } from 'amazon-cognito-identity-js';
 
@@ -154,7 +154,7 @@ export default function App() {
             <strong>{selected.displayName}</strong>
             <span className="badge">main stream</span>
           </div>
-          <Player src={selected.manifestUrl.main} />
+          <Player src={manifestFor(selected, 'main')} />
         </section>
       ) : (
         <section className="grid">
@@ -167,7 +167,7 @@ export default function App() {
               disabled={!camera.online}
             >
               {camera.online ? (
-                <Player src={camera.manifestUrl.sub} />
+                <Player src={manifestFor(camera, 'sub')} />
               ) : (
                 <div className="player"><div className="player-overlay">Offline</div></div>
               )}

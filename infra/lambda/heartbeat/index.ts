@@ -19,6 +19,8 @@ interface CameraInput {
   height?: unknown;
   /** Which renditions this camera can serve, e.g. ["sub","main"]. */
   profiles?: unknown;
+  /** Codec the camera emits natively; decides whether a viewer needs a transcode. */
+  sourceCodec?: unknown;
 }
 
 const iot = new IoTClient({});
@@ -130,6 +132,10 @@ export async function handler(
             typeof camera.displayName === 'string' ? camera.displayName.slice(0, 128) : (camera.cameraId as string),
           width: typeof camera.width === 'number' ? camera.width : undefined,
           height: typeof camera.height === 'number' ? camera.height : undefined,
+          sourceCodec:
+            typeof camera.sourceCodec === 'string' && /^[a-z0-9]{1,12}$/i.test(camera.sourceCodec)
+              ? camera.sourceCodec.toLowerCase()
+              : undefined,
           profiles: Array.isArray(camera.profiles)
             ? camera.profiles.filter((p): p is string => p === 'sub' || p === 'main')
             : ['sub'],

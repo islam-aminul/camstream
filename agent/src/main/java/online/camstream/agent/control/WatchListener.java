@@ -72,7 +72,10 @@ public final class WatchListener implements AutoCloseable {
                 if (cameraId == null || cameraId.isBlank()) {
                     continue;
                 }
-                desired.add(new Rendition(cameraId, StreamProfile.fromKey(node.path("profile").asText("sub"))));
+                desired.add(new Rendition(
+                        cameraId,
+                        StreamProfile.fromKey(node.path("profile").asText("sub")),
+                        Variant.fromKey(node.path("variant").asText("source"))));
             }
             return desired;
         } catch (Exception e) {

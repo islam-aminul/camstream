@@ -17,6 +17,7 @@ interface CameraRecord {
   width?: number;
   height?: number;
   profiles?: string[];
+  sourceCodec?: string;
 }
 
 export async function handler(
@@ -47,12 +48,16 @@ export async function handler(
       // A camera is live only if its agent has checked in recently; the TTL
       // sweep is too coarse to drive the UI on its own.
       online: typeof record.lastSeen === 'number' && now - record.lastSeen < 90,
-      // Both URLs are always returned, but a rendition only exists in S3 while
-      // some viewer has asked for it via /api/watch.
+      // Every URL is returned, but a rendition only exists in S3 while some
+      // viewer has asked for it via /api/watch. The player picks `source` when
+      // it can decode sourceCodec and `h264` otherwise.
       profiles: record.profiles ?? ['sub'],
+      sourceCodec: record.sourceCodec ?? 'h264',
       manifestUrl: {
         sub: `/live/${record.thingName}/${record.cameraId}/sub/index.m3u8`,
         main: `/live/${record.thingName}/${record.cameraId}/main/index.m3u8`,
+        subH264: `/live/${record.thingName}/${record.cameraId}/sub-h264/index.m3u8`,
+        mainH264: `/live/${record.thingName}/${record.cameraId}/main-h264/index.m3u8`,
       },
     };
   });

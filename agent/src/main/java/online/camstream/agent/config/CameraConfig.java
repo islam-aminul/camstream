@@ -27,6 +27,34 @@ public final class CameraConfig {
     public String mainStreamUrl;
 
     /**
+     * Hardware encoder used when a viewer's browser cannot decode this
+     * camera's native codec. Only consulted for transcoded renditions; the
+     * default publishes the camera's own bytes untouched.
+     *
+     * One of: copy, vaapi, nvenc, v4l2m2m, qsv, amf, videotoolbox, custom.
+     */
+    public String encoder = "copy";
+
+    /** Render node for vaapi, e.g. /dev/dri/renderD128. */
+    public String encoderDevice;
+
+    /** Target bitrate for transcoded output. Defaults to 2000. */
+    public Integer encoderBitrateKbps;
+
+    /** Optional downscale, e.g. 720. Null keeps the source resolution. */
+    public Integer encoderMaxHeight;
+
+    /** Verbatim ffmpeg output arguments; required when encoder is "custom". */
+    public java.util.List<String> encoderArgs;
+
+    /**
+     * Video codec the camera actually produces, filled in by discovery or
+     * probing. Reported upward so the control plane can decide whether a given
+     * browser needs a transcode at all.
+     */
+    public String sourceCodec;
+
+    /**
      * RTSP lower transport: "tcp" or "udp".
      *
      * TCP by default — on a congested site network UDP packet loss produces
@@ -61,6 +89,8 @@ public final class CameraConfig {
                 throw new IllegalArgumentException("camera " + id + " " + profile.key() + " url must be rtsp://");
             }
         }
+        // Throws with the valid set if the name is unknown.
+        online.camstream.agent.media.EncoderProfile.fromKey(encoder);
         if (rtspTransport == null || !rtspTransport.matches("tcp|udp")) {
             throw new IllegalArgumentException(
                     "camera " + id + " rtspTransport must be \"tcp\" or \"udp\", got: " + rtspTransport);
