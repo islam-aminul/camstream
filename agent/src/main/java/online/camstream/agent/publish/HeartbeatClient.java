@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import online.camstream.agent.config.AgentConfig;
 import online.camstream.agent.config.CameraConfig;
+import online.camstream.agent.control.CameraRegistry;
 import online.camstream.agent.config.StreamProfile;
 import online.camstream.agent.credentials.CredentialEnvelope;
 import online.camstream.agent.credentials.CredentialStore;
@@ -53,6 +54,8 @@ public final class HeartbeatClient {
     private final java.util.function.Supplier<List<DiscoveredCamera>> discovered;
     private final CredentialEnvelope envelope;
     private final CredentialStore credentialStore;
+    private final CameraRegistry registry;
+    private final java.util.function.Supplier<List<?>> taskHealth;
 
     public HeartbeatClient(
             AgentConfig config,
@@ -60,13 +63,17 @@ public final class HeartbeatClient {
             java.util.function.Supplier<String> publicKey,
             java.util.function.Supplier<List<DiscoveredCamera>> discovered,
             CredentialEnvelope envelope,
-            CredentialStore credentialStore) {
+            CredentialStore credentialStore,
+            CameraRegistry registry,
+            java.util.function.Supplier<List<?>> taskHealth) {
         this.config = config;
         this.credentials = credentials;
         this.publicKey = publicKey;
         this.discovered = discovered;
         this.envelope = envelope;
         this.credentialStore = credentialStore;
+        this.registry = registry;
+        this.taskHealth = taskHealth;
         String base = config.apiInvokeUrl.endsWith("/")
                 ? config.apiInvokeUrl.substring(0, config.apiInvokeUrl.length() - 1)
                 : config.apiInvokeUrl;
@@ -111,6 +118,7 @@ public final class HeartbeatClient {
                 log.warn("heartbeat rejected: {} {}", response.statusCode(), response.body());
             } else {
                 acceptCredentials(response.body());
+                acceptAssignments(response.body());
             }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
@@ -148,6 +156,37 @@ public final class HeartbeatClient {
         }
     }
 
+    /**
+     * Applies the camera assignments an administrator made. Only identities and
+     * profile tokens arrive — the agent resolves those to credential-bearing
+     * URLs against its own scan, so the control plane never handles either.
+     */
+    private void acceptAssignments(String body) {
+        try {
+            JsonNode assignments = MAPPER.readTree(body).path("approvedCameras");
+            if (!assignments.isArray()) {
+                return;
+            }
+            List<CameraRegistry.Approved> approved = new java.util.ArrayList<>();
+            for (JsonNode node : assignments) {
+                String identity = node.path("identity").asText(null);
+                String cameraId = node.path("cameraId").asText(null);
+                if (identity == null || cameraId == null) {
+                    continue;
+                }
+                approved.add(new CameraRegistry.Approved(
+                        identity,
+                        cameraId,
+                        node.path("displayName").asText(cameraId),
+                        node.path("subProfileToken").asText(null),
+                        node.path("mainProfileToken").asText(null)));
+            }
+            registry.setApproved(approved);
+        } catch (Exception e) {
+            log.warn("could not read camera assignments from the heartbeat response: {}", e.toString());
+        }
+    }
+
     private byte[] buildBody() {
         ObjectNode root = MAPPER.createObjectNode();
         root.put("siteName", config.siteName == null ? config.deviceId : config.siteName);
@@ -156,8 +195,15 @@ public final class HeartbeatClient {
         // device can open.
         root.put("credentialPublicKey", publicKey.get());
 
+        // Task health travels with the heartbeat so an operator can see a stuck
+        // subsystem in the admin UI rather than by reading logs on the box.
+        ArrayNode health = root.putArray("taskHealth");
+        for (Object entry : taskHealth.get()) {
+            health.add(String.valueOf(entry));
+        }
+
         ArrayNode cameras = root.putArray("cameras");
-        for (CameraConfig camera : config.cameras) {
+        for (CameraConfig camera : registry.reportable()) {
             ObjectNode node = cameras.addObject();
             node.put("cameraId", camera.id);
             node.put("displayName", camera.name);

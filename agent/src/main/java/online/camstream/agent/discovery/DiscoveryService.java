@@ -17,7 +17,7 @@ import java.util.Map;
  * URLs — which embed those credentials — stay here; only redacted metadata is
  * ever handed to the caller for reporting upward.
  */
-public final class DiscoveryService {
+public final class DiscoveryService implements CameraSource {
 
     private static final Logger log = LoggerFactory.getLogger(DiscoveryService.class);
 
@@ -46,11 +46,13 @@ public final class DiscoveryService {
     }
 
     /** Everything found in the most recent scan, with credentials stripped. */
+    @Override
     public List<DiscoveredCamera> redactedResults() {
         return lastScan.values().stream().map(DiscoveredCamera::redacted).toList();
     }
 
     /** The usable RTSP URL for a camera profile, or null. Agent-internal. */
+    @Override
     public String streamUrl(String cameraId, String profileToken) {
         DiscoveredCamera camera = lastScan.get(cameraId);
         if (camera == null) {

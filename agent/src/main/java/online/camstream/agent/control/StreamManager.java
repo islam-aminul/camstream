@@ -17,7 +17,6 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Comparator;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -48,7 +47,7 @@ public final class StreamManager implements AutoCloseable {
     private final AgentConfig config;
     private final S3Client s3;
     private final Path workRoot;
-    private final Map<String, CameraConfig> camerasById = new HashMap<>();
+    private final CameraRegistry registry;
     private final Map<Rendition, Pipeline> active = new ConcurrentHashMap<>();
     private final Map<Rendition, Backoff> backoffs = new ConcurrentHashMap<>();
     private final Map<Rendition, Instant> retryAfter = new ConcurrentHashMap<>();
@@ -57,13 +56,11 @@ public final class StreamManager implements AutoCloseable {
 
     private volatile Instant lastInstruction = Instant.now();
 
-    public StreamManager(AgentConfig config, S3Client s3) throws IOException {
+    public StreamManager(AgentConfig config, S3Client s3, CameraRegistry registry) throws IOException {
         this.config = config;
         this.s3 = s3;
+        this.registry = registry;
         this.workRoot = Files.createTempDirectory("camstream-");
-        for (CameraConfig camera : config.cameras) {
-            camerasById.put(camera.id, camera);
-        }
     }
 
     /** Applies a desired state received from the control plane. */
@@ -147,7 +144,7 @@ public final class StreamManager implements AutoCloseable {
                 continue;
             }
 
-            CameraConfig camera = camerasById.get(cameraId);
+            CameraConfig camera = registry.get(cameraId);
             if (camera == null) {
                 continue;
             }
@@ -178,7 +175,7 @@ public final class StreamManager implements AutoCloseable {
     }
 
     private void start(Rendition rendition) {
-        CameraConfig camera = camerasById.get(rendition.cameraId());
+        CameraConfig camera = registry.get(rendition.cameraId());
         if (camera == null) {
             log.warn("ignoring request for unknown camera {}", rendition.cameraId());
             return;

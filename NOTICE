@@ -1,0 +1,29 @@
+CamStream
+Copyright 2026 CamStream contributors
+
+This product includes software developed by third parties, all under permissive
+licences. See docs/licensing.md for the audited inventory.
+
+  Apache License 2.0
+    AWS SDK for Java v2            Copyright Amazon.com, Inc.
+    AWS IoT Device SDK v2 / CRT    Copyright Amazon.com, Inc.
+    Jackson                        Copyright FasterXML, LLC
+    SnakeYAML                      Copyright the SnakeYAML contributors
+    hls.js                         Copyright Dailymotion
+    amazon-cognito-identity-js     Copyright Amazon.com, Inc.
+    AWS CDK                        Copyright Amazon.com, Inc.
+
+  MIT
+    SLF4J                          Copyright QOS.ch
+    React, React DOM               Copyright Meta Platforms, Inc.
+    Vite                           Copyright Evan You and contributors
+    WinSW (Windows installer only, fetched at install time, not redistributed)
+
+  MIT-0
+    reactive-streams               Copyright the Reactive Streams contributors
+
+NOT DISTRIBUTED WITH THIS SOFTWARE
+  FFmpeg is invoked as a separate process and is never bundled. CamStream
+  stream-copies and requires no GPL codec, so an LGPL-2.1+ build configured
+  without --enable-gpl, --enable-nonfree, libx264 or libx265 is sufficient.
+  Run scripts/check-ffmpeg-license.sh to verify a build before shipping it.

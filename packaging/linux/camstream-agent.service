@@ -1,0 +1,43 @@
+[Unit]
+Description=CamStream edge ingestion agent
+Documentation=https://github.com/islam-aminul/camstream
+# Discovery and RTSP both need the network genuinely up, not merely configured.
+After=network-online.target
+Wants=network-online.target
+# Belongs in [Unit], not [Service]: never give up restarting, since an
+# unattended box has nobody to run `systemctl reset-failed`.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=camstream
+Group=camstream
+WorkingDirectory=/var/lib/camstream
+ExecStart=/usr/bin/java -XX:MaxRAMPercentage=50 -jar /opt/camstream/camstream-agent.jar /etc/camstream/agent.yaml
+
+# A camera outage must not become an agent outage. The agent already retries
+# internally; this covers the process dying outright.
+Restart=always
+RestartSec=10s
+
+# Logs go to the journal — use `journalctl -u camstream-agent -f`.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=camstream-agent
+
+# The agent needs outbound network and its own state directory, nothing else.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/camstream
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+# ffmpeg and ffprobe are spawned as children, so no exec restriction here.
+
+[Install]
+WantedBy=multi-user.target

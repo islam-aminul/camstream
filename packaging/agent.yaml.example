@@ -1,0 +1,55 @@
+# CamStreamAgent configuration.
+#
+# Written by scripts/provision-device.sh; the values below are placeholders.
+# This file holds camera credentials — keep it readable only by the service
+# account (the installers set that up).
+
+tenantId: acme
+deviceId: site-01
+siteName: "Reception"
+region: ap-south-1
+
+bucket: camstream-live-000000000000
+# Direct API Gateway endpoint. Not the CloudFront domain: SigV4 signs the Host
+# header and CloudFront rewrites it, which would break every signature.
+apiInvokeUrl: https://xxxxxxxxxx.execute-api.ap-south-1.amazonaws.com
+
+iotCredentialsEndpoint: xxxxxxxxxxxxxx.credentials.iot.ap-south-1.amazonaws.com
+iotDataEndpoint: xxxxxxxxxxxxxx-ats.iot.ap-south-1.amazonaws.com
+roleAlias: camstream-device
+
+keystorePath: /var/lib/camstream/device.p12
+keystorePassword: "replace-me"
+certificatePath: /var/lib/camstream/device.crt
+privateKeyPath: /var/lib/camstream/device.key
+credentialKeyPath: /var/lib/camstream/credential-key.pem
+
+# 2s segments give roughly 5s of latency. Raising this halves the S3 request
+# bill for roughly double the delay.
+segmentDurationMs: 2000
+playlistWindow: 4
+idleShutdownSeconds: 30
+
+discoveryEnabled: true
+discoveryIntervalMinutes: 30
+# 0 scans whatever the interface netmask covers, which is usually correct.
+discoveryMaxHosts: 0
+
+# Tried against discovered cameras. These stay on this machine; anything entered
+# in the admin UI arrives encrypted for this device instead.
+cameraCredentials: []
+#  - username: admin
+#    password: "..."
+
+# Cameras may also be approved centrally in the admin UI, in which case the
+# agent resolves their stream URLs from its own discovery results and this list
+# can stay empty.
+cameras: []
+#  - id: front-door
+#    name: Front Door
+#    rtspTransport: tcp
+#    subStreamUrl: rtsp://192.168.1.64:554/Streaming/Channels/102
+#    mainStreamUrl: rtsp://192.168.1.64:554/Streaming/Channels/101
+#    # Only needed when the camera emits H.265 and some viewers cannot decode it.
+#    # One of: vaapi, nvenc, v4l2m2m, qsv, amf. Never libx264 — see docs/licensing.md.
+#    encoder: copy

@@ -63,6 +63,41 @@ npx cdk deploy CamStreamApp                  # 3. everything else
 cd .. && ./scripts/deploy-web.sh             # 4. the player
 ```
 
+## Installing an agent
+
+`packaging/build-dist.sh` produces a bundle per platform under `dist/`. Each
+carries the jar, the installer, a config template, and the licence notices.
+
+```bash
+./packaging/build-dist.sh
+```
+
+**Linux** (systemd, the primary target):
+
+```bash
+tar -xzf camstream-agent-0.1.0-linux.tar.gz
+sudo ./install.sh /path/to/agent.yaml     # journalctl -u camstream-agent -f
+```
+
+Runs as an unprivileged `camstream` user under a hardened unit —
+`ProtectSystem=strict`, `NoNewPrivileges`, writable only in its own state
+directory. Restarts forever, because an unattended box has nobody to run
+`systemctl reset-failed`.
+
+**Windows**: `install.ps1` from an elevated prompt. Java cannot answer the
+Service Control Manager itself, so one of two mechanisms is used — WinSW (MIT,
+fetched at install time, a real service with log rolling) or, with
+`-UseScheduledTask`, a boot-time scheduled task running as SYSTEM. The task
+route needs no external dependency but is not visible in `services.msc`.
+
+**macOS**: a launchd plist is provided for development; it is not a supported
+production target.
+
+Reinstalling upgrades the jar and restarts the service, leaving configuration
+and device identity alone. `uninstall.sh --purge` / `uninstall.ps1 -Purge`
+removes those too — which destroys the credential key, so camera credentials
+must then be re-entered.
+
 ## Adding a site
 
 ```bash
