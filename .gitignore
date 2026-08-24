@@ -1,0 +1,31 @@
+# Node
+node_modules/
+dist/
+*.tsbuildinfo
+
+# CDK
+infra/cdk.out/
+infra/.cdk.staging/
+
+# Java
+agent/target/
+*.class
+
+# Secrets & keys — never commit
+*.pem
+!infra/keys/*public*.pem
+certs/
+.env
+.env.*
+!.env.example
+
+# Local
+.DS_Store
+*.log
+scratch/
+
+# Enrolled device identities — private keys, never commit
+devices/
+
+# Local scratch: account id is resolved from credentials at deploy time
+aws-account

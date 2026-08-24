@@ -1,0 +1,153 @@
+package online.camstream.agent.config;
+
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
+
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
+
+/**
+ * Agent configuration, loaded from YAML.
+ *
+ * Anything secret (the device private key) is referenced by path rather than
+ * inlined, so the config file itself is safe to keep in configuration
+ * management.
+ */
+@JsonIgnoreProperties(ignoreUnknown = true)
+public final class AgentConfig {
+
+    /** Tenant this device belongs to; must match the tenant half of the thing name. */
+    public String tenantId;
+
+    /** Device half of the thing name. Thing name is {@code <tenantId>--<deviceId>}. */
+    public String deviceId;
+
+    /** Friendly site label, reported on heartbeat. */
+    public String siteName;
+
+    public String region = "ap-south-1";
+
+    /** Bucket receiving HLS output. */
+    public String bucket;
+
+    /** IoT credentials endpoint, e.g. c2xxxxxxxxxxxx.credentials.iot.ap-south-1.amazonaws.com */
+    public String iotCredentialsEndpoint;
+
+    /** IoT role alias exchanged for temporary AWS credentials. */
+    public String roleAlias = "camstream-device";
+
+    /**
+     * PKCS#12 keystore holding the device certificate and private key, used by
+     * JSSE for the HTTPS call to the IoT credentials endpoint.
+     */
+    public String keystorePath;
+    public String keystorePassword;
+
+    /**
+     * The same identity in PEM form. The MQTT client is the AWS CRT, which
+     * reads PEM rather than a Java keystore.
+     */
+    public String certificatePath;
+    public String privateKeyPath;
+
+    /**
+     * Direct API Gateway endpoint, e.g. https://abc123.execute-api.ap-south-1.amazonaws.com
+     *
+     * Deliberately not the CloudFront domain: SigV4 signs the Host header, and
+     * CloudFront rewrites Host to the origin, which would invalidate every
+     * signature. Agents therefore bypass the CDN for control-plane calls.
+     */
+    public String apiInvokeUrl;
+
+    /** IoT Core data endpoint used to receive watch commands over MQTT. */
+    public String iotDataEndpoint;
+
+    /**
+     * Target segment duration in milliseconds.
+     *
+     * This is the main cost/latency dial. Each segment costs two S3 PUTs (the
+     * media file and the rewritten playlist), so halving the duration doubles
+     * the request bill. 2s lands around 5s of glass-to-glass latency; 4s halves
+     * request cost for roughly double the delay.
+     */
+    public int segmentDurationMs = 2000;
+
+    /** Segments kept in the live playlist window. */
+    public int playlistWindow = 4;
+
+    /**
+     * Stop publishing a rendition this long after the last viewer keepalive.
+     * Nothing is published — and nothing is billed — while no one is watching.
+     */
+    public int idleShutdownSeconds = 30;
+
+    public String ffmpegPath = "ffmpeg";
+    public String ffprobePath = "ffprobe";
+
+    public List<CameraConfig> cameras = new ArrayList<>();
+
+    public static AgentConfig load(Path path) throws IOException {
+        ObjectMapper mapper = new ObjectMapper(new YAMLFactory());
+        AgentConfig config = mapper.readValue(Files.readString(path), AgentConfig.class);
+        config.validate();
+        return config;
+    }
+
+    public String thingName() {
+        return tenantId + "--" + deviceId;
+    }
+
+    /** S3 key prefix this device is allowed to write beneath. */
+    public String keyPrefix() {
+        return "live/" + thingName() + "/";
+    }
+
+    public void validate() {
+        requireId("tenantId", tenantId);
+        requireId("deviceId", deviceId);
+        require("bucket", bucket);
+        require("iotCredentialsEndpoint", iotCredentialsEndpoint);
+        require("keystorePath", keystorePath);
+        require("certificatePath", certificatePath);
+        require("privateKeyPath", privateKeyPath);
+        require("apiInvokeUrl", apiInvokeUrl);
+        require("iotDataEndpoint", iotDataEndpoint);
+
+        if (segmentDurationMs < 500 || segmentDurationMs > 10_000) {
+            throw new IllegalArgumentException("segmentDurationMs must be between 500 and 10000");
+        }
+        if (playlistWindow < 3 || playlistWindow > 12) {
+            throw new IllegalArgumentException("playlistWindow must be between 3 and 12");
+        }
+        if (idleShutdownSeconds < 10 || idleShutdownSeconds > 600) {
+            throw new IllegalArgumentException("idleShutdownSeconds must be between 10 and 600");
+        }
+        if (cameras.isEmpty()) {
+            throw new IllegalArgumentException("no cameras configured");
+        }
+        for (CameraConfig camera : cameras) {
+            camera.validate();
+        }
+        long distinct = cameras.stream().map(c -> c.id).distinct().count();
+        if (distinct != cameras.size()) {
+            throw new IllegalArgumentException("duplicate camera ids in configuration");
+        }
+    }
+
+    private static void require(String field, String value) {
+        if (value == null || value.isBlank()) {
+            throw new IllegalArgumentException("missing required config field: " + field);
+        }
+    }
+
+    private static void requireId(String field, String value) {
+        require(field, value);
+        if (!value.matches("[a-z0-9]+(-[a-z0-9]+)*") || value.contains("--") || value.length() < 3 || value.length() > 32) {
+            throw new IllegalArgumentException(field + " must be 3-32 chars of [a-z0-9-] and must not contain '--'");
+        }
+    }
+}
