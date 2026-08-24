@@ -10,7 +10,7 @@ export interface Camera {
   profiles: string[];
   /** Codec the camera emits natively. */
   sourceCodec: string;
-  manifestUrl: { sub: string; main: string; subH264: string; mainH264: string };
+  manifestUrl: { sub: string; main: string; subH264: string; mainH264: string; master: string };
 }
 
 /**
@@ -20,7 +20,11 @@ export interface Camera {
 export function manifestFor(camera: Camera, profile: 'sub' | 'main'): string {
   const native = supports(camera.sourceCodec ?? 'h264');
   if (profile === 'main') {
-    return native ? camera.manifestUrl.main : camera.manifestUrl.mainH264;
+    // The master playlist exists only while both rungs are publishing, which
+    // is exactly what opening the camera causes — so the detail view can take
+    // the ladder and drop to the sub stream on a poor connection.
+    // Transcoded viewers have no ladder: only one rendition is encoded for them.
+    return native ? camera.manifestUrl.master : camera.manifestUrl.mainH264;
   }
   return native ? camera.manifestUrl.sub : camera.manifestUrl.subH264;
 }

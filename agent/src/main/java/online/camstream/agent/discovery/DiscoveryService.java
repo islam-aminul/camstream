@@ -9,7 +9,6 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.function.Supplier;
 
 /**
  * Finds cameras on the local network and works out how to stream from them.
@@ -25,7 +24,8 @@ public final class DiscoveryService {
     private final OnvifClient onvif = new OnvifClient();
     private final RtspProbe rtspProbe;
     private final RtspPathGuesser pathGuesser;
-    private final Supplier<List<Credential>> credentials;
+    /** Credentials to try for a given camera identity, most specific first. */
+    private final java.util.function.Function<String, List<Credential>> credentials;
     private final String rtspTransport;
     private final int maxHosts;
 
@@ -37,7 +37,7 @@ public final class DiscoveryService {
             String rtspTransport,
             List<String> rtspPaths,
             int maxHosts,
-            Supplier<List<Credential>> credentials) {
+            java.util.function.Function<String, List<Credential>> credentials) {
         this.rtspProbe = new RtspProbe(ffprobePath);
         this.rtspTransport = rtspTransport;
         this.maxHosts = maxHosts;
@@ -104,9 +104,11 @@ public final class DiscoveryService {
         }
 
         for (DiscoveredCamera camera : found.values()) {
+            // Identity first, from whatever is already known, so that
+            // per-camera credentials can be selected before authenticating.
+            // Interrogation may then upgrade it once a serial number appears.
+            assignIdentity(camera);
             interrogate(camera);
-            // Assigned after interrogation: the ONVIF serial number is the best
-            // identity available and is only known once the device has answered.
             assignIdentity(camera);
         }
 
@@ -144,18 +146,27 @@ public final class DiscoveryService {
             return;
         }
 
-        List<Credential> toTry = new ArrayList<>(credentials.get());
-        // An anonymous attempt first: some cameras expose GetDeviceInformation
-        // without auth, which identifies the device even when the operator has
-        // not supplied a credential yet.
-        toTry.add(0, new Credential("", ""));
+        // An anonymous attempt first: many cameras expose GetDeviceInformation
+        // without auth, which yields the serial number — and therefore the
+        // identity this camera's own credential is filed under.
+        List<Credential> toTry = new ArrayList<>();
+        toTry.add(new Credential("", ""));
+        toTry.addAll(credentials.apply(camera.id));
 
         for (Credential credential : toTry) {
             try {
                 onvif.fillDeviceInformation(camera, credential.username(), credential.password());
                 if (credential.username().isEmpty()) {
-                    // Identified, but an anonymous read does not prove we can stream.
+                    // Identified, but an anonymous read does not prove we can
+                    // stream. Re-resolve identity now that the serial is known,
+                    // then retry with any credential filed against it.
                     camera.authState = DiscoveredCamera.AuthState.NEEDS_CREDENTIALS;
+                    assignIdentity(camera);
+                    for (Credential specific : credentials.apply(camera.id)) {
+                        if (!toTry.contains(specific)) {
+                            toTry.add(specific);
+                        }
+                    }
                     continue;
                 }
                 collectProfiles(camera, credential);
@@ -189,7 +200,7 @@ public final class DiscoveryService {
             return;
         }
         Map<String, DiscoveredCamera.DiscoveredProfile> guessed =
-                pathGuesser.guess(camera.ipAddress, camera.rtspPorts, credentials.get());
+                pathGuesser.guess(camera.ipAddress, camera.rtspPorts, credentials.apply(camera.id));
         if (guessed.isEmpty()) {
             camera.authState = DiscoveredCamera.AuthState.NEEDS_CREDENTIALS;
             camera.note = "RTSP port open but no known stream path responded";

@@ -1,0 +1,84 @@
+/**
+ * Registry key layout.
+ *
+ *   TENANT#<t>  DEVICE#<thingName>              an enrolled agent
+ *   TENANT#<t>  DISCOVERED#<identity>           a physical camera, as seen by any agent
+ *   TENANT#<t>  CAMERA#<identity>               a camera an administrator approved
+ *   TENANT#<t>  DEMAND#<sessionId>              what one viewer currently wants
+ *   TENANT#<t>  CREDENTIAL#<thingName>#<scope>  ciphertext only this agent can open
+ *   USER#<sub>  SESSION                         the account's single live session
+ *
+ * Discovered cameras are keyed by the camera's own identity rather than by the
+ * agent that found it. A premises large enough to need several agents will have
+ * overlapping scan ranges, and the same camera seen twice must merge into one
+ * record — otherwise it is approved twice, published twice, and billed twice.
+ */
+
+export const key = {
+  device: (thingName: string) => `DEVICE#${thingName}`,
+  discovered: (identity: string) => `DISCOVERED#${identity}`,
+  camera: (identity: string) => `CAMERA#${identity}`,
+  demand: (sessionId: string) => `DEMAND#${sessionId}`,
+  credential: (thingName: string, scope: string) => `CREDENTIAL#${thingName}#${scope}`,
+  tenant: (tenantId: string) => `TENANT#${tenantId}`,
+};
+
+/** How one agent sees a camera. A camera may be reachable from several. */
+export interface Sighting {
+  ipAddress: string;
+  authState: string;
+  lastSeen: number;
+  profiles: DiscoveredProfile[];
+}
+
+export interface DiscoveredProfile {
+  token: string;
+  name?: string;
+  codec?: string;
+  width?: number;
+  height?: number;
+  fps?: number;
+}
+
+export interface DiscoveredRecord {
+  pk: string;
+  sk: string;
+  identity: string;
+  identityStable: boolean;
+  macAddress?: string;
+  manufacturer?: string;
+  model?: string;
+  firmware?: string;
+  /** thingName -> how that agent sees it. */
+  reachableBy: Record<string, Sighting>;
+  lastSeen: number;
+  expiresAt: number;
+}
+
+export interface CameraRecord {
+  pk: string;
+  sk: string;
+  identity: string;
+  /** URL-safe slug used in S3 keys and manifest paths. */
+  cameraId: string;
+  displayName: string;
+  /**
+   * The single agent responsible for publishing this camera. Ownership is
+   * explicit because several agents may be able to reach it, and more than one
+   * publishing the same camera would double both cost and confusion.
+   */
+  assignedTo: string;
+  subProfileToken?: string;
+  mainProfileToken?: string;
+  sourceCodec?: string;
+  approvedAt: number;
+  approvedBy: string;
+}
+
+/** Slug derived from an identity, safe for S3 keys and CloudFront paths. */
+export function slugFor(identity: string): string {
+  const slug = identity.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+  // Must satisfy the same rule as configured camera ids: 3-32 chars, no '--'.
+  const collapsed = slug.replace(/-{2,}/g, '-');
+  return collapsed.slice(0, 32).padEnd(3, '0');
+}

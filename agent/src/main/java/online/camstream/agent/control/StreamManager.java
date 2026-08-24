@@ -4,6 +4,7 @@ import online.camstream.agent.config.AgentConfig;
 import online.camstream.agent.config.CameraConfig;
 import online.camstream.agent.media.FfmpegHls;
 import online.camstream.agent.publish.HlsPublisher;
+import online.camstream.agent.publish.MasterPlaylist;
 import online.camstream.agent.supervise.Backoff;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -17,10 +18,12 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 /**
@@ -49,6 +52,8 @@ public final class StreamManager implements AutoCloseable {
     private final Map<Rendition, Pipeline> active = new ConcurrentHashMap<>();
     private final Map<Rendition, Backoff> backoffs = new ConcurrentHashMap<>();
     private final Map<Rendition, Instant> retryAfter = new ConcurrentHashMap<>();
+    /** cameraId -> the rendition set the current master playlist describes. */
+    private final Map<String, String> publishedLadders = new ConcurrentHashMap<>();
 
     private volatile Instant lastInstruction = Instant.now();
 
@@ -94,6 +99,8 @@ public final class StreamManager implements AutoCloseable {
             return;
         }
 
+        publishMasterPlaylists();
+
         for (Map.Entry<Rendition, Pipeline> entry : active.entrySet()) {
             Pipeline pipeline = entry.getValue();
             pipeline.publisher().sync();
@@ -119,6 +126,55 @@ public final class StreamManager implements AutoCloseable {
                 start(entry.getKey());
             }
         }
+    }
+
+    /**
+     * Offers an ABR ladder for any camera currently publishing more than one
+     * rendition — in practice the camera a viewer has opened. Written only when
+     * the set changes, since it is a small object on the no-cache path.
+     */
+    private void publishMasterPlaylists() {
+        Map<String, List<Rendition>> byCamera = new java.util.HashMap<>();
+        for (Rendition rendition : active.keySet()) {
+            byCamera.computeIfAbsent(rendition.cameraId(), id -> new java.util.ArrayList<>()).add(rendition);
+        }
+
+        for (Map.Entry<String, List<Rendition>> entry : byCamera.entrySet()) {
+            String cameraId = entry.getKey();
+            List<Rendition> renditions = entry.getValue();
+            String signature = renditions.stream().map(Rendition::toString).sorted().collect(Collectors.joining(","));
+            if (signature.equals(publishedLadders.get(cameraId))) {
+                continue;
+            }
+
+            CameraConfig camera = camerasById.get(cameraId);
+            if (camera == null) {
+                continue;
+            }
+            List<MasterPlaylist.Rung> rungs = new java.util.ArrayList<>();
+            for (Rendition rendition : renditions) {
+                Integer width = camera.widthFor(rendition.profile());
+                Integer height = camera.heightFor(rendition.profile());
+                if (width == null || height == null) {
+                    continue;
+                }
+                rungs.add(new MasterPlaylist.Rung(
+                        rendition.profile(),
+                        // Relative to the camera prefix, where master.m3u8 sits.
+                        rendition.keySuffix().substring(cameraId.length() + 1) + "index.m3u8",
+                        width, height,
+                        MasterPlaylist.estimateBandwidth(width, height, camera.bitrateFor(rendition.profile())),
+                        camera.sourceCodec));
+            }
+
+            if (MasterPlaylist.publish(s3, config.bucket, config.keyPrefix() + cameraId + "/", rungs)) {
+                publishedLadders.put(cameraId, signature);
+                log.info("[{}] published an ABR ladder with {} rungs", cameraId, rungs.size());
+            } else {
+                publishedLadders.remove(cameraId);
+            }
+        }
+        publishedLadders.keySet().removeIf(cameraId -> !byCamera.containsKey(cameraId));
     }
 
     private void start(Rendition rendition) {

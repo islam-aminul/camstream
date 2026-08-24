@@ -48,6 +48,18 @@ public final class CameraConfig {
     public java.util.List<String> encoderArgs;
 
     /**
+     * Rendition dimensions, filled in by discovery. Used only to describe the
+     * ABR ladder; playback works without them, it just cannot advertise
+     * resolutions.
+     */
+    public Integer subWidth;
+    public Integer subHeight;
+    public Integer subBitrateKbps;
+    public Integer mainWidth;
+    public Integer mainHeight;
+    public Integer mainBitrateKbps;
+
+    /**
      * Video codec the camera actually produces, filled in by discovery or
      * probing. Reported upward so the control plane can decide whether a given
      * browser needs a transcode at all.
@@ -65,6 +77,18 @@ public final class CameraConfig {
 
     public String urlFor(StreamProfile profile) {
         return profile == StreamProfile.MAIN ? mainStreamUrl : subStreamUrl;
+    }
+
+    public Integer widthFor(StreamProfile profile) {
+        return profile == StreamProfile.MAIN ? mainWidth : subWidth;
+    }
+
+    public Integer heightFor(StreamProfile profile) {
+        return profile == StreamProfile.MAIN ? mainHeight : subHeight;
+    }
+
+    public Integer bitrateFor(StreamProfile profile) {
+        return profile == StreamProfile.MAIN ? mainBitrateKbps : subBitrateKbps;
     }
 
     public boolean supports(StreamProfile profile) {

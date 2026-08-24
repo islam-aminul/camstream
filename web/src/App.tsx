@@ -2,6 +2,8 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Player } from './Player';
 import { SessionSuperseded, listCameras, manifestFor, startSession, watch, type Camera, type SessionInfo } from './api';
 import { NewPasswordRequired, completeNewPassword, currentSession, signIn, signOut } from './auth';
+import { Admin } from './Admin';
+import { isAdmin } from './admin';
 import type { CognitoUser } from 'amazon-cognito-identity-js';
 
 type Screen = 'loading' | 'login' | 'newPassword' | 'live';
@@ -13,6 +15,8 @@ export default function App() {
   const [selected, setSelected] = useState<Camera | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [pendingUser, setPendingUser] = useState<CognitoUser | null>(null);
+  const [admin, setAdmin] = useState(false);
+  const [showAdmin, setShowAdmin] = useState(false);
 
   // Read by the keepalive timer, which must not restart every time the
   // selection changes.
@@ -24,6 +28,8 @@ export default function App() {
     setSession(null);
     setCameras([]);
     setSelected(null);
+    setAdmin(false);
+    setShowAdmin(false);
     setNotice(message);
     setScreen('login');
   }, []);
@@ -31,6 +37,7 @@ export default function App() {
   const beginSession = useCallback(async () => {
     const info = await startSession();
     setSession(info);
+    setAdmin(await isAdmin());
     setScreen('live');
     setNotice(info.displacedPreviousSession ? 'Your previous session was signed out.' : null);
   }, []);
@@ -106,6 +113,12 @@ export default function App() {
 
   if (screen === 'loading') return <div className="centre">Loading…</div>;
 
+  // Admin work continues to hold the session and keepalive above, so agents
+  // keep publishing while an administrator is configuring them.
+  if (screen === 'live' && showAdmin) {
+    return <Admin onExit={() => setShowAdmin(false)} />;
+  }
+
   if (screen === 'login' || screen === 'newPassword') {
     return (
       <LoginScreen
@@ -141,6 +154,7 @@ export default function App() {
         <h1>CamStream</h1>
         <div className="header-right">
           {session && <span className="tenant">{session.tenantId}</span>}
+          {admin && <button onClick={() => setShowAdmin(true)}>Administration</button>}
           <button onClick={() => void endSession(null)}>Sign out</button>
         </div>
       </header>
