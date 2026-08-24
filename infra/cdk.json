@@ -1,0 +1,33 @@
+{
+  "app": "npx ts-node --prefer-ts-exts bin/camstream.ts",
+  "watch": {
+    "include": [
+      "**"
+    ],
+    "exclude": [
+      "README.md",
+      "cdk*.json",
+      "**/*.d.ts",
+      "**/*.js",
+      "tsconfig.json",
+      "package*.json",
+      "node_modules"
+    ]
+  },
+  "context": {
+    "camstream:primaryRegion": "ap-south-1",
+    "camstream:edgeRegion": "us-east-1",
+    "camstream:domainName": "camstream.online",
+    "camstream:segmentTtlDays": 1,
+    "@aws-cdk/aws-lambda:recognizeLayerVersion": true,
+    "@aws-cdk/core:checkSecretUsage": true,
+    "@aws-cdk/aws-iam:minimizePolicies": true,
+    "@aws-cdk/core:validateSnapshotRemovalPolicy": true,
+    "@aws-cdk/aws-s3:createDefaultLoggingPolicy": true,
+    "@aws-cdk/aws-cloudfront:useOriginAccessControl": true,
+    "@aws-cdk/core:enablePartitionLiterals": true,
+    "@aws-cdk/core:newStyleStackSynthesis": true,
+    "@aws-cdk/core:defaultCrossStackReferences": "strong",
+    "@aws-cdk/customresources:installLatestAwsSdkDefault": false
+  }
+}

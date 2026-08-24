@@ -1,0 +1,5 @@
+{
+  "userPoolId": "REPLACED_AT_DEPLOY",
+  "userPoolClientId": "REPLACED_AT_DEPLOY",
+  "region": "ap-south-1"
+}
