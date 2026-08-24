@@ -90,6 +90,48 @@ java -jar agent/target/camstream-agent.jar devices/<thing>/agent.yaml
 VLC 3's RTSP server speaks UDP only, so the simulated camera needs
 `rtspTransport: udp`. Real cameras should stay on the `tcp` default.
 
+## Camera discovery
+
+Agents scan their own LAN and report what they find; an administrator decides
+what becomes a camera. Two passes, because neither alone is sufficient:
+
+1. **ONVIF WS-Discovery** — a multicast probe. Fast, needs no credentials, and
+   returns the device's real service URL. Cheaper cameras ignore it.
+2. **TCP sweep** of the agent's own subnets for ONVIF and RTSP ports. Capped at
+   a /22 and 1024 hosts: a surveillance LAN is never larger, and an agent
+   quietly sweeping a corporate /16 is indistinguishable from an intruder.
+
+Each candidate is interrogated over ONVIF for its model, media profiles and
+stream URIs, and every stream is confirmed with `ffprobe`. ONVIF's advertised
+encoding is regularly wrong — a profile labelled H264 may deliver H.265 after a
+firmware update — and the codec decides whether viewers need a transcode, so the
+stream is asked rather than believed.
+
+## Camera credentials
+
+RTSP credentials are keys to the customer's premises, and the cloud never holds
+a readable copy.
+
+On first run an agent generates an RSA keypair, separate from its IoT
+certificate, and publishes only the public half via heartbeat. The admin UI
+encrypts a credential in the browser with WebCrypto RSA-OAEP against that
+device's key; the control plane stores and relays opaque ciphertext; the agent
+decrypts it with a private key that never leaves the edge box.
+
+| Cloud may hold | Cloud never holds |
+|---|---|
+| IP, MAC, manufacturer, model, firmware | username, password |
+| ONVIF/RTSP ports, media profiles, codec | RTSP URLs, which embed credentials |
+| auth state: needs-credentials / authenticated | anything decryptable by the operator |
+
+`DiscoveredCamera.redacted()` enforces the right-hand column, dropping the
+stream URLs before anything is reported upward.
+
+Two consequences, both deliberate: **there is no credential recovery** — replace
+an agent and the credentials are re-entered — and a bug in the admin UI cannot
+leak them, because plaintext exists only in the admin's browser tab and on the
+edge box.
+
 ## Adding a viewer
 
 ```bash
@@ -115,6 +157,10 @@ A user sees every camera belonging to their tenant, and no others.
   stream-copies, so it can only cut a segment on a keyframe. A camera set to a
   4s GOP will silently produce 4s segments and roughly double the latency,
   whatever the config says.
+- **Everything long-running is supervised.** Publishing, heartbeats and
+  discovery are registered with `Supervisor` rather than scheduled directly: a
+  bare `ScheduledExecutorService` silently cancels a periodic task that throws,
+  which on an unattended box means it stops working and nobody notices.
 - **Agents reach the control plane directly, not through CloudFront.** SigV4
   signs the Host header and CloudFront rewrites it, so `apiInvokeUrl` is the
   API Gateway endpoint. Only browsers go through the CDN.

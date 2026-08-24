@@ -88,6 +88,34 @@ public final class AgentConfig {
     public String ffmpegPath = "ffmpeg";
     public String ffprobePath = "ffprobe";
 
+    /** Scan the local network for cameras. */
+    public boolean discoveryEnabled = true;
+
+    /** Minutes between full sweeps. Cameras rarely appear, so this is slow on purpose. */
+    public int discoveryIntervalMinutes = 30;
+
+    /**
+     * RSA key used to open credentials the admin UI encrypted for this device.
+     * Generated on first run; defaults to sitting beside the keystore.
+     */
+    public String credentialKeyPath;
+
+    /**
+     * Credentials to try against discovered cameras.
+     *
+     * These live on the customer's own hardware, which is the point — the
+     * control plane never receives them. Anything entered through the admin UI
+     * arrives encrypted for this device instead.
+     */
+    public java.util.List<SiteCredential> cameraCredentials = new java.util.ArrayList<>();
+
+    /** A username/password pair to try during discovery. */
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public static final class SiteCredential {
+        public String username;
+        public String password;
+    }
+
     public List<CameraConfig> cameras = new ArrayList<>();
 
     public static AgentConfig load(Path path) throws IOException {
@@ -126,8 +154,19 @@ public final class AgentConfig {
         if (idleShutdownSeconds < 10 || idleShutdownSeconds > 600) {
             throw new IllegalArgumentException("idleShutdownSeconds must be between 10 and 600");
         }
-        if (cameras.isEmpty()) {
-            throw new IllegalArgumentException("no cameras configured");
+        if (discoveryIntervalMinutes < 1 || discoveryIntervalMinutes > 1440) {
+            throw new IllegalArgumentException("discoveryIntervalMinutes must be between 1 and 1440");
+        }
+        if (credentialKeyPath == null || credentialKeyPath.isBlank()) {
+            Path keystore = Path.of(keystorePath);
+            Path parent = keystore.getParent();
+            credentialKeyPath = (parent == null ? Path.of("credential-key.pem")
+                    : parent.resolve("credential-key.pem")).toString();
+        }
+        // An agent may legitimately start with no cameras: discovery finds them
+        // and an administrator approves them afterwards.
+        if (cameras.isEmpty() && !discoveryEnabled) {
+            throw new IllegalArgumentException("no cameras configured and discovery is disabled");
         }
         for (CameraConfig camera : cameras) {
             camera.validate();
