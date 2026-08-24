@@ -61,6 +61,8 @@ public final class Main {
         DiscoveryService discovery = new DiscoveryService(
                 config.ffprobePath,
                 config.cameras.isEmpty() ? "tcp" : config.cameras.get(0).rtspTransport,
+                config.rtspPaths,
+                config.discoveryMaxHosts,
                 credentialStore::all);
 
         try (S3Client s3 = S3Client.builder()

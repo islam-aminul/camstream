@@ -35,7 +35,13 @@ final class PortScanner {
     static final List<Integer> RTSP_PORTS = List.of(554, 8554, 10554);
 
     private static final int CONNECT_TIMEOUT_MS = 400;
-    private static final int MAX_HOSTS = 1024;
+
+    /**
+     * Refuses to enumerate absurd ranges. This is not a policy limit — the
+     * interface netmask decides what gets scanned — it only stops a
+     * misconfigured /8 from trying to materialise 16 million addresses.
+     */
+    private static final int ABSURD_HOST_COUNT = 65_536;
 
     private PortScanner() {
     }
@@ -48,7 +54,15 @@ final class PortScanner {
 
     /** Scans every local IPv4 subnet, returning only hosts with a camera-ish port open. */
     static Map<String, OpenPorts> scan() {
-        List<String> hosts = localHosts();
+        return scan(0);
+    }
+
+    /**
+     * @param maxHosts optional ceiling; 0 means scan whatever the interface
+     *                 netmask covers.
+     */
+    static Map<String, OpenPorts> scan(int maxHosts) {
+        List<String> hosts = localHosts(maxHosts);
         if (hosts.isEmpty()) {
             return Map.of();
         }
@@ -104,8 +118,14 @@ final class PortScanner {
         }
     }
 
-    /** Every IPv4 host address on the agent's own subnets, excluding itself. */
-    static List<String> localHosts() {
+    /**
+     * Every IPv4 host address on the agent's own subnets, excluding itself.
+     *
+     * The range comes from each interface's own netmask. If the site runs a
+     * /16, the cameras are somewhere in that /16 and a smaller sweep would
+     * simply miss them.
+     */
+    static List<String> localHosts(int maxHosts) {
         List<String> hosts = new ArrayList<>();
         for (NetworkInterface nic : WsDiscovery.usableInterfaces()) {
             for (InterfaceAddress address : nic.getInterfaceAddresses()) {
@@ -114,20 +134,28 @@ final class PortScanner {
                     continue;
                 }
                 int prefix = address.getNetworkPrefixLength();
-                if (prefix < 22 || prefix > 30) {
-                    log.debug("skipping {}/{} — outside the scannable range", local.getHostAddress(), prefix);
+                if (prefix <= 0 || prefix > 32) {
                     continue;
                 }
-                hosts.addAll(expand(local, prefix));
-                if (hosts.size() >= MAX_HOSTS) {
-                    return hosts.subList(0, MAX_HOSTS);
+                long size = prefix >= 31 ? 0 : (1L << (32 - prefix)) - 2;
+                if (size <= 0) {
+                    continue;
+                }
+                if (size > ABSURD_HOST_COUNT) {
+                    log.warn("{}/{} covers {} addresses — scanning the first {}; "
+                                    + "narrow the subnet or set discoveryMaxHosts",
+                            local.getHostAddress(), prefix, size, ABSURD_HOST_COUNT);
+                }
+                hosts.addAll(expand(local, prefix, ABSURD_HOST_COUNT));
+                if (maxHosts > 0 && hosts.size() >= maxHosts) {
+                    return hosts.subList(0, maxHosts);
                 }
             }
         }
         return hosts;
     }
 
-    private static List<String> expand(InetAddress local, int prefixLength) {
+    private static List<String> expand(InetAddress local, int prefixLength, int limit) {
         byte[] raw = local.getAddress();
         int address = ((raw[0] & 0xff) << 24) | ((raw[1] & 0xff) << 16) | ((raw[2] & 0xff) << 8) | (raw[3] & 0xff);
         int mask = prefixLength == 0 ? 0 : -1 << (32 - prefixLength);
@@ -135,7 +163,7 @@ final class PortScanner {
         int broadcast = network | ~mask;
 
         List<String> hosts = new ArrayList<>();
-        for (int host = network + 1; host < broadcast; host++) {
+        for (int host = network + 1; host != broadcast && hosts.size() < limit; host++) {
             if (host == address) {
                 continue;
             }

@@ -24,16 +24,25 @@ public final class DiscoveryService {
 
     private final OnvifClient onvif = new OnvifClient();
     private final RtspProbe rtspProbe;
+    private final RtspPathGuesser pathGuesser;
     private final Supplier<List<Credential>> credentials;
     private final String rtspTransport;
+    private final int maxHosts;
 
     /** Last full result, including credential-bearing URLs. Never leaves the agent. */
     private volatile Map<String, DiscoveredCamera> lastScan = Map.of();
 
-    public DiscoveryService(String ffprobePath, String rtspTransport, Supplier<List<Credential>> credentials) {
+    public DiscoveryService(
+            String ffprobePath,
+            String rtspTransport,
+            List<String> rtspPaths,
+            int maxHosts,
+            Supplier<List<Credential>> credentials) {
         this.rtspProbe = new RtspProbe(ffprobePath);
         this.rtspTransport = rtspTransport;
+        this.maxHosts = maxHosts;
         this.credentials = credentials;
+        this.pathGuesser = new RtspPathGuesser(rtspProbe, rtspPaths, rtspTransport);
     }
 
     /** Everything found in the most recent scan, with credentials stripped. */
@@ -66,7 +75,7 @@ public final class DiscoveryService {
         }
 
         // Then sweep for anything that ignored it.
-        for (Map.Entry<String, PortScanner.OpenPorts> entry : PortScanner.scan().entrySet()) {
+        for (Map.Entry<String, PortScanner.OpenPorts> entry : PortScanner.scan(maxHosts).entrySet()) {
             PortScanner.OpenPorts open = entry.getValue();
             DiscoveredCamera camera = found.computeIfAbsent(entry.getKey(), host -> {
                 DiscoveredCamera fresh = new DiscoveredCamera();
@@ -82,9 +91,23 @@ public final class DiscoveryService {
             }
         }
 
+        // The ARP cache is only populated for hosts we have just spoken to,
+        // which is why this runs after the sweep rather than before it.
+        Map<String, String> arp = MacResolver.arpTable();
         for (DiscoveredCamera camera : found.values()) {
-            camera.id = camera.macAddress != null ? camera.macAddress : camera.ipAddress;
+            String mac = arp.get(camera.ipAddress);
+            if (mac == null) {
+                MacResolver.prime(camera.ipAddress);
+                mac = MacResolver.arpTable().get(camera.ipAddress);
+            }
+            camera.macAddress = mac;
+        }
+
+        for (DiscoveredCamera camera : found.values()) {
             interrogate(camera);
+            // Assigned after interrogation: the ONVIF serial number is the best
+            // identity available and is only known once the device has answered.
+            assignIdentity(camera);
         }
 
         lastScan = found;
@@ -94,13 +117,30 @@ public final class DiscoveryService {
         return redactedResults();
     }
 
+    /**
+     * Serial number, then MAC, then IP.
+     *
+     * Falling through to the IP is recorded rather than hidden: that identity
+     * will not survive the next DHCP lease, and an operator approving such a
+     * camera deserves to be told.
+     */
+    private static void assignIdentity(DiscoveredCamera camera) {
+        if (camera.serialNumber != null && !camera.serialNumber.isBlank()) {
+            camera.id = "sn-" + camera.serialNumber.trim().replaceAll("[^A-Za-z0-9._-]", "");
+            camera.identityStable = true;
+        } else if (camera.macAddress != null && !camera.macAddress.isBlank()) {
+            camera.id = "mac-" + camera.macAddress.replace(":", "");
+            camera.identityStable = true;
+        } else {
+            camera.id = "ip-" + camera.ipAddress.replace('.', '-');
+            camera.identityStable = false;
+        }
+    }
+
     /** Tries each known credential until one authenticates. */
     private void interrogate(DiscoveredCamera camera) {
         if (camera.onvifServiceUrl == null) {
-            camera.authState = camera.rtspPorts.isEmpty()
-                    ? DiscoveredCamera.AuthState.UNSUPPORTED
-                    : DiscoveredCamera.AuthState.NEEDS_CREDENTIALS;
-            camera.note = "RTSP port open but no ONVIF service found";
+            guessStreams(camera);
             return;
         }
 
@@ -131,6 +171,33 @@ public final class DiscoveryService {
                 }
             }
         }
+
+        // ONVIF is present but did not yield streams — a very common state for
+        // budget cameras. Fall back to probing known vendor paths.
+        if (camera.profiles.isEmpty()) {
+            guessStreams(camera);
+        }
+    }
+
+    /** Last resort for cameras without a usable ONVIF media service. */
+    private void guessStreams(DiscoveredCamera camera) {
+        if (camera.rtspPorts.isEmpty()) {
+            if (camera.authState == DiscoveredCamera.AuthState.UNKNOWN) {
+                camera.authState = DiscoveredCamera.AuthState.UNSUPPORTED;
+                camera.note = "no ONVIF service and no RTSP port open";
+            }
+            return;
+        }
+        Map<String, DiscoveredCamera.DiscoveredProfile> guessed =
+                pathGuesser.guess(camera.ipAddress, camera.rtspPorts, credentials.get());
+        if (guessed.isEmpty()) {
+            camera.authState = DiscoveredCamera.AuthState.NEEDS_CREDENTIALS;
+            camera.note = "RTSP port open but no known stream path responded";
+            return;
+        }
+        camera.profiles.putAll(guessed);
+        camera.authState = DiscoveredCamera.AuthState.AUTHENTICATED;
+        camera.note = "streams found by probing known vendor paths";
     }
 
     private void collectProfiles(DiscoveredCamera camera, Credential credential) throws Exception {

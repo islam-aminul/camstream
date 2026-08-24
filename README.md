@@ -97,15 +97,37 @@ what becomes a camera. Two passes, because neither alone is sufficient:
 
 1. **ONVIF WS-Discovery** — a multicast probe. Fast, needs no credentials, and
    returns the device's real service URL. Cheaper cameras ignore it.
-2. **TCP sweep** of the agent's own subnets for ONVIF and RTSP ports. Capped at
-   a /22 and 1024 hosts: a surveillance LAN is never larger, and an agent
-   quietly sweeping a corporate /16 is indistinguishable from an intruder.
+2. **TCP sweep** of the agent's own subnets for ONVIF and RTSP ports. The range
+   comes from each interface's netmask — if the site runs a /16, the cameras
+   are somewhere in that /16. `discoveryMaxHosts` caps it if needed; the only
+   built-in limit refuses to enumerate more than 65536 addresses from a single
+   misconfigured interface.
+3. **RTSP path probing** for cameras with no usable ONVIF media service, which
+   is a large share of installed CCTV. Known vendor paths (Hikvision, Dahua,
+   Axis, Reolink, Uniview and generic firmware) are tried and confirmed with
+   `ffprobe` — not by the DESCRIBE status code, since many devices answer 200
+   on a path carrying no media. Override with `rtspPaths`.
 
 Each candidate is interrogated over ONVIF for its model, media profiles and
 stream URIs, and every stream is confirmed with `ffprobe`. ONVIF's advertised
 encoding is regularly wrong — a profile labelled H264 may deliver H.265 after a
 firmware update — and the codec decides whether viewers need a transcode, so the
 stream is asked rather than believed.
+
+### Camera identity
+
+An IP address is a DHCP lease and will move. Identity is therefore taken from
+the first of these that exists:
+
+| Source | Survives |
+|---|---|
+| ONVIF serial number → `sn-…` | re-addressing and NIC replacement |
+| MAC from the ARP cache → `mac-…` | re-addressing |
+| IP address → `ip-…` | nothing |
+
+The fallback is recorded as `identityStable: false` rather than hidden, so the
+admin UI can warn before someone approves a camera whose identity will change at
+the next lease renewal.
 
 ## Camera credentials
 
