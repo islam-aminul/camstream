@@ -14,6 +14,7 @@
     "destroy": "cdk destroy --all"
   },
   "devDependencies": {
+    "@aws-sdk/client-cognito-identity-provider": "^3.1116.0",
     "@aws-sdk/client-dynamodb": "^3.1116.0",
     "@aws-sdk/client-iot": "^3.1116.0",
     "@aws-sdk/client-iot-data-plane": "^3.1116.0",

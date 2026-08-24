@@ -39,6 +39,16 @@ export class Identity extends Construct {
       removalPolicy: RemovalPolicy.DESTROY,
     });
 
+    // Administrator rights are group membership, checked by the admin Lambda.
+    // Kept out of the token's custom attributes deliberately: a group can be
+    // revoked centrally, whereas an attribute rides in every unexpired token.
+    new cognito.CfnUserPoolGroup(this, 'AdminGroup', {
+      userPoolId: this.userPool.userPoolId,
+      groupName: 'admin',
+      description: 'May manage users, agents and cameras within their tenant',
+      precedence: 0,
+    });
+
     this.userPoolClient = this.userPool.addClient('WebClient', {
       userPoolClientName: 'camstream-web',
       generateSecret: false,

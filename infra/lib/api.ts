@@ -181,6 +181,53 @@ export class Api extends Construct {
       integration: new integrations.HttpLambdaIntegration('StreamsIntegration', streamsFn),
     });
 
+    const adminFn = new NodejsFunction(this, 'AdminFunction', {
+      ...defaults,
+      functionName: 'camstream-admin',
+      logGroup: logGroupFor('camstream-admin'),
+      description: 'Tenant administration: users, agents and camera approval',
+      entry: path.join(LAMBDA_DIR, 'admin', 'index.ts'),
+      timeout: Duration.seconds(20),
+      environment: {
+        REGISTRY_TABLE: registryTable.tableName,
+        USER_POOL_ID: userPool.userPoolId,
+      },
+    });
+    registryTable.grantReadWriteData(adminFn);
+    adminFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: [
+          'cognito-idp:ListUsers',
+          'cognito-idp:AdminCreateUser',
+          'cognito-idp:AdminDeleteUser',
+          'cognito-idp:AdminAddUserToGroup',
+          'cognito-idp:AdminRemoveUserFromGroup',
+        ],
+        resources: [userPool.userPoolArn],
+      }),
+    );
+
+    const adminIntegration = new integrations.HttpLambdaIntegration('AdminIntegration', adminFn);
+    // Authorisation is inside the Lambda: the JWT authorizer proves identity,
+    // group membership decides what that identity may do.
+    for (const [method, routePath] of [
+      [apigwv2.HttpMethod.GET, '/api/admin/agents'],
+      [apigwv2.HttpMethod.GET, '/api/admin/discovered'],
+      [apigwv2.HttpMethod.POST, '/api/admin/cameras'],
+      [apigwv2.HttpMethod.DELETE, '/api/admin/cameras/{identity}'],
+      [apigwv2.HttpMethod.POST, '/api/admin/credentials'],
+      [apigwv2.HttpMethod.GET, '/api/admin/users'],
+      [apigwv2.HttpMethod.POST, '/api/admin/users'],
+      [apigwv2.HttpMethod.DELETE, '/api/admin/users/{username}'],
+    ] as [apigwv2.HttpMethod, string][]) {
+      this.httpApi.addRoutes({
+        path: routePath,
+        methods: [method],
+        authorizer: viewerAuth,
+        integration: adminIntegration,
+      });
+    }
+
     this.httpApi.addRoutes({
       path: '/api/watch',
       methods: [apigwv2.HttpMethod.POST],

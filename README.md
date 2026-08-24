@@ -154,6 +154,44 @@ an agent and the credentials are re-entered — and a bug in the admin UI cannot
 leak them, because plaintext exists only in the admin's browser tab and on the
 edge box.
 
+## Multiple agents on one premises
+
+A large site needs several agents, and their scan ranges will overlap. Discovered
+cameras are therefore keyed by the camera's **own identity**, not by the agent
+that found it, so one camera seen by three agents is one record listing three
+sightings — not three records to approve and pay for separately.
+
+Approval assigns exactly one agent as owner. Only that agent publishes the
+camera; the others simply know it exists. The API refuses an assignment to an
+agent that cannot reach the camera, since that would produce a stream that never
+starts with nothing to explain why.
+
+## Administration
+
+`/admin`, available to members of the Cognito `admin` group, within their own
+tenant only.
+
+| Tab | What it does |
+|---|---|
+| Cameras | Approve discovered cameras, assign an owning agent, set credentials |
+| Agents | Health, version, last seen, whether an encryption key has been published |
+| Users | Invite viewers or administrators, remove accounts |
+
+Credentials are encrypted in the administrator's browser before they are sent,
+against the owning agent's published key. There is no endpoint that returns a
+credential, and no "reveal" control, because the control plane holds no key that
+could open one. Credentials may be per-camera or site-wide — cameras on one site
+frequently do not share a password.
+
+## Adaptive bitrate
+
+The ladder is the camera's own sub and main profiles, so it costs nothing to
+generate — still pure stream copy. A `master.m3u8` appears beside the renditions
+whenever a camera is publishing more than one, which in practice means a viewer
+has opened it. That is deliberate: the detail view is the only place a stream is
+large enough to outrun a connection, and advertising a rendition that is not
+being published would make the player switch up into a 404.
+
 ## Adding a viewer
 
 ```bash

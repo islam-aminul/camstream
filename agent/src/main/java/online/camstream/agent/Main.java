@@ -63,7 +63,7 @@ public final class Main {
                 config.cameras.isEmpty() ? "tcp" : config.cameras.get(0).rtspTransport,
                 config.rtspPaths,
                 config.discoveryMaxHosts,
-                credentialStore::all);
+                credentialStore::candidates);
 
         try (S3Client s3 = S3Client.builder()
                 .region(Region.of(config.region))

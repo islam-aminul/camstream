@@ -1,14 +1,18 @@
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, BatchWriteCommand } from '@aws-sdk/lib-dynamodb';
+import { DynamoDBDocumentClient, BatchWriteCommand, QueryCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { IoTClient, ListPrincipalThingsCommand } from '@aws-sdk/client-iot';
 import type { APIGatewayProxyEventV2WithIAMAuthorizer, APIGatewayProxyStructuredResultV2 } from 'aws-lambda';
 import { parseThingName, isValidId } from '../shared/tenant';
 import { fail, json } from '../shared/http';
+import { key, type CameraRecord } from '../shared/registry';
 
 const TABLE = process.env.REGISTRY_TABLE!;
 /** Records outlive a few missed heartbeats, then vanish on their own. */
 const RECORD_TTL_SECONDS = 600;
 const MAX_CAMERAS = 64;
+/** Discoveries outlive an agent restart, unlike heartbeat liveness records. */
+const DISCOVERY_TTL_SECONDS = 7 * 24 * 60 * 60;
+const MAX_DISCOVERED = 256;
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 
@@ -61,6 +65,137 @@ async function resolveThingName(certificateId: string, region: string, account: 
   return things[0];
 }
 
+/**
+ * Merges what this agent saw into the tenant-wide view.
+ *
+ * Keyed by the camera's own identity, so a camera within range of two agents
+ * becomes one record listing both — not two records that an administrator would
+ * approve separately and pay for twice.
+ */
+async function recordDiscoveries(pk: string, thingName: string, reported: unknown, now: number): Promise<void> {
+  if (!Array.isArray(reported) || reported.length === 0) {
+    return;
+  }
+  const expiresAt = now + DISCOVERY_TTL_SECONDS;
+
+  await Promise.all(
+    reported.slice(0, MAX_DISCOVERED).map((raw) => {
+      const camera = raw as Record<string, unknown>;
+      const identity = typeof camera.id === 'string' ? camera.id : null;
+      if (!identity || !/^[A-Za-z0-9._-]{3,64}$/.test(identity)) {
+        return Promise.resolve();
+      }
+      const sighting = {
+        ipAddress: String(camera.ipAddress ?? ''),
+        authState: String(camera.authState ?? 'UNKNOWN'),
+        lastSeen: now,
+        profiles: Array.isArray(camera.profiles) ? camera.profiles.slice(0, 8) : [],
+      };
+      return ddb.send(
+        new UpdateCommand({
+          TableName: TABLE,
+          Key: { pk, sk: key.discovered(identity) },
+          // reachableBy is a map keyed by thingName, so concurrent heartbeats
+          // from different agents update disjoint paths and cannot clobber
+          // each other's sighting.
+          UpdateExpression:
+            'SET identity = :identity, identityStable = :stable, reachableBy.#agent = :sighting, ' +
+            'lastSeen = :now, expiresAt = :expiresAt' +
+            ', macAddress = if_not_exists(macAddress, :mac)' +
+            ', manufacturer = if_not_exists(manufacturer, :make)' +
+            ', model = if_not_exists(model, :model)',
+          ExpressionAttributeNames: { '#agent': thingName },
+          ExpressionAttributeValues: {
+            ':identity': identity,
+            ':stable': camera.identityStable === true,
+            ':sighting': sighting,
+            ':now': now,
+            ':expiresAt': expiresAt,
+            ':mac': camera.macAddress ?? null,
+            ':make': camera.manufacturer ?? null,
+            ':model': camera.model ?? null,
+            ':empty': {},
+          },
+          ConditionExpression: 'attribute_exists(reachableBy)',
+        }),
+      ).catch(async () => {
+        // First sighting: the map does not exist yet, so create the record whole.
+        await ddb.send(
+          new UpdateCommand({
+            TableName: TABLE,
+            Key: { pk, sk: key.discovered(identity) },
+            UpdateExpression:
+              'SET identity = :identity, identityStable = :stable, reachableBy = :first, ' +
+              'macAddress = :mac, manufacturer = :make, model = :model, lastSeen = :now, expiresAt = :expiresAt',
+            ExpressionAttributeValues: {
+              ':identity': identity,
+              ':stable': camera.identityStable === true,
+              ':first': { [thingName]: sighting },
+              ':mac': camera.macAddress ?? null,
+              ':make': camera.manufacturer ?? null,
+              ':model': camera.model ?? null,
+              ':now': now,
+              ':expiresAt': expiresAt,
+            },
+          }),
+        );
+      });
+    }),
+  );
+}
+
+/** Published so the admin UI can encrypt credentials only this agent can open. */
+async function recordPublicKey(pk: string, thingName: string, publicKey: unknown): Promise<void> {
+  if (typeof publicKey !== 'string' || publicKey.length < 64 || publicKey.length > 2048) {
+    return;
+  }
+  await ddb.send(
+    new UpdateCommand({
+      TableName: TABLE,
+      Key: { pk, sk: key.device(thingName) },
+      UpdateExpression: 'SET credentialPublicKey = :pk',
+      ExpressionAttributeValues: { ':pk': publicKey },
+    }),
+  );
+}
+
+/** Ciphertext blobs stored for this agent. The control plane cannot read them. */
+async function credentialsFor(pk: string, thingName: string): Promise<{ scope: string; ciphertext: string }[]> {
+  const result = await ddb.send(
+    new QueryCommand({
+      TableName: TABLE,
+      KeyConditionExpression: 'pk = :pk AND begins_with(sk, :prefix)',
+      ExpressionAttributeValues: { ':pk': pk, ':prefix': `CREDENTIAL#${thingName}#` },
+    }),
+  );
+  return (result.Items ?? [])
+    .map((item) => ({ scope: String(item.scope ?? '*'), ciphertext: String(item.ciphertext ?? '') }))
+    .filter((entry) => entry.ciphertext.length > 0);
+}
+
+/** Cameras an administrator approved and assigned to this agent. */
+async function camerasAssignedTo(pk: string, thingName: string): Promise<unknown[]> {
+  const result = await ddb.send(
+    new QueryCommand({
+      TableName: TABLE,
+      KeyConditionExpression: 'pk = :pk AND begins_with(sk, :prefix)',
+      ExpressionAttributeValues: { ':pk': pk, ':prefix': 'CAMERA#' },
+    }),
+  );
+  return (result.Items ?? [])
+    .filter((item) => (item as unknown as CameraRecord).assignedTo === thingName)
+    .map((item) => {
+      const camera = item as unknown as CameraRecord;
+      return {
+        identity: camera.identity,
+        cameraId: camera.cameraId,
+        displayName: camera.displayName,
+        subProfileToken: camera.subProfileToken,
+        mainProfileToken: camera.mainProfileToken,
+      };
+    });
+}
+
 export async function handler(
   event: APIGatewayProxyEventV2WithIAMAuthorizer,
 ): Promise<APIGatewayProxyStructuredResultV2> {
@@ -81,7 +216,13 @@ export async function handler(
   }
   const { tenantId } = identity;
 
-  let body: { cameras?: unknown; siteName?: unknown; agentVersion?: unknown };
+  let body: {
+    cameras?: unknown;
+    siteName?: unknown;
+    agentVersion?: unknown;
+    discovered?: unknown;
+    credentialPublicKey?: unknown;
+  };
   try {
     body = JSON.parse(event.body ?? '{}');
   } catch {
@@ -151,5 +292,22 @@ export async function handler(
     await ddb.send(new BatchWriteCommand({ RequestItems: { [TABLE]: items.slice(i, i + 25) } }));
   }
 
-  return json(200, { thingName: caller, tenantId, cameras: cameras.length, nextHeartbeatIn: 30 });
+  await recordDiscoveries(pk, caller, body.discovered, now);
+  await recordPublicKey(pk, caller, body.credentialPublicKey);
+
+  // The response is how configuration reaches the agent: credentials it alone
+  // can decrypt, and the cameras an administrator assigned to it.
+  const [credentials, approvedCameras] = await Promise.all([
+    credentialsFor(pk, caller),
+    camerasAssignedTo(pk, caller),
+  ]);
+
+  return json(200, {
+    thingName: caller,
+    tenantId,
+    cameras: cameras.length,
+    nextHeartbeatIn: 30,
+    credentials,
+    approvedCameras,
+  });
 }

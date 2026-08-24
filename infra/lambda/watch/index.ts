@@ -200,16 +200,15 @@ export function resolveDesiredState(
 
     if (demand.grid) {
       for (const camera of cameras) {
-        // This viewer's pinned camera is served by its main rendition; asking
-        // for the sub as well would make the agent encode the same camera
-        // twice for one person. Another viewer still on the grid will
-        // independently keep the sub alive.
-        if (pinned === `${camera.thingName}/${camera.cameraId}`) continue;
         want(camera.thingName, camera.cameraId, 'sub', viewerCodecs);
       }
     }
     if (demand.mainThingName && demand.mainCameraId) {
+      // The pinned camera gets both rungs: the sub it already had, plus main.
+      // That pair is the ABR ladder, and the detail view is the only place a
+      // stream is large enough to outrun a viewer's connection.
       want(demand.mainThingName, demand.mainCameraId, 'main', viewerCodecs);
+      want(demand.mainThingName, demand.mainCameraId, 'sub', viewerCodecs);
     }
   }
 

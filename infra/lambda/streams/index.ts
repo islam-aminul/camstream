@@ -58,6 +58,9 @@ export async function handler(
         main: `/live/${record.thingName}/${record.cameraId}/main/index.m3u8`,
         subH264: `/live/${record.thingName}/${record.cameraId}/sub-h264/index.m3u8`,
         mainH264: `/live/${record.thingName}/${record.cameraId}/main-h264/index.m3u8`,
+        // Present only while the camera is publishing more than one rendition,
+        // which is what the detail view causes.
+        master: `/live/${record.thingName}/${record.cameraId}/master.m3u8`,
       },
     };
   });
