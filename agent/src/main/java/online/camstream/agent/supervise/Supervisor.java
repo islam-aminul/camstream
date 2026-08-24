@@ -28,6 +28,8 @@ public final class Supervisor implements AutoCloseable {
 
     private static final Duration MIN_BACKOFF = Duration.ofSeconds(1);
     private static final Duration MAX_BACKOFF = Duration.ofMinutes(2);
+    /** A task running this long before failing counts as having recovered. */
+    private static final Duration HEALTHY_AFTER = Duration.ofMinutes(5);
 
     /**
      * A supervised unit of work, retried on failure.
@@ -57,7 +59,7 @@ public final class Supervisor implements AutoCloseable {
 
     private static final class State {
         final Task task;
-        int consecutiveFailures;
+        final Backoff backoff = new Backoff(MIN_BACKOFF, MAX_BACKOFF, HEALTHY_AFTER);
         Instant lastSuccess = Instant.now();
 
         State(Task task) {
@@ -116,30 +118,26 @@ public final class Supervisor implements AutoCloseable {
             return;
         }
         Duration next = state.task.interval();
+        state.backoff.started();
         try {
             state.task.body().run();
-            if (state.consecutiveFailures > 0) {
-                log.info("[{}] recovered after {} failure(s)", state.task.name(), state.consecutiveFailures);
+            if (!state.backoff.healthy()) {
+                log.info("[{}] recovered after {} failure(s)",
+                        state.task.name(), state.backoff.consecutiveFailures());
             }
-            state.consecutiveFailures = 0;
+            state.backoff.succeeded();
             state.lastSuccess = Instant.now();
         } catch (Throwable e) {
             // Throwable, not Exception: an Error in one task must not take the
             // supervisor's thread with it.
-            state.consecutiveFailures++;
-            next = backoff(state.consecutiveFailures, state.task.interval());
+            Duration penalty = state.backoff.failed();
+            // Never retry faster than the task's own cadence.
+            next = penalty.compareTo(state.task.interval()) > 0 ? penalty : state.task.interval();
             log.warn("[{}] failed ({} in a row), next attempt in {}s: {}",
-                    state.task.name(), state.consecutiveFailures, next.toSeconds(), e.toString());
+                    state.task.name(), state.backoff.consecutiveFailures(), next.toSeconds(), e.toString());
         } finally {
             schedule(state, next);
         }
-    }
-
-    /** Never retries faster than the task's own interval. */
-    private static Duration backoff(int consecutiveFailures, Duration interval) {
-        long seconds = MIN_BACKOFF.toSeconds() << Math.min(consecutiveFailures - 1, 16);
-        long capped = Math.min(Math.max(seconds, interval.toSeconds()), MAX_BACKOFF.toSeconds());
-        return Duration.ofSeconds(capped);
     }
 
     /** Snapshot for diagnostics and the heartbeat payload. */
@@ -148,8 +146,8 @@ public final class Supervisor implements AutoCloseable {
         for (State state : states) {
             out.add(new TaskHealth(
                     state.task.name(),
-                    state.consecutiveFailures == 0,
-                    state.consecutiveFailures,
+                    state.backoff.healthy(),
+                    state.backoff.consecutiveFailures(),
                     state.lastSuccess));
         }
         return out;

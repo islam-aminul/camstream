@@ -27,8 +27,19 @@ public final class DiscoveredCamera {
         UNSUPPORTED
     }
 
-    /** Stable identity across scans: MAC when known, otherwise IP. */
+    /**
+     * Identity that survives a DHCP lease change.
+     *
+     * Preference order is deliberate: an ONVIF serial number is stable across
+     * both address and NIC replacement; a MAC survives re-addressing; an IP
+     * survives nothing. {@link #identityStable} says which was available, so
+     * the admin UI can warn before an operator approves a camera whose identity
+     * will move the next time the lease renews.
+     */
     public String id;
+
+    /** False when {@link #id} had to fall back to the IP address. */
+    public boolean identityStable;
 
     public String ipAddress;
     public String macAddress;
@@ -77,6 +88,7 @@ public final class DiscoveredCamera {
     public DiscoveredCamera redacted() {
         DiscoveredCamera copy = new DiscoveredCamera();
         copy.id = id;
+        copy.identityStable = identityStable;
         copy.ipAddress = ipAddress;
         copy.macAddress = macAddress;
         copy.manufacturer = manufacturer;

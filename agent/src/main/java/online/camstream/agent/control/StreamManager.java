@@ -4,6 +4,7 @@ import online.camstream.agent.config.AgentConfig;
 import online.camstream.agent.config.CameraConfig;
 import online.camstream.agent.media.FfmpegHls;
 import online.camstream.agent.publish.HlsPublisher;
+import online.camstream.agent.supervise.Backoff;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import software.amazon.awssdk.services.s3.S3Client;
@@ -35,7 +36,7 @@ public final class StreamManager implements AutoCloseable {
 
     private record Pipeline(FfmpegHls ffmpeg, HlsPublisher publisher, Path directory, Instant startedAt) {}
 
-    /** Restart backoff. A camera that is unreachable must not be hammered. */
+    /** Restart policy, shared with the Supervisor so the agent retries uniformly. */
     private static final Duration MIN_BACKOFF = Duration.ofSeconds(1);
     private static final Duration MAX_BACKOFF = Duration.ofSeconds(30);
     /** A pipeline alive this long is considered to have recovered. */
@@ -46,7 +47,7 @@ public final class StreamManager implements AutoCloseable {
     private final Path workRoot;
     private final Map<String, CameraConfig> camerasById = new HashMap<>();
     private final Map<Rendition, Pipeline> active = new ConcurrentHashMap<>();
-    private final Map<Rendition, Integer> consecutiveFailures = new ConcurrentHashMap<>();
+    private final Map<Rendition, Backoff> backoffs = new ConcurrentHashMap<>();
     private final Map<Rendition, Instant> retryAfter = new ConcurrentHashMap<>();
 
     private volatile Instant lastInstruction = Instant.now();
@@ -72,7 +73,7 @@ public final class StreamManager implements AutoCloseable {
         // Drop pending retries for anything no longer wanted, or a stopped
         // rendition would come back to life when its backoff elapsed.
         retryAfter.keySet().removeIf(rendition -> !desired.contains(rendition));
-        consecutiveFailures.keySet().removeIf(rendition -> !desired.contains(rendition));
+        backoffs.keySet().removeIf(rendition -> !desired.contains(rendition));
 
         for (Rendition rendition : desired) {
             if (!active.containsKey(rendition) && !retryAfter.containsKey(rendition)) {
@@ -101,16 +102,11 @@ public final class StreamManager implements AutoCloseable {
                 // operation rather than an error path. Backoff keeps an
                 // unreachable camera from being retried in a tight loop.
                 Rendition rendition = entry.getKey();
-                // A pipeline that ran for a while was healthy; treat this as a
-                // fresh fault rather than compounding an old backoff, or a
-                // camera that flaps once an hour ends up pinned at the cap.
-                if (Duration.between(pipeline.startedAt(), Instant.now()).compareTo(HEALTHY_AFTER) > 0) {
-                    consecutiveFailures.remove(rendition);
-                }
-                int failures = consecutiveFailures.merge(rendition, 1, Integer::sum);
-                Duration wait = backoff(failures);
+                Backoff backoff = backoffs.computeIfAbsent(
+                        rendition, r -> new Backoff(MIN_BACKOFF, MAX_BACKOFF, HEALTHY_AFTER));
+                Duration wait = backoff.failed();
                 log.warn("[{}] ffmpeg exited (attempt {}) — retrying in {}s",
-                        rendition, failures, wait.toSeconds());
+                        rendition, backoff.consecutiveFailures(), wait.toSeconds());
                 stop(rendition);
                 retryAfter.put(rendition, Instant.now().plus(wait));
             }
@@ -123,12 +119,6 @@ public final class StreamManager implements AutoCloseable {
                 start(entry.getKey());
             }
         }
-    }
-
-    /** Exponential, capped: 1s, 2s, 4s ... 30s. */
-    private static Duration backoff(int consecutiveFailures) {
-        long seconds = MIN_BACKOFF.toSeconds() << Math.min(consecutiveFailures - 1, 16);
-        return Duration.ofSeconds(Math.min(seconds, MAX_BACKOFF.toSeconds()));
     }
 
     private void start(Rendition rendition) {
@@ -152,6 +142,8 @@ public final class StreamManager implements AutoCloseable {
 
             active.put(rendition, new Pipeline(ffmpeg, publisher, directory, Instant.now()));
             retryAfter.remove(rendition);
+            backoffs.computeIfAbsent(rendition, r -> new Backoff(MIN_BACKOFF, MAX_BACKOFF, HEALTHY_AFTER))
+                    .started();
             log.info("[{}] publishing to s3://{}/{}", rendition, config.bucket,
                     config.keyPrefix() + rendition.keySuffix());
         } catch (IOException e) {
@@ -172,7 +164,7 @@ public final class StreamManager implements AutoCloseable {
             stop(rendition);
         }
         retryAfter.clear();
-        consecutiveFailures.clear();
+        backoffs.clear();
     }
 
     /** Removes leftover segments so a restart never republishes a stale playlist. */

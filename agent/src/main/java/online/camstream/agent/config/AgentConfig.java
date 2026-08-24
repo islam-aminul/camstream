@@ -95,6 +95,19 @@ public final class AgentConfig {
     public int discoveryIntervalMinutes = 30;
 
     /**
+     * Ceiling on addresses scanned per sweep. 0 means scan whatever the
+     * interface netmask covers, which is the right answer on a normal site
+     * network and the default.
+     */
+    public int discoveryMaxHosts = 0;
+
+    /**
+     * RTSP paths tried on cameras with no usable ONVIF media service. Empty
+     * uses the built-in vendor list.
+     */
+    public java.util.List<String> rtspPaths = new java.util.ArrayList<>();
+
+    /**
      * RSA key used to open credentials the admin UI encrypted for this device.
      * Generated on first run; defaults to sitting beside the keystore.
      */
@@ -156,6 +169,9 @@ public final class AgentConfig {
         }
         if (discoveryIntervalMinutes < 1 || discoveryIntervalMinutes > 1440) {
             throw new IllegalArgumentException("discoveryIntervalMinutes must be between 1 and 1440");
+        }
+        if (discoveryMaxHosts < 0) {
+            throw new IllegalArgumentException("discoveryMaxHosts must be 0 (unlimited) or positive");
         }
         if (credentialKeyPath == null || credentialKeyPath.isBlank()) {
             Path keystore = Path.of(keystorePath);
