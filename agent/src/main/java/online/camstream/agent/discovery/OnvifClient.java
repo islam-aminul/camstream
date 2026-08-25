@@ -30,6 +30,17 @@ final class OnvifClient {
 
     private static final String DEVICE_NS = "http://www.onvif.org/ver10/device/wsdl";
     private static final String MEDIA_NS = "http://www.onvif.org/ver10/media/wsdl";
+    private static final String MEDIA2_NS = "http://www.onvif.org/ver20/media/wsdl";
+
+    /**
+     * Media2 (ONVIF Profile T) is not a superset of Media1 — it renames the
+     * elements and, crucially, returns profiles with an empty Configurations
+     * element unless a Type is requested. A real CP Plus camera answered
+     * GetProfiles with nothing at all until asked for Type=All.
+     */
+    private static boolean isMedia2(String serviceUrl) {
+        return serviceUrl != null && serviceUrl.contains("media2");
+    }
 
     private final HttpClient http = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(5))
@@ -129,14 +140,25 @@ final class OnvifClient {
             Document response = call(camera.onvifServiceUrl, DEVICE_NS,
                     "<t:GetServices><t:IncludeCapability>false</t:IncludeCapability></t:GetServices>",
                     username, password);
+            // Prefer Media2 where the device offers both: it is the current
+            // specification, and a device implementing it may leave the ver10
+            // service present but unmaintained.
+            String media1 = null;
             for (Element service : Xml.elements(response, "Service")) {
                 String namespace = Xml.text(service, "Namespace");
-                if (namespace != null && namespace.contains("media")) {
-                    String address = Xml.text(service, "XAddr");
-                    if (address != null && !address.isBlank()) {
-                        return address;
-                    }
+                String address = Xml.text(service, "XAddr");
+                if (namespace == null || address == null || address.isBlank()) {
+                    continue;
                 }
+                if (namespace.equals(MEDIA2_NS)) {
+                    return address;
+                }
+                if (namespace.equals(MEDIA_NS)) {
+                    media1 = address;
+                }
+            }
+            if (media1 != null) {
+                return media1;
             }
         } catch (Exception e) {
             log.debug("GetServices failed for {}: {}", camera.ipAddress, e.toString());
@@ -146,7 +168,15 @@ final class OnvifClient {
     }
 
     void fillProfiles(DiscoveredCamera camera, String mediaUrl, String username, String password) throws Exception {
-        Document response = call(mediaUrl, MEDIA_NS, "<t:GetProfiles/>", username, password);
+        boolean media2 = isMedia2(mediaUrl);
+        // Without an explicit Type, a Media2 device is entitled to return
+        // profiles carrying no configuration at all — and some do.
+        Document response = call(
+                mediaUrl,
+                media2 ? MEDIA2_NS : MEDIA_NS,
+                media2 ? "<t:GetProfiles><t:Type>All</t:Type></t:GetProfiles>" : "<t:GetProfiles/>",
+                username, password);
+
         for (Element profile : Xml.elements(response, "Profiles")) {
             String token = profile.getAttribute("token");
             if (token == null || token.isBlank()) {
@@ -156,7 +186,13 @@ final class OnvifClient {
             found.token = token;
             found.name = Xml.text(profile, "Name");
 
+            // Media1 calls it VideoEncoderConfiguration, Media2 calls it
+            // VideoEncoder. Accept either rather than branching on a version
+            // the device may report inconsistently.
             Element videoEncoder = Xml.firstElement(profile, "VideoEncoderConfiguration");
+            if (videoEncoder == null) {
+                videoEncoder = Xml.firstElement(profile, "VideoEncoder");
+            }
             if (videoEncoder != null) {
                 found.codec = normaliseCodec(Xml.text(videoEncoder, "Encoding"));
                 Element resolution = Xml.firstElement(videoEncoder, "Resolution");
@@ -168,6 +204,18 @@ final class OnvifClient {
                 if (rate != null) {
                     found.fps = Xml.integer(rate, "FrameRateLimit");
                     found.bitrateKbps = Xml.integer(rate, "BitrateLimit");
+                }
+                // Media2 reports the GOP length as an attribute. Worth having:
+                // the agent stream-copies, so it can only cut a segment on a
+                // keyframe, and a GOP longer than the segment duration silently
+                // produces longer segments and more latency.
+                String govLength = videoEncoder.getAttribute("GovLength");
+                if (govLength != null && !govLength.isBlank()) {
+                    try {
+                        found.gopFrames = Integer.parseInt(govLength.trim());
+                    } catch (NumberFormatException e) {
+                        // Advisory only; absence changes nothing.
+                    }
                 }
             }
             camera.profiles.put(token, found);
@@ -190,15 +238,25 @@ final class OnvifClient {
 
     void fillStreamUri(DiscoveredCamera camera, String mediaUrl, String profileToken,
                        String username, String password) throws Exception {
-        Document response = call(mediaUrl, MEDIA_NS, """
-            <t:GetStreamUri>
-              <t:StreamSetup>
-                <Stream xmlns="http://www.onvif.org/ver10/schema">RTP-Unicast</Stream>
-                <Transport xmlns="http://www.onvif.org/ver10/schema"><Protocol>RTSP</Protocol></Transport>
-              </t:StreamSetup>
-              <t:ProfileToken>%s</t:ProfileToken>
-            </t:GetStreamUri>
-            """.formatted(escape(profileToken)), username, password);
+        // Media2 dropped StreamSetup in favour of a bare Protocol element.
+        String body = isMedia2(mediaUrl)
+                ? """
+                    <t:GetStreamUri>
+                      <t:Protocol>RTSP</t:Protocol>
+                      <t:ProfileToken>%s</t:ProfileToken>
+                    </t:GetStreamUri>
+                    """.formatted(escape(profileToken))
+                : """
+                    <t:GetStreamUri>
+                      <t:StreamSetup>
+                        <Stream xmlns="http://www.onvif.org/ver10/schema">RTP-Unicast</Stream>
+                        <Transport xmlns="http://www.onvif.org/ver10/schema"><Protocol>RTSP</Protocol></Transport>
+                      </t:StreamSetup>
+                      <t:ProfileToken>%s</t:ProfileToken>
+                    </t:GetStreamUri>
+                    """.formatted(escape(profileToken));
+
+        Document response = call(mediaUrl, isMedia2(mediaUrl) ? MEDIA2_NS : MEDIA_NS, body, username, password);
 
         String uri = Xml.text(response, "Uri");
         DiscoveredCamera.DiscoveredProfile profile = camera.profiles.get(profileToken);

@@ -54,15 +54,26 @@ final class PortScanner {
 
     /** Scans every local IPv4 subnet, returning only hosts with a camera-ish port open. */
     static Map<String, OpenPorts> scan() {
-        return scan(0);
+        return scan(0, List.of());
     }
 
     /**
      * @param maxHosts optional ceiling; 0 means scan whatever the interface
-     *                 netmask covers.
+     *                 netmask covers
+     * @param extraNetworks additional CIDRs to sweep. Cameras frequently sit on
+     *                      a separate VLAN from the box running the agent, in
+     *                      which case the interface netmask finds nothing.
      */
-    static Map<String, OpenPorts> scan(int maxHosts) {
-        List<String> hosts = localHosts(maxHosts);
+    static Map<String, OpenPorts> scan(int maxHosts, List<String> extraNetworks) {
+        List<String> hosts = new ArrayList<>(localHosts(maxHosts));
+        for (String cidr : extraNetworks) {
+            try {
+                hosts.addAll(expandCidr(cidr));
+            } catch (RuntimeException e) {
+                log.warn("ignoring unparseable discovery network \"{}\": {}", cidr, e.getMessage());
+            }
+        }
+        hosts = hosts.stream().distinct().toList();
         if (hosts.isEmpty()) {
             return Map.of();
         }
@@ -153,6 +164,34 @@ final class PortScanner {
             }
         }
         return hosts;
+    }
+
+    /** Expands a CIDR such as 192.168.0.0/24 into its host addresses. */
+    static List<String> expandCidr(String cidr) {
+        String[] parts = cidr.trim().split("/");
+        if (parts.length != 2) {
+            throw new IllegalArgumentException("expected <address>/<prefix>");
+        }
+        int prefix;
+        try {
+            prefix = Integer.parseInt(parts[1]);
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException("prefix is not a number");
+        }
+        if (prefix < 8 || prefix > 32) {
+            throw new IllegalArgumentException("prefix must be between 8 and 32");
+        }
+        long size = prefix >= 31 ? 0 : (1L << (32 - prefix)) - 2;
+        if (size > ABSURD_HOST_COUNT) {
+            throw new IllegalArgumentException(
+                    cidr + " covers " + size + " addresses; narrow it below " + ABSURD_HOST_COUNT);
+        }
+        try {
+            // No local address to exclude here, so pass an unroutable one.
+            return expand(InetAddress.getByName(parts[0]), prefix, ABSURD_HOST_COUNT);
+        } catch (Exception e) {
+            throw new IllegalArgumentException("not an IPv4 address: " + parts[0]);
+        }
     }
 
     private static List<String> expand(InetAddress local, int prefixLength, int limit) {

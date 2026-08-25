@@ -35,7 +35,30 @@ final class Xml {
         factory.setXIncludeAware(false);
         factory.setExpandEntityReferences(false);
         factory.setNamespaceAware(true);
-        return factory.newDocumentBuilder().parse(new ByteArrayInputStream(xml));
+
+        javax.xml.parsers.DocumentBuilder builder = factory.newDocumentBuilder();
+        // Devices on the network answer a SOAP probe with all sorts of things —
+        // an HTML error page, a bare TCP banner. The default handler prints
+        // "[Fatal Error] Content is not allowed in prolog" straight to stderr,
+        // which looks like an agent fault rather than a device that simply is
+        // not a camera. The exception is what callers act on.
+        builder.setErrorHandler(new org.xml.sax.helpers.DefaultHandler() {
+            @Override
+            public void error(org.xml.sax.SAXParseException e) throws org.xml.sax.SAXException {
+                throw e;
+            }
+
+            @Override
+            public void fatalError(org.xml.sax.SAXParseException e) throws org.xml.sax.SAXException {
+                throw e;
+            }
+
+            @Override
+            public void warning(org.xml.sax.SAXParseException e) {
+                // Not worth a line in the log during a network sweep.
+            }
+        });
+        return builder.parse(new ByteArrayInputStream(xml));
     }
 
     /**

@@ -111,6 +111,14 @@ public final class AgentConfig {
     public int discoveryMaxHosts = 0;
 
     /**
+     * Extra networks to sweep, as CIDRs.
+     *
+     * Cameras are commonly on their own VLAN, separate from the box running the
+     * agent — in which case the interface netmask alone finds nothing.
+     */
+    public java.util.List<String> discoveryNetworks = new java.util.ArrayList<>();
+
+    /**
      * RTSP paths tried on cameras with no usable ONVIF media service. Empty
      * uses the built-in vendor list.
      */

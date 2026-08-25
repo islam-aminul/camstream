@@ -86,6 +86,7 @@ public final class Main {
                 config.cameras.isEmpty() ? "tcp" : config.cameras.get(0).rtspTransport,
                 config.rtspPaths,
                 config.discoveryMaxHosts,
+                config.discoveryNetworks,
                 credentialStore::candidates);
         CameraRegistry registry = new CameraRegistry(config, discovery);
 

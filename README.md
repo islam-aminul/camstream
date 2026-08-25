@@ -210,17 +210,22 @@ what becomes a camera. Two passes, because neither alone is sufficient:
    are somewhere in that /16. `discoveryMaxHosts` caps it if needed; the only
    built-in limit refuses to enumerate more than 65536 addresses from a single
    misconfigured interface.
+   Cameras frequently sit on their own VLAN, in which case the interface
+   netmask finds nothing — `discoveryNetworks` takes additional CIDRs to sweep.
 3. **RTSP path probing** for cameras with no usable ONVIF media service, which
    is a large share of installed CCTV. Known vendor paths (Hikvision, Dahua,
    Axis, Reolink, Uniview and generic firmware) are tried and confirmed with
    `ffprobe` — not by the DESCRIBE status code, since many devices answer 200
    on a path carrying no media. Override with `rtspPaths`.
 
-Each candidate is interrogated over ONVIF for its model, media profiles and
-stream URIs, and every stream is confirmed with `ffprobe`. ONVIF's advertised
-encoding is regularly wrong — a profile labelled H264 may deliver H.265 after a
-firmware update — and the codec decides whether viewers need a transcode, so the
-stream is asked rather than believed.
+Each candidate is interrogated over ONVIF — both Media1 and Media2, which are
+not compatible: Media2 renames the encoder element and returns profiles with an
+empty configuration unless a `Type` is requested. Every stream is then confirmed
+with `ffprobe`. ONVIF's advertised
+encoding is regularly wrong, and the discrepancy is routine rather than
+theoretical: a CP Plus camera used for testing advertises 25fps over ONVIF and
+delivers 20. The codec decides whether viewers need a transcode, so the stream
+is asked rather than believed.
 
 ### Camera identity
 
