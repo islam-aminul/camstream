@@ -49,6 +49,27 @@ if [ "${java_major:-0}" -lt 21 ]; then
   exit 1
 fi
 
+# The agent jar carries AWS CRT natives for every architecture and picks one at
+# runtime, so it is portable — but only to architectures that are actually in
+# there. Failing here beats an UnsatisfiedLinkError on first start.
+arch="$(uname -m)"
+case "$arch" in
+  x86_64|amd64|aarch64|arm64|armv7l|armv6l) echo "  architecture: $arch" ;;
+  *)
+    echo "ERROR: unsupported architecture '$arch'." >&2
+    echo "       The AWS CRT native library ships for x86_64, aarch64, armv7 and armv6 only." >&2
+    exit 1
+    ;;
+esac
+
+# The JVM's own architecture decides which native is loaded, and a 32-bit JVM on
+# a 64-bit host silently picks the 32-bit library.
+java_arch="$(java -XshowSettings:properties -version 2>&1 | sed -n 's/.*os\.arch = //p' | tr -d ' ')"
+echo "  jvm architecture: ${java_arch:-unknown}"
+if [ "$java_arch" = "x86" ] || [ "$java_arch" = "i386" ]; then
+  echo "  WARNING: a 32-bit JVM is installed. Use a 64-bit JRE unless this box really is 32-bit." >&2
+fi
+
 # CamStream stream-copies and needs no GPL codec; warn but do not block, since a
 # distro build is fine for evaluation.
 if "$HERE/../../scripts/check-ffmpeg-license.sh" >/dev/null 2>&1; then

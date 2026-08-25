@@ -134,6 +134,32 @@ route needs no external dependency but is not visible in `services.msc`.
 **macOS**: a launchd plist is provided for development; it is not a supported
 production target.
 
+### Architectures
+
+The jar itself is architecture-independent: AWS CRT — the only native
+dependency — bundles a library for every platform and selects one at runtime
+from `os.arch` and whether the host uses glibc or musl. One bundle per operating
+system is therefore enough, and the three differ only in their installer
+scripts.
+
+| | x86_64 | arm64 | armv7 / armv6 |
+|---|---|---|---|
+| Linux (glibc) | ✅ | ✅ | ✅ |
+| Linux (musl, e.g. Alpine) | ✅ | ✅ | ✅ armv7 |
+| macOS | ✅ | ✅ Apple Silicon |  |
+| Windows | ✅ | ❌ **no native published** | |
+
+Windows on ARM has no AWS CRT build. Install an **x64 JRE** instead — Windows 11
+runs it under emulation and the agent works normally. The installer checks the
+JVM's architecture rather than the machine's and refuses with that instruction,
+because the failure would otherwise be an `UnsatisfiedLinkError` at first start.
+
+Hardware encoders are the part that genuinely is not portable, since they follow
+the silicon: `vaapi`/`qsv`/`amf` are x86_64, `v4l2m2m` is ARM SoCs such as the
+Raspberry Pi, `nvenc` is NVIDIA on either, and `videotoolbox` is macOS. Nothing
+breaks without them — the agent stream-copies by default and only needs an
+encoder when a viewer cannot decode a camera's codec.
+
 Reinstalling upgrades the jar and restarts the service, leaving configuration
 and device identity alone. `uninstall.sh --purge` / `uninstall.ps1 -Purge`
 removes those too — which destroys the credential key, so camera credentials

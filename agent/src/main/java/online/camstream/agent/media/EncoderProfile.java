@@ -12,6 +12,21 @@ import java.util.Locale;
  * deliberately absent — it would force {@code --enable-gpl} on the whole binary
  * and drag the product into copyleft. An operator who genuinely wants software
  * encoding can express it through {@link #CUSTOM}, and owns that decision.
+ *
+ * Unlike the rest of the agent, these are not portable. The jar runs on any
+ * architecture because AWS CRT bundles a native for each, but an encoder exists
+ * only where the silicon does:
+ *
+ * <table>
+ *   <caption>Where each profile is available</caption>
+ *   <tr><th>Profile</th><th>Architecture</th></tr>
+ *   <tr><td>{@link #VAAPI}</td><td>x86_64, Intel or AMD integrated graphics</td></tr>
+ *   <tr><td>{@link #QSV}</td><td>x86_64, Intel only</td></tr>
+ *   <tr><td>{@link #AMF}</td><td>x86_64, AMD on Windows</td></tr>
+ *   <tr><td>{@link #NVENC}</td><td>x86_64 with an NVIDIA GPU, or arm64 on Jetson</td></tr>
+ *   <tr><td>{@link #V4L2M2M}</td><td>arm64/armv7 SoCs — Raspberry Pi and similar</td></tr>
+ *   <tr><td>{@link #VIDEOTOOLBOX}</td><td>macOS, both architectures</td></tr>
+ * </table>
  */
 public enum EncoderProfile {
 
