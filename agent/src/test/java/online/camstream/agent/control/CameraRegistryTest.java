@@ -30,11 +30,11 @@ class CameraRegistryTest {
     private static AgentConfig config() {
         AgentConfig config = new AgentConfig();
         config.tenantId = "acme";
+        config.premisesId = "hq";
         config.deviceId = "site-01";
         config.bucket = "b";
         config.iotCredentialsEndpoint = "c";
         config.iotDataEndpoint = "d";
-        config.keystorePath = "/tmp/k.p12";
         config.certificatePath = "/tmp/k.crt";
         config.privateKeyPath = "/tmp/k.key";
         config.apiInvokeUrl = "https://example.invalid";

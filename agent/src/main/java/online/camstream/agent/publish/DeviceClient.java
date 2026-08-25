@@ -6,8 +6,8 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import online.camstream.agent.config.AgentConfig;
 import online.camstream.agent.config.CameraConfig;
-import online.camstream.agent.control.CameraRegistry;
 import online.camstream.agent.config.StreamProfile;
+import online.camstream.agent.control.CameraRegistry;
 import online.camstream.agent.credentials.CredentialEnvelope;
 import online.camstream.agent.credentials.CredentialStore;
 import online.camstream.agent.discovery.DiscoveredCamera;
@@ -29,174 +29,183 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Supplier;
 
 /**
- * Announces this device and its cameras to the control plane.
+ * The agent's control-plane client. Entirely event-driven.
  *
- * Signed with SigV4 using the same IoT-issued credentials that write to S3, so
- * the API can trust the caller's identity from the assumed-role session name
- * rather than anything in the request body.
+ * There is no heartbeat. Liveness comes from the MQTT connection itself, which
+ * AWS IoT reports as a presence event, so an idle site makes no requests at all.
+ * A report is sent when the agent connects or when what it can see changes;
+ * configuration is fetched when a version push says it is stale.
+ *
+ * Configuration arrives over HTTPS rather than in the MQTT message because
+ * credentials and camera assignments outgrow both the 128KB message limit and
+ * the 8KB shadow limit on a large site — MQTT carries only the version number.
  */
-public final class HeartbeatClient {
+public final class DeviceClient {
 
-    private static final Logger log = LoggerFactory.getLogger(HeartbeatClient.class);
+    private static final Logger log = LoggerFactory.getLogger(DeviceClient.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private final AgentConfig config;
     private final AwsCredentialsProvider credentials;
     private final AwsV4HttpSigner signer = AwsV4HttpSigner.create();
-    private final HttpClient http = HttpClient.newBuilder()
-            .connectTimeout(Duration.ofSeconds(10))
-            .build();
-    private final URI endpoint;
+    private final HttpClient http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
+    private final String base;
     private final String agentVersion;
-    private final java.util.function.Supplier<String> publicKey;
-    private final java.util.function.Supplier<List<DiscoveredCamera>> discovered;
+
+    private final Supplier<String> publicKey;
+    private final Supplier<List<DiscoveredCamera>> discovered;
+    private final Supplier<List<?>> taskHealth;
     private final CredentialEnvelope envelope;
     private final CredentialStore credentialStore;
     private final CameraRegistry registry;
-    private final java.util.function.Supplier<List<?>> taskHealth;
 
-    public HeartbeatClient(
+    /** Hash of the last report sent, so an unchanged view costs nothing. */
+    private volatile int lastReportHash;
+    private volatile long configVersion = -1;
+
+    public DeviceClient(
             AgentConfig config,
             AwsCredentialsProvider credentials,
-            java.util.function.Supplier<String> publicKey,
-            java.util.function.Supplier<List<DiscoveredCamera>> discovered,
+            Supplier<String> publicKey,
+            Supplier<List<DiscoveredCamera>> discovered,
+            Supplier<List<?>> taskHealth,
             CredentialEnvelope envelope,
             CredentialStore credentialStore,
-            CameraRegistry registry,
-            java.util.function.Supplier<List<?>> taskHealth) {
+            CameraRegistry registry) {
         this.config = config;
         this.credentials = credentials;
         this.publicKey = publicKey;
         this.discovered = discovered;
+        this.taskHealth = taskHealth;
         this.envelope = envelope;
         this.credentialStore = credentialStore;
         this.registry = registry;
-        this.taskHealth = taskHealth;
-        String base = config.apiInvokeUrl.endsWith("/")
+        this.base = config.apiInvokeUrl.endsWith("/")
                 ? config.apiInvokeUrl.substring(0, config.apiInvokeUrl.length() - 1)
                 : config.apiInvokeUrl;
-        this.endpoint = URI.create(base + "/api/device/heartbeat");
-        String implVersion = HeartbeatClient.class.getPackage().getImplementationVersion();
+        String implVersion = DeviceClient.class.getPackage().getImplementationVersion();
         this.agentVersion = implVersion == null ? "dev" : implVersion;
     }
 
-    public void send() {
+    /**
+     * Sends the agent's view of itself.
+     *
+     * @param force send even when nothing changed, as on a fresh connection
+     */
+    public void report(boolean force) {
         try {
-            byte[] body = buildBody();
-            SdkHttpRequest unsigned = SdkHttpRequest.builder()
-                    .method(SdkHttpMethod.POST)
-                    .uri(endpoint)
-                    .putHeader("content-type", "application/json")
-                    .putHeader("host", endpoint.getHost())
-                    .build();
-
-            SignedRequest signed = signer.sign(r -> r
-                    .identity(credentials.resolveCredentials())
-                    .request(unsigned)
-                    .payload(() -> new ByteArrayInputStream(body))
-                    .putProperty(AwsV4HttpSigner.SERVICE_SIGNING_NAME, "execute-api")
-                    .putProperty(AwsV4HttpSigner.REGION_NAME, Region.of(config.region).id()));
-
-            HttpRequest.Builder request = HttpRequest.newBuilder(endpoint)
-                    .timeout(Duration.ofSeconds(15))
-                    .POST(HttpRequest.BodyPublishers.ofByteArray(body));
-            for (Map.Entry<String, List<String>> header : signed.request().headers().entrySet()) {
-                // The JDK client manages these itself and rejects attempts to set them.
-                String name = header.getKey().toLowerCase();
-                if (name.equals("host") || name.equals("content-length") || name.equals("connection")) {
-                    continue;
-                }
-                for (String value : header.getValue()) {
-                    request.header(header.getKey(), value);
-                }
+            byte[] body = buildReport();
+            int hash = java.util.Arrays.hashCode(body);
+            if (!force && hash == lastReportHash) {
+                return;
             }
-
-            HttpResponse<String> response = http.send(request.build(), HttpResponse.BodyHandlers.ofString());
-            if (response.statusCode() / 100 != 2) {
-                log.warn("heartbeat rejected: {} {}", response.statusCode(), response.body());
+            HttpResponse<String> response = send(SdkHttpMethod.POST, "/api/device/report", body);
+            if (response.statusCode() / 100 == 2) {
+                lastReportHash = hash;
+                log.debug("report accepted");
             } else {
-                acceptCredentials(response.body());
-                acceptAssignments(response.body());
+                log.warn("report rejected: {} {}", response.statusCode(), response.body());
             }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
         } catch (Exception e) {
-            // A missed heartbeat only delays the camera list; never fatal.
-            log.warn("heartbeat failed: {}", e.toString());
+            log.warn("could not send report: {}", e.toString());
         }
     }
 
-    /**
-     * The response may carry credentials an administrator entered in the web
-     * UI. They arrive encrypted to this device's public key, so the control
-     * plane relayed them without ever being able to read them.
-     */
-    private void acceptCredentials(String body) {
+    /** Fetches configuration if the pushed version is newer than what we hold. */
+    public void fetchConfig(long pushedVersion) {
+        if (pushedVersion >= 0 && pushedVersion == configVersion) {
+            return;
+        }
         try {
-            JsonNode envelopes = MAPPER.readTree(body).path("credentials");
-            if (!envelopes.isArray() || envelopes.isEmpty()) {
+            HttpResponse<String> response = send(SdkHttpMethod.GET, "/api/device/config", null);
+            if (response.statusCode() / 100 != 2) {
+                log.warn("config fetch rejected: {} {}", response.statusCode(), response.body());
                 return;
             }
-            java.util.Map<String, String> byScope = new java.util.LinkedHashMap<>();
-            for (JsonNode node : envelopes) {
+            JsonNode root = MAPPER.readTree(response.body());
+            configVersion = root.path("configVersion").asLong(0);
+
+            Map<String, String> envelopes = new java.util.LinkedHashMap<>();
+            for (JsonNode node : root.path("credentials")) {
                 String ciphertext = node.path("ciphertext").asText(null);
                 if (ciphertext != null && !ciphertext.isBlank()) {
-                    byScope.put(node.path("scope").asText("*"), ciphertext);
+                    envelopes.put(node.path("scope").asText("*"), ciphertext);
                 }
             }
-            if (!byScope.isEmpty()) {
-                credentialStore.apply(envelope, byScope);
-                log.info("accepted {} credential envelope(s); {} credential(s) now known",
-                        byScope.size(), credentialStore.size());
+            if (!envelopes.isEmpty()) {
+                credentialStore.apply(envelope, envelopes);
             }
-        } catch (Exception e) {
-            log.warn("could not read credentials from the heartbeat response: {}", e.toString());
-        }
-    }
 
-    /**
-     * Applies the camera assignments an administrator made. Only identities and
-     * profile tokens arrive — the agent resolves those to credential-bearing
-     * URLs against its own scan, so the control plane never handles either.
-     */
-    private void acceptAssignments(String body) {
-        try {
-            JsonNode assignments = MAPPER.readTree(body).path("approvedCameras");
-            if (!assignments.isArray()) {
-                return;
-            }
             List<CameraRegistry.Approved> approved = new java.util.ArrayList<>();
-            for (JsonNode node : assignments) {
+            for (JsonNode node : root.path("approvedCameras")) {
                 String identity = node.path("identity").asText(null);
                 String cameraId = node.path("cameraId").asText(null);
                 if (identity == null || cameraId == null) {
                     continue;
                 }
                 approved.add(new CameraRegistry.Approved(
-                        identity,
-                        cameraId,
-                        node.path("displayName").asText(cameraId),
+                        identity, cameraId, node.path("displayName").asText(cameraId),
                         node.path("subProfileToken").asText(null),
                         node.path("mainProfileToken").asText(null)));
             }
             registry.setApproved(approved);
+            log.info("configuration v{} applied: {} credential(s), {} assigned camera(s)",
+                    configVersion, envelopes.size(), approved.size());
+
+            // The assignment may have made new cameras publishable, which the
+            // control plane should know about.
+            report(false);
         } catch (Exception e) {
-            log.warn("could not read camera assignments from the heartbeat response: {}", e.toString());
+            log.warn("could not fetch configuration: {}", e.toString());
         }
     }
 
-    private byte[] buildBody() {
+    private HttpResponse<String> send(SdkHttpMethod method, String path, byte[] body) throws Exception {
+        URI uri = URI.create(base + path);
+        SdkHttpRequest.Builder unsigned = SdkHttpRequest.builder()
+                .method(method).uri(uri).putHeader("host", uri.getHost());
+        if (body != null) {
+            unsigned.putHeader("content-type", "application/json");
+        }
+
+        byte[] payload = body == null ? new byte[0] : body;
+        SignedRequest signed = signer.sign(r -> r
+                .identity(credentials.resolveCredentials())
+                .request(unsigned.build())
+                .payload(() -> new ByteArrayInputStream(payload))
+                .putProperty(AwsV4HttpSigner.SERVICE_SIGNING_NAME, "execute-api")
+                .putProperty(AwsV4HttpSigner.REGION_NAME, Region.of(config.region).id()));
+
+        HttpRequest.Builder request = HttpRequest.newBuilder(uri).timeout(Duration.ofSeconds(20));
+        if (body == null) {
+            request.GET();
+        } else {
+            request.POST(HttpRequest.BodyPublishers.ofByteArray(body));
+        }
+        for (Map.Entry<String, List<String>> header : signed.request().headers().entrySet()) {
+            // The JDK client owns these and rejects attempts to set them.
+            String name = header.getKey().toLowerCase();
+            if (name.equals("host") || name.equals("content-length") || name.equals("connection")) {
+                continue;
+            }
+            for (String value : header.getValue()) {
+                request.header(header.getKey(), value);
+            }
+        }
+        return http.send(request.build(), HttpResponse.BodyHandlers.ofString());
+    }
+
+    private byte[] buildReport() {
         ObjectNode root = MAPPER.createObjectNode();
         root.put("siteName", config.siteName == null ? config.deviceId : config.siteName);
         root.put("agentVersion", agentVersion);
-        // Published so the admin UI can encrypt credentials that only this
+        // Published so the admin console can encrypt credentials only this
         // device can open.
         root.put("credentialPublicKey", publicKey.get());
 
-        // Task health travels with the heartbeat so an operator can see a stuck
-        // subsystem in the admin UI rather than by reading logs on the box.
         ArrayNode health = root.putArray("taskHealth");
         for (Object entry : taskHealth.get()) {
             health.add(String.valueOf(entry));
@@ -217,17 +226,18 @@ public final class HeartbeatClient {
                 }
             }
         }
+
         // Redacted by construction: DiscoveredCamera.redacted() drops the RTSP
         // URLs, which embed credentials.
         ArrayNode candidates = root.putArray("discovered");
         for (DiscoveredCamera camera : discovered.get()) {
             ObjectNode node = candidates.addObject();
             node.put("id", camera.id);
+            node.put("identityStable", camera.identityStable);
             node.put("ipAddress", camera.ipAddress);
             if (camera.macAddress != null) node.put("macAddress", camera.macAddress);
             if (camera.manufacturer != null) node.put("manufacturer", camera.manufacturer);
             if (camera.model != null) node.put("model", camera.model);
-            if (camera.firmware != null) node.put("firmware", camera.firmware);
             node.put("authState", camera.authState.name());
             if (camera.note != null) node.put("note", camera.note);
             ArrayNode profiles = node.putArray("profiles");

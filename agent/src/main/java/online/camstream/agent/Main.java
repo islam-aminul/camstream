@@ -2,6 +2,7 @@ package online.camstream.agent;
 
 import online.camstream.agent.config.AgentConfig;
 import online.camstream.agent.control.CameraRegistry;
+import online.camstream.agent.control.Rendition;
 import online.camstream.agent.control.StreamManager;
 import online.camstream.agent.control.WatchListener;
 import online.camstream.agent.credentials.CredentialEnvelope;
@@ -9,7 +10,9 @@ import online.camstream.agent.credentials.CredentialStore;
 import online.camstream.agent.credentials.DeviceKeypair;
 import online.camstream.agent.discovery.DiscoveryService;
 import online.camstream.agent.iot.IotCredentialsProvider;
-import online.camstream.agent.publish.HeartbeatClient;
+import online.camstream.agent.provisioning.FleetProvisioner;
+import online.camstream.agent.provisioning.IdentityFile;
+import online.camstream.agent.publish.DeviceClient;
 import online.camstream.agent.supervise.Supervisor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -17,10 +20,12 @@ import software.amazon.awssdk.http.urlconnection.UrlConnectionHttpClient;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.s3.S3Client;
 
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 
 /**
@@ -28,10 +33,10 @@ import java.util.concurrent.CountDownLatch;
  *
  *   java -jar camstream-agent.jar /path/to/agent.yaml
  *
- * Every long-running activity is registered with the {@link Supervisor} rather
- * than scheduled directly, so a failure anywhere is retried instead of quietly
- * ending. This box is typically unattended in a cupboard on someone else's
- * network.
+ * On first boot the agent enrols itself from the identity file the admin
+ * console produced, then holds one MQTT connection and does nothing on a timer
+ * except sweep for cameras. Liveness, configuration and viewer demand all
+ * arrive as pushes, so an idle site issues no requests at all.
  */
 public final class Main {
 
@@ -39,7 +44,6 @@ public final class Main {
 
     /** How often ffmpeg output is swept into S3. Well under one segment. */
     private static final Duration SYNC_INTERVAL = Duration.ofMillis(250);
-    private static final Duration HEARTBEAT_INTERVAL = Duration.ofSeconds(30);
 
     public static void main(String[] args) throws Exception {
         if (args.length != 1) {
@@ -47,25 +51,42 @@ public final class Main {
             System.exit(2);
         }
 
-        AgentConfig config = AgentConfig.load(Path.of(args[0]));
+        AgentConfig config = AgentConfig.loadRaw(Path.of(args[0]));
+
+        // Enrol before anything else needs a certificate.
+        if (config.identityFile != null && !config.identityFile.isBlank()) {
+            Path identityPath = Path.of(config.identityFile);
+            if (Files.isRegularFile(identityPath)) {
+                IdentityFile identity = IdentityFile.load(identityPath);
+                config.applyIdentity(identity);
+                config.resolveStatePaths();
+                if (identity.canEnrol()
+                        && FleetProvisioner.ensureProvisioned(identity, Path.of(config.stateDir))) {
+                    // Spent; the endpoints stay, the secrets go.
+                    identity.stripSecrets(identityPath);
+                }
+            } else {
+                log.debug("no identity file at {}; assuming the device is already enrolled", identityPath);
+            }
+        }
+        config.resolveStatePaths();
+        config.validate();
+
         log.info("CamStreamAgent starting as {} ({} camera(s) configured)",
                 config.thingName(), config.cameras.size());
 
         DeviceKeypair keypair = DeviceKeypair.loadOrCreate(Path.of(config.credentialKeyPath));
         CredentialEnvelope envelope = new CredentialEnvelope(keypair);
-
         CredentialStore credentialStore = new CredentialStore();
         credentialStore.setSiteCredentials(siteCredentials(config));
 
         IotCredentialsProvider awsCredentials = new IotCredentialsProvider(config);
-
         DiscoveryService discovery = new DiscoveryService(
                 config.ffprobePath,
                 config.cameras.isEmpty() ? "tcp" : config.cameras.get(0).rtspTransport,
                 config.rtspPaths,
                 config.discoveryMaxHosts,
                 credentialStore::candidates);
-
         CameraRegistry registry = new CameraRegistry(config, discovery);
 
         try (S3Client s3 = S3Client.builder()
@@ -76,31 +97,55 @@ public final class Main {
              StreamManager manager = new StreamManager(config, s3, registry);
              Supervisor supervisor = new Supervisor(3)) {
 
-            HeartbeatClient heartbeat = new HeartbeatClient(
+            DeviceClient device = new DeviceClient(
                     config, awsCredentials, keypair::publicKeyBase64, discovery::redactedResults,
-                    envelope, credentialStore, registry,
-                    () -> List.copyOf(supervisor.health()));
+                    () -> List.copyOf(supervisor.health()), envelope, credentialStore, registry);
 
-            // Announce before subscribing, so the control plane already knows
-            // this device's cameras when the first viewer asks for them.
-            supervisor.runOnce(new Supervisor.Task("heartbeat-initial", HEARTBEAT_INTERVAL, heartbeat::send));
+            WatchListener.Handlers handlers = new WatchListener.Handlers() {
+                @Override
+                public void onDesiredState(Set<Rendition> desired) {
+                    manager.apply(desired);
+                }
 
-            try (WatchListener listener = new WatchListener(config, manager::apply)) {
+                @Override
+                public void onConfigVersion(long version) {
+                    device.fetchConfig(version);
+                }
+
+                @Override
+                public void onCommand(String action) {
+                    if ("scan".equals(action)) {
+                        log.info("scan requested by the control plane");
+                        discovery.scan();
+                        registry.refresh();
+                        device.report(true);
+                    } else {
+                        log.warn("ignoring unknown command \"{}\"", action);
+                    }
+                }
+
+                @Override
+                public void onConnected() {
+                    // Reconcile on every connection, including reconnects after
+                    // a network outage, when a config push may have been missed.
+                    device.report(true);
+                    device.fetchConfig(-1);
+                }
+            };
+
+            try (WatchListener ignored = new WatchListener(config, handlers)) {
                 supervisor.supervise(new Supervisor.Task("publish", SYNC_INTERVAL, manager::tick));
-                supervisor.supervise(new Supervisor.Task("heartbeat", HEARTBEAT_INTERVAL, heartbeat::send));
 
                 if (config.discoveryEnabled) {
-                    // Sweep at startup: an installer plugging in a new box
-                    // should not wait a whole interval to see the cameras.
                     supervisor.supervise(new Supervisor.Task(
                             "discovery",
                             Duration.ofMinutes(config.discoveryIntervalMinutes),
                             true,
                             () -> {
                                 discovery.scan();
-                                // Approved cameras the agent had not yet seen
-                                // become streamable as soon as a sweep finds them.
                                 registry.refresh();
+                                // Sent only when the result set actually differs.
+                                device.report(false);
                             }));
                 } else {
                     log.info("camera discovery is disabled");
@@ -112,7 +157,7 @@ public final class Main {
                     shutdown.countDown();
                 }));
 
-                log.info("waiting for viewers");
+                log.info("connected and idle — waiting for viewers");
                 shutdown.await();
             }
         }
