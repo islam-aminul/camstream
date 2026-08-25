@@ -3,6 +3,7 @@
 #
 #   sudo ./install.sh --identity path/to/identity.json   # zero-touch enrollment
 #   sudo ./install.sh [path/to/agent.yaml]               # pre-configured agent
+#   sudo ./install.sh --java /path/to/bin/java ...       # non-default JRE
 #
 # Idempotent: re-running upgrades the jar and restarts the service, leaving the
 # configuration and the device's keys untouched.
@@ -19,10 +20,17 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 IDENTITY=""
 CONFIG_SRC=""
+# The service runs as a system unit, so what matters is the interpreter the
+# unit will invoke — not whichever java happens to be on the installing user's
+# PATH. Those differ routinely: under sudo, or with sdkman or asdf managing a
+# newer JDK for the login shell only.
+JAVA_BIN="${JAVA_BIN:-}"
 while [ $# -gt 0 ]; do
   case "$1" in
     --identity) IDENTITY="${2:-}"; shift 2 ;;
     --identity=*) IDENTITY="${1#*=}"; shift ;;
+    --java) JAVA_BIN="${2:-}"; shift 2 ;;
+    --java=*) JAVA_BIN="${1#*=}"; shift ;;
     -h|--help) sed -n '2,12p' "$0"; exit 0 ;;
     *) CONFIG_SRC="$1"; shift ;;
   esac
@@ -33,19 +41,36 @@ if [ -n "$IDENTITY" ] && [ ! -f "$IDENTITY" ]; then
 fi
 
 echo "Checking prerequisites..."
+
+if [ -z "$JAVA_BIN" ]; then
+  if [ -n "${JAVA_HOME:-}" ] && [ -x "$JAVA_HOME/bin/java" ]; then
+    JAVA_BIN="$JAVA_HOME/bin/java"
+  elif [ -x /usr/bin/java ]; then
+    JAVA_BIN=/usr/bin/java
+  else
+    JAVA_BIN="$(command -v java || true)"
+  fi
+fi
+if [ -z "$JAVA_BIN" ] || [ ! -x "$JAVA_BIN" ]; then
+  echo "ERROR: no java found. Install a JRE 21+, or pass --java /path/to/bin/java." >&2
+  echo "       On Debian/Ubuntu: apt-get install -y openjdk-21-jre-headless" >&2
+  exit 1
+fi
+
 missing=()
-command -v java >/dev/null 2>&1 || missing+=("java (21 or newer)")
 command -v ffmpeg >/dev/null 2>&1 || missing+=("ffmpeg")
 command -v ffprobe >/dev/null 2>&1 || missing+=("ffprobe")
 if [ ${#missing[@]} -gt 0 ]; then
   printf 'Missing: %s\n' "${missing[@]}" >&2
-  echo "On Debian/Ubuntu: apt-get install -y openjdk-21-jre-headless ffmpeg" >&2
+  echo "On Debian/Ubuntu: apt-get install -y ffmpeg" >&2
   exit 1
 fi
 
-java_major="$(java -version 2>&1 | head -1 | sed -E 's/.*version "([0-9]+).*/\1/')"
+java_major="$("$JAVA_BIN" -version 2>&1 | head -1 | sed -E 's/.*version "([0-9]+).*/\1/')"
+echo "  java: $JAVA_BIN (${java_major:-unknown})"
 if [ "${java_major:-0}" -lt 21 ]; then
-  echo "Java 21 or newer is required (found $java_major)." >&2
+  echo "ERROR: the service would run $JAVA_BIN, which is Java ${java_major:-unknown}." >&2
+  echo "       Java 21 or newer is required. Pass --java to point at a different one." >&2
   exit 1
 fi
 
@@ -64,7 +89,7 @@ esac
 
 # The JVM's own architecture decides which native is loaded, and a 32-bit JVM on
 # a 64-bit host silently picks the 32-bit library.
-java_arch="$(java -XshowSettings:properties -version 2>&1 | sed -n 's/.*os\.arch = //p' | tr -d ' ')"
+java_arch="$("$JAVA_BIN" -XshowSettings:properties -version 2>&1 | sed -n 's/.*os\.arch = //p' | tr -d ' ')"
 echo "  jvm architecture: ${java_arch:-unknown}"
 if [ "$java_arch" = "x86" ] || [ "$java_arch" = "i386" ]; then
   echo "  WARNING: a 32-bit JVM is installed. Use a 64-bit JRE unless this box really is 32-bit." >&2
@@ -131,7 +156,11 @@ for f in device.crt device.key credential-key.pem; do
   [ -f "$HERE/$f" ] && install -o "$USER" -g "$USER" -m 0600 "$HERE/$f" "$STATE_DIR/$f"
 done
 
-install -m 0644 "$HERE/$SERVICE.service" "/etc/systemd/system/$SERVICE.service"
+# The unit must name the interpreter that was actually checked, not a fixed
+# /usr/bin/java that may be a different version entirely.
+sed "s#^ExecStart=/usr/bin/java #ExecStart=$JAVA_BIN #" \
+  "$HERE/$SERVICE.service" > "/etc/systemd/system/$SERVICE.service"
+chmod 0644 "/etc/systemd/system/$SERVICE.service"
 systemctl daemon-reload
 systemctl enable "$SERVICE" >/dev/null
 
