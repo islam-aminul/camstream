@@ -116,9 +116,21 @@ jobs:
           echo "--- runs as an unprivileged user ---"
           id camstream
           echo "--- permissions ---"
-          stat -c '%a %U:%G %n' /etc/camstream/agent.yaml /var/lib/camstream /opt/camstream/camstream-agent.jar
-          test "$(stat -c '%a' /etc/camstream/agent.yaml)" = "640"
-          test "$(stat -c '%a' /var/lib/camstream)" = "700"
+          # sudo, because /etc/camstream is 0750 root:camstream and the runner
+          # is not in that group — which is the point of it.
+          sudo stat -c '%a %U:%G %n' \
+            /etc/camstream /etc/camstream/agent.yaml /var/lib/camstream /opt/camstream/camstream-agent.jar
+          test "$(sudo stat -c '%a' /etc/camstream/agent.yaml)" = "640"
+          test "$(sudo stat -c '%a' /var/lib/camstream)" = "700"
+          test "$(sudo stat -c '%U' /var/lib/camstream)" = "camstream"
+          # The config holds camera credentials: readable by the service, not by
+          # ordinary users on the box.
+          sudo -u nobody cat /etc/camstream/agent.yaml 2>/dev/null \
+            && { echo "config is world-readable" >&2; exit 1; } || echo "config is not readable by others"
+
+          echo "--- the unit runs the JRE that was verified ---"
+          sudo grep -E '^ExecStart=' /etc/systemd/system/camstream-agent.service
+          sudo grep -qE "^ExecStart=$JAVA_HOME/bin/java " /etc/systemd/system/camstream-agent.service
 
       # It cannot connect — there is no certificate and the endpoints are
       # invalid — but it must fail by reporting that, not by hanging or by
