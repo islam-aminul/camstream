@@ -14,6 +14,18 @@ const MAX_DISCOVERED = 256;
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const iot = new IoTClient({});
 
+/**
+ * `identity` and `model` are DynamoDB reserved words, so they cannot appear
+ * literally in an expression. This surfaced only once a real camera was
+ * discovered — every earlier test found nothing to report, so the path had
+ * never run.
+ */
+const RESERVED_NAMES = (thingName: string) => ({
+  '#agent': thingName,
+  '#identity': 'identity',
+  '#model': 'model',
+});
+
 /** Certificate id -> thing name, cached for the container's lifetime. */
 const thingNameByCertId = new Map<string, string>();
 
@@ -244,22 +256,26 @@ async function recordDiscoveries(pk: string, thingName: string, reported: unknow
           TableName: TABLE,
           Key: { pk, sk: key.discovered(identity) },
           UpdateExpression:
-            'SET identity = :identity, identityStable = :stable, reachableBy.#agent = :sighting, ' +
+            'SET #identity = :identity, identityStable = :stable, reachableBy.#agent = :sighting, ' +
             'lastSeen = :now, expiresAt = :expiresAt, macAddress = if_not_exists(macAddress, :mac), ' +
-            'manufacturer = if_not_exists(manufacturer, :make), model = if_not_exists(model, :model)',
-          ExpressionAttributeNames: { '#agent': thingName },
+            'manufacturer = if_not_exists(manufacturer, :make), #model = if_not_exists(#model, :model)',
+          ExpressionAttributeNames: RESERVED_NAMES(thingName),
           ExpressionAttributeValues: values,
           ConditionExpression: 'attribute_exists(reachableBy)',
         }));
       } catch {
-        // First sighting: the map does not exist yet.
+        // First sighting: the map does not exist yet, so create the record
+        // whole. :sighting is deliberately dropped — DynamoDB rejects an
+        // ExpressionAttributeValues entry that the expression never uses.
+        const { ':sighting': _unused, ...withoutSighting } = values;
         await ddb.send(new UpdateCommand({
           TableName: TABLE,
           Key: { pk, sk: key.discovered(identity) },
           UpdateExpression:
-            'SET identity = :identity, identityStable = :stable, reachableBy = :first, ' +
-            'macAddress = :mac, manufacturer = :make, model = :model, lastSeen = :now, expiresAt = :expiresAt',
-          ExpressionAttributeValues: { ...values, ':first': { [thingName]: sighting } },
+            'SET #identity = :identity, identityStable = :stable, reachableBy = :first, ' +
+            'macAddress = :mac, manufacturer = :make, #model = :model, lastSeen = :now, expiresAt = :expiresAt',
+          ExpressionAttributeNames: { '#identity': 'identity', '#model': 'model' },
+          ExpressionAttributeValues: { ...withoutSighting, ':first': { [thingName]: sighting } },
         }));
       }
     }),

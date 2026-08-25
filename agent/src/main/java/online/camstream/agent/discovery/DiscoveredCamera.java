@@ -76,6 +76,8 @@ public final class DiscoveredCamera {
         public Integer height;
         public Integer fps;
         public Integer bitrateKbps;
+        /** GOP length in frames, where the camera reports it. */
+        public Integer gopFrames;
         public String rtspUrl;
 
         /** Rough guess at which CamStream profile this maps to. */
@@ -111,6 +113,7 @@ public final class DiscoveredCamera {
             safe.height = source.height;
             safe.fps = source.fps;
             safe.bitrateKbps = source.bitrateKbps;
+            safe.gopFrames = source.gopFrames;
             // rtspUrl intentionally omitted — it can contain user:pass@.
             copy.profiles.put(entry.getKey(), safe);
         }

@@ -28,6 +28,7 @@ public final class DiscoveryService implements CameraSource {
     private final java.util.function.Function<String, List<Credential>> credentials;
     private final String rtspTransport;
     private final int maxHosts;
+    private final List<String> extraNetworks;
 
     /** Last full result, including credential-bearing URLs. Never leaves the agent. */
     private volatile Map<String, DiscoveredCamera> lastScan = Map.of();
@@ -37,10 +38,12 @@ public final class DiscoveryService implements CameraSource {
             String rtspTransport,
             List<String> rtspPaths,
             int maxHosts,
+            List<String> extraNetworks,
             java.util.function.Function<String, List<Credential>> credentials) {
         this.rtspProbe = new RtspProbe(ffprobePath);
         this.rtspTransport = rtspTransport;
         this.maxHosts = maxHosts;
+        this.extraNetworks = extraNetworks == null ? List.of() : List.copyOf(extraNetworks);
         this.credentials = credentials;
         this.pathGuesser = new RtspPathGuesser(rtspProbe, rtspPaths, rtspTransport);
     }
@@ -77,7 +80,7 @@ public final class DiscoveryService implements CameraSource {
         }
 
         // Then sweep for anything that ignored it.
-        for (Map.Entry<String, PortScanner.OpenPorts> entry : PortScanner.scan(maxHosts).entrySet()) {
+        for (Map.Entry<String, PortScanner.OpenPorts> entry : PortScanner.scan(maxHosts, extraNetworks).entrySet()) {
             PortScanner.OpenPorts open = entry.getValue();
             DiscoveredCamera camera = found.computeIfAbsent(entry.getKey(), host -> {
                 DiscoveredCamera fresh = new DiscoveredCamera();
@@ -114,7 +117,16 @@ public final class DiscoveryService implements CameraSource {
             assignIdentity(camera);
         }
 
-        lastScan = found;
+        // Re-key by identity. The sweep collects by IP address because that is
+        // all it knows at the time, but every consumer looks a camera up by the
+        // identity assigned afterwards — an approved camera resolved to nothing
+        // while these disagreed.
+        Map<String, DiscoveredCamera> byIdentity = new LinkedHashMap<>();
+        for (DiscoveredCamera camera : found.values()) {
+            byIdentity.put(camera.id, camera);
+        }
+        lastScan = byIdentity;
+
         long usable = found.values().stream()
                 .filter(c -> c.authState == DiscoveredCamera.AuthState.AUTHENTICATED).count();
         log.info("discovery complete: {} device(s), {} usable", found.size(), usable);
