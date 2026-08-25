@@ -27,6 +27,10 @@ export class Identity extends Construct {
         // Immutable: re-tenanting a user must be a deliberate re-create, not an
         // attribute edit that silently widens their camera access.
         tenantId: new cognito.StringAttribute({ minLen: 3, maxLen: 32, mutable: false }),
+        // Comma-separated premises ids. Empty means every site in the tenant.
+        // Mutable, because moving someone between sites is routine whereas
+        // moving them between tenants should be a deliberate re-create.
+        premises: new cognito.StringAttribute({ minLen: 0, maxLen: 512, mutable: true }),
       },
       passwordPolicy: {
         minLength: 12,
@@ -39,15 +43,31 @@ export class Identity extends Construct {
       removalPolicy: RemovalPolicy.DESTROY,
     });
 
-    // Administrator rights are group membership, checked by the admin Lambda.
-    // Kept out of the token's custom attributes deliberately: a group can be
-    // revoked centrally, whereas an attribute rides in every unexpired token.
-    new cognito.CfnUserPoolGroup(this, 'AdminGroup', {
-      userPoolId: this.userPool.userPoolId,
-      groupName: 'admin',
-      description: 'May manage users, agents and cameras within their tenant',
-      precedence: 0,
-    });
+    // Roles are groups, not token attributes: a group can be revoked centrally
+    // and takes effect on the next token refresh, whereas an attribute rides in
+    // every unexpired token until it lapses.
+    // Construct ids are pinned rather than derived from the role name: the
+    // admin group already exists, and renaming its logical id would make
+    // CloudFormation create a second group of the same name before deleting
+    // the first, which collides and rolls the whole update back.
+    const roles: { id: string; name: string; precedence: number; description: string }[] = [
+      { id: 'SuperadminGroup', name: 'superadmin', precedence: 0,
+        description: 'Platform operator — may act across every tenant' },
+      { id: 'AdminGroup', name: 'admin', precedence: 1,
+        description: 'Manages users, premises, agents and cameras in their tenant' },
+      { id: 'OperatorGroup', name: 'operator', precedence: 2,
+        description: 'Manages premises, agents and cameras; may set camera credentials' },
+      { id: 'ViewerGroup', name: 'viewer', precedence: 3,
+        description: 'Watches streams only' },
+    ];
+    for (const role of roles) {
+      new cognito.CfnUserPoolGroup(this, role.id, {
+        userPoolId: this.userPool.userPoolId,
+        groupName: role.name,
+        description: role.description,
+        precedence: role.precedence,
+      });
+    }
 
     this.userPoolClient = this.userPool.addClient('WebClient', {
       userPoolClientName: 'camstream-web',

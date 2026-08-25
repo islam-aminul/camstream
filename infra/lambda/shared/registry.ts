@@ -1,7 +1,10 @@
 /**
  * Registry key layout.
  *
+ *   TENANT#<t>  PREMISES#<premisesId>           a physical site
+ *   TENANT#<t>  ENROLLMENT#<token>              one-time agent enrollment token
  *   TENANT#<t>  DEVICE#<thingName>              an enrolled agent
+ *   TENANT#<t>  LIVECAMERA#<thing>#<cameraId>   a camera an agent can publish
  *   TENANT#<t>  DISCOVERED#<identity>           a physical camera, as seen by any agent
  *   TENANT#<t>  CAMERA#<identity>               a camera an administrator approved
  *   TENANT#<t>  DEMAND#<sessionId>              what one viewer currently wants
@@ -15,7 +18,11 @@
  */
 
 export const key = {
+  premises: (premisesId: string) => `PREMISES#${premisesId}`,
+  enrollment: (token: string) => `ENROLLMENT#${token}`,
   device: (thingName: string) => `DEVICE#${thingName}`,
+  /** A camera an agent is currently able to publish, as reported by it. */
+  liveCamera: (thingName: string, cameraId: string) => `LIVECAMERA#${thingName}#${cameraId}`,
   discovered: (identity: string) => `DISCOVERED#${identity}`,
   camera: (identity: string) => `CAMERA#${identity}`,
   demand: (sessionId: string) => `DEMAND#${sessionId}`,
@@ -53,6 +60,35 @@ export interface DiscoveredRecord {
   reachableBy: Record<string, Sighting>;
   lastSeen: number;
   expiresAt: number;
+}
+
+export interface PremisesRecord {
+  pk: string;
+  sk: string;
+  premisesId: string;
+  displayName: string;
+  address?: string;
+  createdAt: number;
+  createdBy: string;
+}
+
+/**
+ * A one-time token that lets one installer enrol exactly one agent.
+ *
+ * The claim certificate in an installer is shared by every download, so this is
+ * the credential that actually authorises provisioning. Consumed atomically by
+ * the pre-provisioning hook.
+ */
+export interface EnrollmentRecord {
+  pk: string;
+  sk: string;
+  token: string;
+  thingName: string;
+  premisesId: string;
+  issuedAt: number;
+  issuedBy: string;
+  expiresAt: number;
+  usedAt?: number;
 }
 
 export interface CameraRecord {

@@ -32,7 +32,7 @@ export async function handler(
     new QueryCommand({
       TableName: TABLE,
       KeyConditionExpression: 'pk = :pk AND begins_with(sk, :prefix)',
-      ExpressionAttributeValues: { ':pk': `TENANT#${tenantId}`, ':prefix': 'CAMERA#' },
+      ExpressionAttributeValues: { ':pk': `TENANT#${tenantId}`, ':prefix': 'LIVECAMERA#' },
     }),
   );
 

@@ -93,24 +93,54 @@ export class Ingest extends Construct {
             }),
           },
           {
-            Sid: 'SubscribeOwnWatchTopic',
+            // watch  — which renditions to publish
+            // config — a version number telling the agent to re-fetch its
+            //          configuration; the payload itself is fetched over HTTPS
+            //          because credentials and assignments outgrow an MQTT
+            //          message on a large site
+            // command — one-off instructions such as "scan now"
+            Sid: 'SubscribeOwnTopics',
             Effect: 'Allow',
             Action: 'iot:Subscribe',
-            Resource: stack.formatArn({
-              service: 'iot',
-              resource: 'topicfilter',
-              resourceName: 'camstream/${iot:Connection.Thing.ThingName}/watch',
-            }),
+            Resource: [
+              stack.formatArn({
+                service: 'iot',
+                resource: 'topicfilter',
+                resourceName: 'camstream/${iot:Connection.Thing.ThingName}/watch',
+              }),
+              stack.formatArn({
+                service: 'iot',
+                resource: 'topicfilter',
+                resourceName: 'camstream/${iot:Connection.Thing.ThingName}/config',
+              }),
+              stack.formatArn({
+                service: 'iot',
+                resource: 'topicfilter',
+                resourceName: 'camstream/${iot:Connection.Thing.ThingName}/command',
+              }),
+            ],
           },
           {
-            Sid: 'ReceiveOwnWatchTopic',
+            Sid: 'ReceiveOwnTopics',
             Effect: 'Allow',
             Action: 'iot:Receive',
-            Resource: stack.formatArn({
-              service: 'iot',
-              resource: 'topic',
-              resourceName: 'camstream/${iot:Connection.Thing.ThingName}/watch',
-            }),
+            Resource: [
+              stack.formatArn({
+                service: 'iot',
+                resource: 'topic',
+                resourceName: 'camstream/${iot:Connection.Thing.ThingName}/watch',
+              }),
+              stack.formatArn({
+                service: 'iot',
+                resource: 'topic',
+                resourceName: 'camstream/${iot:Connection.Thing.ThingName}/config',
+              }),
+              stack.formatArn({
+                service: 'iot',
+                resource: 'topic',
+                resourceName: 'camstream/${iot:Connection.Thing.ThingName}/command',
+              }),
+            ],
           },
         ],
       },
