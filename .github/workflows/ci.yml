@@ -102,7 +102,9 @@ jobs:
           discoveryEnabled: false
           cameras: []
           YAML
-          sudo /tmp/unpack/install.sh /tmp/agent.yaml
+          # sudo does not inherit the runner's PATH, so the JRE is named
+          # explicitly — exactly the situation the installer's check is for.
+          sudo /tmp/unpack/install.sh --java "$JAVA_HOME/bin/java" /tmp/agent.yaml
 
       - name: Verify what the installer produced
         run: |
@@ -171,8 +173,9 @@ jobs:
           fail=0
           # Private keys of any kind, AWS access key ids, and the device
           # material that must never leave a customer's premises.
-          if git grep -nIE -- '-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----' \
-               -- . ':(exclude)infra/keys/*public*'; then
+          # Anchored: a real PEM has the header alone on its own line, whereas
+          # source that writes one has it inside a string literal.
+          if git grep -nIE -- '^-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----$'; then
             echo "::error::a private key is committed"; fail=1
           fi
           if git grep -nIE 'AKIA[0-9A-Z]{16}'; then
