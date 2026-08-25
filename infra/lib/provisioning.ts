@@ -64,33 +64,17 @@ export class Provisioning extends Construct {
       sourceAccount: stack.account,
     });
 
-    // What IoT itself may do while registering a device — deliberately only
-    // the things this template needs.
+    // AWS publishes a managed policy for precisely this role. RegisterThing
+    // touches around two dozen IoT actions — including several, like
+    // ListThingGroupsForThing, that are not obvious from the template body —
+    // and a hand-written list fails at registration time rather than at deploy.
     const provisioningRole = new iam.Role(this, 'ProvisioningRole', {
       roleName: 'camstream-fleet-provisioning-role',
       assumedBy: new iam.ServicePrincipal('iot.amazonaws.com'),
       description: 'Used by AWS IoT to register CamStream agents from a claim certificate',
-      inlinePolicies: {
-        register: new iam.PolicyDocument({
-          statements: [
-            new iam.PolicyStatement({
-              actions: [
-                'iot:RegisterThing',
-                'iot:CreateThing',
-                'iot:DescribeThing',
-                'iot:UpdateThing',
-                'iot:AddThingToThingGroup',
-                'iot:DescribeCertificate',
-                'iot:UpdateCertificate',
-                'iot:AttachThingPrincipal',
-                'iot:AttachPolicy',
-                'iot:AttachPrincipalPolicy',
-              ],
-              resources: ['*'],
-            }),
-          ],
-        }),
-      },
+      managedPolicies: [
+        iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSIoTThingsRegistration'),
+      ],
     });
 
     new iot.CfnProvisioningTemplate(this, 'Template', {

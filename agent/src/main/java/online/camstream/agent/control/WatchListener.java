@@ -14,7 +14,6 @@ import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashSet;
 import java.util.Set;
 import java.util.concurrent.ExecutionException;
-import java.util.function.Consumer;
 
 /**
  * Subscribes to this device's watch topic and reports the desired set of
@@ -28,11 +27,25 @@ public final class WatchListener implements AutoCloseable {
     private static final Logger log = LoggerFactory.getLogger(WatchListener.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
-    private final MqttClientConnection connection;
-    private final String topic;
+    /** What the agent reacts to, all pushed over the one connection. */
+    public interface Handlers {
+        void onDesiredState(Set<Rendition> desired);
 
-    public WatchListener(AgentConfig config, Consumer<Set<Rendition>> onDesiredState) {
-        this.topic = "camstream/" + config.thingName() + "/watch";
+        /** A newer configuration exists; fetch it. */
+        void onConfigVersion(long version);
+
+        /** A one-off instruction such as "scan now". */
+        void onCommand(String action);
+
+        /** The connection came up — report, and reconcile configuration. */
+        void onConnected();
+    }
+
+    private final MqttClientConnection connection;
+    private final String prefix;
+
+    public WatchListener(AgentConfig config, Handlers handlers) {
+        this.prefix = "camstream/" + config.thingName();
 
         try (AwsIotMqttConnectionBuilder builder = AwsIotMqttConnectionBuilder
                 .newMtlsBuilderFromPath(config.certificatePath, config.privateKeyPath)) {
@@ -47,20 +60,41 @@ public final class WatchListener implements AutoCloseable {
         try {
             connection.connect().get();
             log.info("connected to {} as {}", config.iotDataEndpoint, config.thingName());
-            connection.subscribe(topic, QualityOfService.AT_LEAST_ONCE, message -> {
-                try {
-                    onDesiredState.accept(parse(new String(message.getPayload(), StandardCharsets.UTF_8)));
-                } catch (RuntimeException e) {
-                    log.warn("ignoring malformed watch message: {}", e.toString());
-                }
-            }).get();
-            log.info("subscribed to {}", topic);
+
+            subscribe(prefix + "/watch", payload ->
+                    handlers.onDesiredState(parse(payload)));
+            subscribe(prefix + "/config", payload ->
+                    handlers.onConfigVersion(MAPPER.readTree(payload).path("configVersion").asLong(-1)));
+            subscribe(prefix + "/command", payload ->
+                    handlers.onCommand(MAPPER.readTree(payload).path("action").asText("")));
+
+            // Only after subscriptions exist, so nothing published in response
+            // to the report is missed.
+            handlers.onConnected();
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new IllegalStateException("Interrupted connecting to AWS IoT", e);
         } catch (ExecutionException e) {
             throw new IllegalStateException("Could not connect to AWS IoT", e.getCause());
         }
+    }
+
+    /** A malformed message must never take down the connection. */
+    private void subscribe(String topic, PayloadHandler handler)
+            throws InterruptedException, ExecutionException {
+        connection.subscribe(topic, QualityOfService.AT_LEAST_ONCE, message -> {
+            try {
+                handler.accept(new String(message.getPayload(), StandardCharsets.UTF_8));
+            } catch (Exception e) {
+                log.warn("ignoring malformed message on {}: {}", topic, e.toString());
+            }
+        }).get();
+        log.info("subscribed to {}", topic);
+    }
+
+    @FunctionalInterface
+    private interface PayloadHandler {
+        void accept(String payload) throws Exception;
     }
 
     static Set<Rendition> parse(String payload) {

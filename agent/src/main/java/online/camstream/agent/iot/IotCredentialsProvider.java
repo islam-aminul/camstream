@@ -10,7 +10,6 @@ import software.amazon.awssdk.auth.credentials.AwsSessionCredentials;
 import javax.net.ssl.KeyManagerFactory;
 import javax.net.ssl.SSLContext;
 import java.io.IOException;
-import java.io.InputStream;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -51,7 +50,8 @@ public final class IotCredentialsProvider implements AwsCredentialsProvider {
         this.endpoint = URI.create(
                 "https://" + config.iotCredentialsEndpoint + "/role-aliases/" + config.roleAlias + "/credentials");
         this.http = HttpClient.newBuilder()
-                .sslContext(mutualTlsContext(Path.of(config.keystorePath), config.keystorePassword))
+                .sslContext(mutualTlsContext(
+                        Path.of(config.certificatePath), Path.of(config.privateKeyPath)))
                 .connectTimeout(Duration.ofSeconds(10))
                 .build();
     }
@@ -100,23 +100,27 @@ public final class IotCredentialsProvider implements AwsCredentialsProvider {
     }
 
     /**
-     * Builds an SSL context presenting the device certificate. The default
-     * trust store is kept, which already contains the Amazon root CAs.
+     * Builds an SSL context presenting the device certificate, from the same
+     * PEM files the MQTT client uses. The default trust store is kept, which
+     * already contains the Amazon root CAs.
      */
-    private static SSLContext mutualTlsContext(Path keystorePath, String password) {
-        try (InputStream in = Files.newInputStream(keystorePath)) {
-            char[] secret = password == null ? new char[0] : password.toCharArray();
-            KeyStore keyStore = KeyStore.getInstance("PKCS12");
-            keyStore.load(in, secret);
+    private static SSLContext mutualTlsContext(Path certificatePath, Path privateKeyPath) {
+        try {
+            // Ephemeral: the keystore exists only for the life of this context,
+            // so the password protects nothing that outlives the process.
+            char[] password = new char[0];
+            KeyStore keyStore = PemKeys.keyStore(
+                    Files.readString(certificatePath), Files.readString(privateKeyPath), password);
 
             KeyManagerFactory keyManagers = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm());
-            keyManagers.init(keyStore, secret);
+            keyManagers.init(keyStore, password);
 
             SSLContext context = SSLContext.getInstance("TLSv1.2");
             context.init(keyManagers.getKeyManagers(), null, null);
             return context;
         } catch (Exception e) {
-            throw new IllegalStateException("Could not load device keystore " + keystorePath, e);
+            throw new IllegalStateException(
+                    "Could not build a TLS context from " + certificatePath + " and " + privateKeyPath, e);
         }
     }
 }

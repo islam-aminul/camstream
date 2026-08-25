@@ -23,8 +23,21 @@ public final class AgentConfig {
     /** Tenant this device belongs to; must match the tenant half of the thing name. */
     public String tenantId;
 
-    /** Device half of the thing name. Thing name is {@code <tenantId>--<deviceId>}. */
+    /** Site this device belongs to. Thing name is {@code <tenant>--<premises>--<device>}. */
+    public String premisesId;
+
+    /** Device half of the thing name. */
     public String deviceId;
+
+    /**
+     * Identity file produced by the admin console. When present, the agent
+     * enrols itself on first boot and takes its endpoints from here, so a
+     * config file need only carry local preferences.
+     */
+    public String identityFile;
+
+    /** Where the device certificate, keys and working state live. */
+    public String stateDir;
 
     /** Friendly site label, reported on heartbeat. */
     public String siteName;
@@ -41,15 +54,11 @@ public final class AgentConfig {
     public String roleAlias = "camstream-device";
 
     /**
-     * PKCS#12 keystore holding the device certificate and private key, used by
-     * JSSE for the HTTPS call to the IoT credentials endpoint.
-     */
-    public String keystorePath;
-    public String keystorePassword;
-
-    /**
-     * The same identity in PEM form. The MQTT client is the AWS CRT, which
-     * reads PEM rather than a Java keystore.
+     * The device certificate and key, in PEM.
+     *
+     * Written by fleet provisioning on first boot. Used directly by the CRT
+     * MQTT client, and converted in memory for the JSSE call to the IoT
+     * credentials endpoint — no PKCS#12 file is kept on disk.
      */
     public String certificatePath;
     public String privateKeyPath;
@@ -132,14 +141,55 @@ public final class AgentConfig {
     public List<CameraConfig> cameras = new ArrayList<>();
 
     public static AgentConfig load(Path path) throws IOException {
-        ObjectMapper mapper = new ObjectMapper(new YAMLFactory());
-        AgentConfig config = mapper.readValue(Files.readString(path), AgentConfig.class);
+        AgentConfig config = loadRaw(path);
+        config.resolveStatePaths();
         config.validate();
         return config;
     }
 
+    /**
+     * Reads the file without validating.
+     *
+     * Enrollment fills in most of the required fields, so validation cannot run
+     * until the identity file has been applied.
+     */
+    public static AgentConfig loadRaw(Path path) throws IOException {
+        ObjectMapper mapper = new ObjectMapper(new YAMLFactory());
+        return mapper.readValue(Files.readString(path), AgentConfig.class);
+    }
+
     public String thingName() {
-        return tenantId + "--" + deviceId;
+        return tenantId + "--" + premisesId + "--" + deviceId;
+    }
+
+    /**
+     * Fills in everything the admin console already knows.
+     *
+     * Explicit values in the config file win: an operator who overrode an
+     * endpoint for a proxied or air-gapped site meant it.
+     */
+    public void applyIdentity(online.camstream.agent.provisioning.IdentityFile identity) {
+        tenantId = orElse(tenantId, identity.tenantId);
+        premisesId = orElse(premisesId, identity.premisesId);
+        deviceId = orElse(deviceId, identity.deviceId);
+        region = orElse(region, identity.region);
+        bucket = orElse(bucket, identity.bucket);
+        apiInvokeUrl = orElse(apiInvokeUrl, identity.apiInvokeUrl);
+        iotDataEndpoint = orElse(iotDataEndpoint, identity.iotDataEndpoint);
+        iotCredentialsEndpoint = orElse(iotCredentialsEndpoint, identity.iotCredentialsEndpoint);
+        roleAlias = orElse(roleAlias, identity.roleAlias);
+    }
+
+    /** Resolves paths that default to sitting under the state directory. */
+    public void resolveStatePaths() {
+        Path state = Path.of(stateDir == null || stateDir.isBlank() ? "." : stateDir);
+        certificatePath = orElse(certificatePath, state.resolve("device.crt").toString());
+        privateKeyPath = orElse(privateKeyPath, state.resolve("device.key").toString());
+        credentialKeyPath = orElse(credentialKeyPath, state.resolve("credential-key.pem").toString());
+    }
+
+    private static String orElse(String current, String fallback) {
+        return current == null || current.isBlank() ? fallback : current;
     }
 
     /** S3 key prefix this device is allowed to write beneath. */
@@ -149,10 +199,10 @@ public final class AgentConfig {
 
     public void validate() {
         requireId("tenantId", tenantId);
+        requireId("premisesId", premisesId);
         requireId("deviceId", deviceId);
         require("bucket", bucket);
         require("iotCredentialsEndpoint", iotCredentialsEndpoint);
-        require("keystorePath", keystorePath);
         require("certificatePath", certificatePath);
         require("privateKeyPath", privateKeyPath);
         require("apiInvokeUrl", apiInvokeUrl);
@@ -174,16 +224,14 @@ public final class AgentConfig {
             throw new IllegalArgumentException("discoveryMaxHosts must be 0 (unlimited) or positive");
         }
         if (credentialKeyPath == null || credentialKeyPath.isBlank()) {
-            Path keystore = Path.of(keystorePath);
-            Path parent = keystore.getParent();
+            Path certificate = Path.of(certificatePath);
+            Path parent = certificate.getParent();
             credentialKeyPath = (parent == null ? Path.of("credential-key.pem")
                     : parent.resolve("credential-key.pem")).toString();
         }
-        // An agent may legitimately start with no cameras: discovery finds them
-        // and an administrator approves them afterwards.
-        if (cameras.isEmpty() && !discoveryEnabled) {
-            throw new IllegalArgumentException("no cameras configured and discovery is disabled");
-        }
+        // No cameras is a normal starting state, not an error: discovery finds
+        // them, or an administrator assigns them centrally. Refusing to start
+        // here would break exactly the zero-touch install this is built for.
         for (CameraConfig camera : cameras) {
             camera.validate();
         }
