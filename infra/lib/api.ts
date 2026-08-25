@@ -10,6 +10,7 @@ import { NodejsFunction, OutputFormat } from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as cr from 'aws-cdk-lib/custom-resources';
 import * as iot from 'aws-cdk-lib/aws-iot';
+import * as s3 from 'aws-cdk-lib/aws-s3';
 import { Construct } from 'constructs';
 import * as path from 'node:path';
 import { CamStreamConfig } from './config';
@@ -21,6 +22,9 @@ export interface ApiProps {
   readonly liveBucketName: string;
   readonly claimCertParameterName: string;
   readonly provisioningTemplateName: string;
+  /** Version of the agent bundle installers should fetch. */
+  readonly agentVersion: string;
+  readonly liveBucket: s3.IBucket;
   readonly userPool: cognito.UserPool;
   readonly userPoolClient: cognito.UserPoolClient;
   readonly registryTable: dynamodb.Table;
@@ -239,6 +243,7 @@ export class Api extends Construct {
         IOT_CREDENTIAL_ENDPOINT: credentialEndpoint.getResponseField('endpointAddress'),
         LIVE_BUCKET: props.liveBucketName,
         API_INVOKE_URL: this.httpApi.apiEndpoint,
+        AGENT_VERSION: props.agentVersion,
       },
     });
     registryTable.grantReadWriteData(adminFn);
@@ -246,6 +251,8 @@ export class Api extends Construct {
       actions: ['iot:Publish'],
       resources: [stack.formatArn({ service: 'iot', resource: 'topic', resourceName: 'camstream/*' })],
     }));
+    // Presigning a download link needs read on the downloads prefix only.
+    props.liveBucket.grantRead(adminFn, 'downloads/*');
     adminFn.addToRolePolicy(new iam.PolicyStatement({
       actions: ['ssm:GetParameter'],
       resources: [stack.formatArn({
@@ -261,6 +268,8 @@ export class Api extends Construct {
           'cognito-idp:AdminDeleteUser',
           'cognito-idp:AdminAddUserToGroup',
           'cognito-idp:AdminRemoveUserFromGroup',
+          // Needed to report each user's role, which is group membership.
+          'cognito-idp:AdminListGroupsForUser',
         ],
         resources: [userPool.userPoolArn],
       }),
@@ -277,6 +286,7 @@ export class Api extends Construct {
       [apigwv2.HttpMethod.GET, '/api/admin/agents'],
       [apigwv2.HttpMethod.POST, '/api/admin/agents'],
       [apigwv2.HttpMethod.GET, '/api/admin/agents/{thingName}/identity'],
+      [apigwv2.HttpMethod.GET, '/api/admin/agents/{thingName}/installer'],
       [apigwv2.HttpMethod.POST, '/api/admin/scan'],
       [apigwv2.HttpMethod.GET, '/api/admin/discovered'],
       [apigwv2.HttpMethod.POST, '/api/admin/cameras'],

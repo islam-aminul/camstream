@@ -57,3 +57,18 @@ tar -czf "$OUT/camstream-agent-$VERSION-macos.tar.gz" -C "$macos_dir" .
 rm -rf "$OUT"/stage-*
 echo
 ls -lh "$OUT" | tail -n +2 | awk '{printf "  %-46s %s\n", $9, $5}'
+
+# Publishing makes the bundles fetchable by the installer scripts the admin
+# console generates. The prefix is not mapped by any CloudFront behaviour, so
+# they are reachable only through a presigned link.
+if [ "${CAMSTREAM_PUBLISH:-}" = "1" ]; then
+  BUCKET="$(aws cloudformation describe-stacks --stack-name "${CAMSTREAM_STACK:-CamStreamApp}" \
+    --region "${CAMSTREAM_REGION:-ap-south-1}" \
+    --query "Stacks[0].Outputs[?OutputKey=='LiveBucket'].OutputValue" --output text)"
+  echo
+  echo "Publishing to s3://$BUCKET/downloads/ ..."
+  aws s3 cp "$OUT/" "s3://$BUCKET/downloads/" --recursive \
+    --exclude "*" --include "camstream-agent-$VERSION-*" \
+    --region "${CAMSTREAM_REGION:-ap-south-1}" --only-show-errors
+  echo "Published."
+fi

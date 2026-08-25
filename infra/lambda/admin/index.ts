@@ -20,6 +20,7 @@ class Refused extends Error {
   }
 }
 import { key, slugFor, type CameraRecord, type DiscoveredRecord, type PremisesRecord } from '../shared/registry';
+import { buildInstaller, isPlatform, PLATFORMS } from './installer';
 
 const TABLE = process.env.REGISTRY_TABLE!;
 const USER_POOL_ID = process.env.USER_POOL_ID!;
@@ -29,6 +30,7 @@ const PROVISIONING_TEMPLATE = process.env.PROVISIONING_TEMPLATE!;
 const IOT_CREDENTIAL_ENDPOINT = process.env.IOT_CREDENTIAL_ENDPOINT!;
 const LIVE_BUCKET = process.env.LIVE_BUCKET!;
 const API_INVOKE_URL = process.env.API_INVOKE_URL!;
+const AGENT_VERSION = process.env.AGENT_VERSION ?? '0.1.0';
 
 /** An installer is useless without a token, so the token is short-lived. */
 const ENROLLMENT_TTL_SECONDS = 14 * 24 * 60 * 60;
@@ -58,6 +60,9 @@ export async function handler(
       case 'POST /api/admin/agents':     return await createAgent(caller, event.body);
       case 'GET /api/admin/agents/{thingName}/identity':
         return await agentIdentity(caller, event.pathParameters?.thingName);
+      case 'GET /api/admin/agents/{thingName}/installer':
+        return await agentInstaller(caller, event.pathParameters?.thingName,
+          event.queryStringParameters?.platform);
       case 'GET /api/admin/discovered':  return await listDiscovered(caller);
       case 'POST /api/admin/cameras':    return await approveCamera(caller, event.body);
       case 'DELETE /api/admin/cameras/{identity}':
@@ -278,6 +283,38 @@ async function agentIdentity(caller: Caller, thing: string | undefined) {
     claimCertificatePem: claimBundle.certificatePem,
     claimPrivateKey: claimBundle.privateKey,
   });
+}
+
+/**
+ * A ready-to-run installer for one agent and one platform.
+ *
+ * Returned as a script rather than an archive: the response carries the
+ * identity inline and a presigned link to the generic bundle, which keeps this
+ * a few kilobytes and leaves the 30MB binary cacheable and identical for every
+ * customer.
+ */
+async function agentInstaller(caller: Caller, thing: string | undefined, platform: unknown) {
+  if (!isPlatform(platform)) {
+    return fail(400, `platform must be one of ${PLATFORMS.join(', ')}`);
+  }
+  const identity = await agentIdentity(caller, thing);
+  if (identity.statusCode !== 200) {
+    return identity;
+  }
+
+  const installer = await buildInstaller(
+    platform, JSON.parse(identity.body ?? '{}'), LIVE_BUCKET, AGENT_VERSION);
+
+  return {
+    statusCode: 200,
+    headers: {
+      'content-type': installer.contentType,
+      'content-disposition': `attachment; filename="${installer.filename}"`,
+      // Contains a live enrollment token.
+      'cache-control': 'no-store',
+    },
+    body: installer.body,
+  };
 }
 
 // ----------------------------------------------------------------- cameras

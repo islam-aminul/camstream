@@ -1,16 +1,37 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
-  approveCamera, createUser, deleteUser, listAgents, listDiscovered, listUsers,
-  removeCamera, storeCredential,
-  type Agent, type AdminUser, type DiscoveredCamera, type Sighting,
+  approveCamera, createAgent, createPremises, createUser, deletePremises, deleteUser,
+  downloadInstaller, listAgents, listDiscovered, listPremises, listUsers,
+  removeCamera, requestScan, storeCredential, whoAmI,
+  type Agent, type AdminUser, type DiscoveredCamera, type Me, type Platform,
+  type Premises, type Role, type Sighting,
 } from './admin';
 import { cryptoAvailable, sealCredential } from './crypto';
 
-type Tab = 'cameras' | 'agents' | 'users';
+type Tab = 'cameras' | 'agents' | 'premises' | 'users';
+
+const PLATFORMS: { id: Platform; label: string }[] = [
+  { id: 'linux', label: 'Linux (systemd)' },
+  { id: 'windows', label: 'Windows' },
+  { id: 'macos', label: 'macOS' },
+];
+
+/**
+ * Guesses the platform of the machine the installer is likely destined for.
+ * Only a default — the agent is rarely installed on the browsing machine.
+ */
+function guessPlatform(): Platform {
+  const agent = navigator.userAgent;
+  if (/Windows/i.test(agent)) return 'windows';
+  if (/Mac OS X|Macintosh/i.test(agent)) return 'macos';
+  return 'linux';
+}
 
 export function Admin({ onExit }: { onExit: () => void }) {
   const [tab, setTab] = useState<Tab>('cameras');
+  const [me, setMe] = useState<Me | null>(null);
   const [agents, setAgents] = useState<Agent[]>([]);
+  const [premises, setPremises] = useState<Premises[]>([]);
   const [cameras, setCameras] = useState<DiscoveredCamera[]>([]);
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -20,10 +41,16 @@ export function Admin({ onExit }: { onExit: () => void }) {
     setBusy(true);
     setError(null);
     try {
-      const [a, c, u] = await Promise.all([listAgents(), listDiscovered(), listUsers()]);
+      const who = await whoAmI();
+      setMe(who);
+      const [a, p, c] = await Promise.all([listAgents(), listPremises(), listDiscovered()]);
       setAgents(a.agents);
+      setPremises(p.premises);
       setCameras(c.cameras);
-      setUsers(u.users);
+      // Only admins may list users; an operator asking would just get a 403.
+      if (who.role === 'admin' || who.role === 'superadmin') {
+        setUsers((await listUsers()).users);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not load');
     } finally {
@@ -56,18 +83,22 @@ export function Admin({ onExit }: { onExit: () => void }) {
       </header>
 
       <nav className="tabs">
-        {(['cameras', 'agents', 'users'] as Tab[]).map((name) => (
-          <button key={name} className={tab === name ? 'tab active' : 'tab'} onClick={() => setTab(name)}>
-            {name === 'cameras' ? 'Cameras' : name === 'agents' ? 'Agents' : 'Users'}
-          </button>
-        ))}
+        {(['cameras', 'agents', 'premises', 'users'] as Tab[])
+          .filter((name) => name !== 'users' || me?.role === 'admin' || me?.role === 'superadmin')
+          .map((name) => (
+            <button key={name} className={tab === name ? 'tab active' : 'tab'} onClick={() => setTab(name)}>
+              {name[0].toUpperCase() + name.slice(1)}
+            </button>
+          ))}
+        {me && <span className="role-chip">{me.tenantId} · {me.role}</span>}
       </nav>
 
       {error && <div className="notice error-notice">{error}</div>}
 
       {tab === 'cameras' && <Cameras cameras={cameras} agents={agents} act={act} />}
-      {tab === 'agents' && <Agents agents={agents} act={act} />}
-      {tab === 'users' && <Users users={users} act={act} />}
+      {tab === 'agents' && <Agents agents={agents} premises={premises} act={act} />}
+      {tab === 'premises' && <PremisesTab premises={premises} agents={agents} act={act} />}
+      {tab === 'users' && <Users users={users} premises={premises} me={me} act={act} />}
     </div>
   );
 }
@@ -240,36 +271,204 @@ function CredentialForm({ scope, agent, act }: {
   );
 }
 
-function Agents({ agents }: { agents: Agent[]; act: (work: () => Promise<unknown>) => Promise<void> }) {
-  if (agents.length === 0) return <p className="empty">No agents have checked in.</p>;
+function Agents({ agents, premises, act }: {
+  agents: Agent[];
+  premises: Premises[];
+  act: (work: () => Promise<unknown>) => Promise<void>;
+}) {
+  const [premisesId, setPremisesId] = useState('');
+  const [deviceId, setDeviceId] = useState('');
+  const [siteName, setSiteName] = useState('');
+  const [platform, setPlatform] = useState<Platform>(guessPlatform());
+  const [downloaded, setDownloaded] = useState<string | null>(null);
+
   return (
-    <table className="grid-table">
-      <thead>
-        <tr><th>Agent</th><th>Site</th><th>Version</th><th>Cameras</th><th>Key</th><th>Status</th></tr>
-      </thead>
-      <tbody>
-        {agents.map((agent) => (
-          <tr key={agent.thingName}>
-            <td><code>{agent.thingName}</code></td>
-            <td>{agent.siteName ?? '—'}</td>
-            <td>{agent.agentVersion ?? '—'}</td>
-            <td>{agent.cameraCount}</td>
-            <td>{agent.credentialPublicKey ? 'published' : <span className="muted">pending</span>}</td>
-            <td>
-              <span className={agent.online ? 'badge ok' : 'badge warn'}>
-                {agent.online ? 'online' : 'offline'}
-              </span>
-            </td>
-          </tr>
-        ))}
-      </tbody>
-    </table>
+    <div className="stack">
+      <section className="card">
+        <strong>Enrol an agent</strong>
+        <p className="muted small">
+          Creates the device and issues a single-use token. Download its installer, run it on the
+          box, and the agent enrols itself — no certificates to copy.
+        </p>
+        <div className="row">
+          <label>
+            Premises
+            <select value={premisesId} onChange={(e) => setPremisesId(e.target.value)}>
+              <option value="">Choose…</option>
+              {premises.map((p) => (
+                <option key={p.premisesId} value={p.premisesId}>{p.displayName}</option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Device id
+            <input value={deviceId} placeholder="gate-01"
+                   onChange={(e) => setDeviceId(e.target.value.toLowerCase())} />
+          </label>
+          <label>
+            Label
+            <input value={siteName} placeholder="Main Gate" onChange={(e) => setSiteName(e.target.value)} />
+          </label>
+          <button
+            disabled={!premisesId || !deviceId}
+            onClick={() => void act(async () => {
+              await createAgent({ premisesId, deviceId, siteName: siteName || deviceId });
+              setDeviceId('');
+              setSiteName('');
+            })}
+          >
+            Create
+          </button>
+        </div>
+        {premises.length === 0 && (
+          <p className="error">Create a premises first — an agent belongs to one.</p>
+        )}
+      </section>
+
+      {downloaded && (
+        <div className="notice">
+          Downloaded <code>{downloaded}</code>. It contains a single-use enrollment token — treat it
+          as a secret, and run it with administrator rights on the target machine.
+        </div>
+      )}
+
+      {agents.length === 0 ? (
+        <p className="empty">No agents yet.</p>
+      ) : (
+        <table className="grid-table">
+          <thead>
+            <tr>
+              <th>Agent</th><th>Premises</th><th>Version</th><th>Cameras</th>
+              <th>Status</th><th>Installer</th>
+            </tr>
+          </thead>
+          <tbody>
+            {agents.map((agent) => (
+              <tr key={agent.thingName}>
+                <td>
+                  <code>{agent.thingName}</code>
+                  {agent.siteName && <div className="muted small">{agent.siteName}</div>}
+                </td>
+                <td>{agent.premisesId ?? '—'}</td>
+                <td>{agent.agentVersion ?? <span className="muted">not enrolled</span>}</td>
+                <td>{agent.cameraCount}</td>
+                <td>
+                  <span className={agent.online ? 'badge ok' : 'badge warn'}>
+                    {agent.online ? 'online' : 'offline'}
+                  </span>
+                  {!agent.online && agent.disconnectReason && (
+                    <div className="muted small">{agent.disconnectReason.toLowerCase().replace(/_/g, ' ')}</div>
+                  )}
+                </td>
+                <td>
+                  <div className="row tight">
+                    <select value={platform} onChange={(e) => setPlatform(e.target.value as Platform)}>
+                      {PLATFORMS.map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}
+                    </select>
+                    <button onClick={() => void act(async () => {
+                      setDownloaded(await downloadInstaller(agent.thingName, platform));
+                    })}>
+                      Download
+                    </button>
+                    {agent.online && (
+                      <button onClick={() => void act(() => requestScan(agent.thingName))}>Scan now</button>
+                    )}
+                  </div>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
   );
 }
 
-function Users({ users, act }: { users: AdminUser[]; act: (work: () => Promise<unknown>) => Promise<void> }) {
+function PremisesTab({ premises, agents, act }: {
+  premises: Premises[];
+  agents: Agent[];
+  act: (work: () => Promise<unknown>) => Promise<void>;
+}) {
+  const [premisesId, setPremisesId] = useState('');
+  const [displayName, setDisplayName] = useState('');
+  const [address, setAddress] = useState('');
+
+  return (
+    <div className="stack">
+      <section className="card">
+        <strong>Add a premises</strong>
+        <p className="muted small">
+          A site. Its id becomes part of every agent name and stream path there, so it cannot be
+          changed afterwards — and it is what lets a viewer be restricted to one site.
+        </p>
+        <div className="row">
+          <label>
+            Id
+            <input value={premisesId} placeholder="acme-hq"
+                   onChange={(e) => setPremisesId(e.target.value.toLowerCase())} />
+          </label>
+          <label>
+            Name
+            <input value={displayName} placeholder="Acme HQ" onChange={(e) => setDisplayName(e.target.value)} />
+          </label>
+          <label>
+            Address
+            <input value={address} onChange={(e) => setAddress(e.target.value)} />
+          </label>
+          <button
+            disabled={!premisesId}
+            onClick={() => void act(async () => {
+              await createPremises({ premisesId, displayName: displayName || premisesId, address });
+              setPremisesId(''); setDisplayName(''); setAddress('');
+            })}
+          >
+            Create
+          </button>
+        </div>
+      </section>
+
+      {premises.length === 0 ? (
+        <p className="empty">No premises yet.</p>
+      ) : (
+        <table className="grid-table">
+          <thead><tr><th>Name</th><th>Id</th><th>Address</th><th>Agents</th><th /></tr></thead>
+          <tbody>
+            {premises.map((site) => {
+              const attached = agents.filter((a) => a.premisesId === site.premisesId).length;
+              return (
+                <tr key={site.premisesId}>
+                  <td>{site.displayName}</td>
+                  <td><code>{site.premisesId}</code></td>
+                  <td>{site.address ?? '—'}</td>
+                  <td>{attached}</td>
+                  <td>
+                    <button
+                      disabled={attached > 0}
+                      title={attached > 0 ? 'Remove its agents first' : undefined}
+                      onClick={() => void act(() => deletePremises(site.premisesId))}
+                    >
+                      Remove
+                    </button>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+}
+
+function Users({ users, premises, me, act }: {
+  users: AdminUser[];
+  premises: Premises[];
+  me: Me | null;
+  act: (work: () => Promise<unknown>) => Promise<void>;
+}) {
   const [email, setEmail] = useState('');
-  const [admin, setAdmin] = useState(false);
+  const [role, setRole] = useState<Role>('viewer');
+  const [scoped, setScoped] = useState<string[]>([]);
   return (
     <div className="stack">
       <section className="card">
@@ -280,29 +479,53 @@ function Users({ users, act }: { users: AdminUser[]; act: (work: () => Promise<u
             Email
             <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} />
           </label>
-          <label className="checkbox">
-            <input type="checkbox" checked={admin} onChange={(e) => setAdmin(e.target.checked)} />
-            Administrator
+          <label>
+            Role
+            <select value={role} onChange={(e) => setRole(e.target.value as Role)}>
+              <option value="viewer">Viewer — watch only</option>
+              <option value="operator">Operator — premises, agents, cameras</option>
+              <option value="admin">Admin — everything, including users</option>
+              {me?.role === 'superadmin' && <option value="superadmin">Superadmin — all tenants</option>}
+            </select>
+          </label>
+          <label>
+            Premises
+            <select
+              multiple
+              size={Math.min(4, Math.max(2, premises.length))}
+              value={scoped}
+              onChange={(e) => setScoped(Array.from(e.target.selectedOptions, (o) => o.value))}
+            >
+              {premises.map((p) => (
+                <option key={p.premisesId} value={p.premisesId}>{p.displayName}</option>
+              ))}
+            </select>
           </label>
           <button
             disabled={!email}
             onClick={() => void act(async () => {
-              await createUser({ email, admin });
-              setEmail('');
-              setAdmin(false);
+              await createUser({ email, role, premises: scoped });
+              setEmail(''); setRole('viewer'); setScoped([]);
             })}
           >
             Invite
           </button>
         </div>
+        <p className="muted small">
+          Selecting no premises grants every site in the tenant. Choosing exactly one restricts that
+          viewer's stream access to it; selecting several currently still grants the whole tenant,
+          because a CloudFront cookie carries a single wildcard.
+        </p>
       </section>
 
       <table className="grid-table">
-        <thead><tr><th>Email</th><th>Status</th><th /></tr></thead>
+        <thead><tr><th>Email</th><th>Role</th><th>Premises</th><th>Status</th><th /></tr></thead>
         <tbody>
           {users.map((user) => (
             <tr key={user.username}>
               <td>{user.email ?? user.username}</td>
+              <td><span className="badge">{user.role ?? 'viewer'}</span></td>
+              <td className="muted small">{user.premises || 'all sites'}</td>
               <td><span className="muted">{user.status?.toLowerCase().replace(/_/g, ' ')}</span></td>
               <td>
                 <button onClick={() => void act(() => deleteUser(user.username))}>Remove</button>

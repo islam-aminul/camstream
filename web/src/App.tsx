@@ -3,7 +3,7 @@ import { Player } from './Player';
 import { SessionSuperseded, listCameras, manifestFor, startSession, watch, type Camera, type SessionInfo } from './api';
 import { NewPasswordRequired, completeNewPassword, currentSession, signIn, signOut } from './auth';
 import { Admin } from './Admin';
-import { isAdmin } from './admin';
+import { canAdminister } from './admin';
 import type { CognitoUser } from 'amazon-cognito-identity-js';
 
 type Screen = 'loading' | 'login' | 'newPassword' | 'live';
@@ -37,7 +37,7 @@ export default function App() {
   const beginSession = useCallback(async () => {
     const info = await startSession();
     setSession(info);
-    setAdmin(await isAdmin());
+    setAdmin(await canAdminister());
     setScreen('live');
     setNotice(info.displacedPreviousSession ? 'Your previous session was signed out.' : null);
   }, []);

@@ -126,3 +126,7 @@ button.link {
 }
 .grid-table th { color: var(--muted); font-weight: 500; font-size: 12px; }
 .grid-table code { font-size: 12px; }
+.role-chip { margin-left: auto; color: var(--muted); font-size: 12px; align-self: center; }
+.row.tight { gap: 6px; }
+.row.tight select, .row.tight button { min-width: auto; padding: 6px 10px; font-size: 13px; }
+.row select[multiple] { padding: 4px; }
