@@ -14,10 +14,12 @@
                      services.msc.
 
 .EXAMPLE
-  .\install.ps1 -ConfigPath .\agent.yaml
+  .\install.ps1 -IdentityPath .\identity.json   # zero-touch enrollment
+  .\install.ps1 -ConfigPath .\agent.yaml        # pre-configured agent
 #>
 [CmdletBinding()]
 param(
+  [string]$IdentityPath,
   [string]$ConfigPath,
   [switch]$UseScheduledTask,
   [string]$InstallDir = "$env:ProgramFiles\CamStream",
@@ -61,7 +63,32 @@ New-Item -ItemType Directory -Force -Path $InstallDir, $DataDir, "$DataDir\logs"
 Write-Host 'Installing agent...'
 Copy-Item "$Here\camstream-agent.jar" "$InstallDir\camstream-agent.jar" -Force
 
-if ($ConfigPath) {
+if ($IdentityPath) {
+  if (-not (Test-Path $IdentityPath)) { throw "Identity file not found: $IdentityPath" }
+  # The agent enrols itself from this on first boot, then strips the secrets out
+  # of it and keeps the endpoints.
+  Copy-Item $IdentityPath "$DataDir\identity.json" -Force
+  if (-not (Test-Path "$DataDir\agent.yaml")) {
+    @"
+# Written by install.ps1. Everything about this device's identity and endpoints
+# comes from identity.json; only local preferences belong here.
+identityFile: $DataDir\identity.json
+stateDir: $DataDir
+
+segmentDurationMs: 2000
+playlistWindow: 4
+idleShutdownSeconds: 30
+
+discoveryEnabled: true
+discoveryIntervalMinutes: 30
+
+# Cameras are normally approved centrally in the admin console. Anything listed
+# here is configured locally and takes precedence.
+cameras: []
+"@ | Set-Content -Path "$DataDir\agent.yaml" -Encoding UTF8
+    Write-Host "  wrote $DataDir\agent.yaml"
+  }
+} elseif ($ConfigPath) {
   Copy-Item $ConfigPath "$DataDir\agent.yaml" -Force
 } elseif (-not (Test-Path "$DataDir\agent.yaml")) {
   Copy-Item "$Here\agent.yaml.example" "$DataDir\agent.yaml" -Force
@@ -69,7 +96,7 @@ if ($ConfigPath) {
 }
 
 # Device identity, if the provisioning bundle was placed alongside.
-foreach ($file in 'device.p12', 'device.crt', 'device.key', 'credential-key.pem') {
+foreach ($file in 'device.crt', 'device.key', 'credential-key.pem') {
   if (Test-Path "$Here\$file") { Copy-Item "$Here\$file" "$DataDir\$file" -Force }
 }
 

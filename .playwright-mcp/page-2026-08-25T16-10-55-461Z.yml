@@ -1,0 +1,14 @@
+- generic [ref=e12]:
+  - banner [ref=e13]:
+    - heading "CamStream — administration" [level=1] [ref=e14]
+    - generic [ref=e15]:
+      - button "Refresh" [ref=e16] [cursor=pointer]
+      - button "← Live view" [ref=e17] [cursor=pointer]
+  - navigation [ref=e18]:
+    - button "Cameras" [ref=e19] [cursor=pointer]
+    - button "Agents" [ref=e20] [cursor=pointer]
+    - button "Premises" [ref=e21] [cursor=pointer]
+    - button "Users" [ref=e22] [cursor=pointer]
+    - generic [ref=e23]: demo · superadmin
+  - generic [ref=e24]: Unexpected error
+  - paragraph [ref=e25]: No cameras discovered yet. Agents sweep their network every 30 minutes.

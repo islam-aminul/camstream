@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Installs CamStreamAgent as a systemd service.
 #
-#   sudo ./install.sh [path/to/agent.yaml]
+#   sudo ./install.sh --identity path/to/identity.json   # zero-touch enrollment
+#   sudo ./install.sh [path/to/agent.yaml]               # pre-configured agent
 #
 # Idempotent: re-running upgrades the jar and restarts the service, leaving the
 # configuration and the device's keys untouched.
@@ -15,6 +16,21 @@ STATE_DIR=/var/lib/camstream
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 [ "$(id -u)" -eq 0 ] || { echo "Run as root." >&2; exit 1; }
+
+IDENTITY=""
+CONFIG_SRC=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --identity) IDENTITY="${2:-}"; shift 2 ;;
+    --identity=*) IDENTITY="${1#*=}"; shift ;;
+    -h|--help) sed -n '2,12p' "$0"; exit 0 ;;
+    *) CONFIG_SRC="$1"; shift ;;
+  esac
+done
+if [ -n "$IDENTITY" ] && [ ! -f "$IDENTITY" ]; then
+  echo "ERROR: identity file not found: $IDENTITY" >&2
+  exit 1
+fi
 
 echo "Checking prerequisites..."
 missing=()
@@ -54,8 +70,33 @@ install -d -o root -g "$USER" -m 0750 "$CONFIG_DIR"
 echo "Installing agent..."
 install -o root -g root -m 0644 "$HERE/camstream-agent.jar" "$INSTALL_DIR/camstream-agent.jar"
 
-CONFIG_SRC="${1:-}"
-if [ -n "$CONFIG_SRC" ]; then
+if [ -n "$IDENTITY" ]; then
+  # The agent enrols itself from this on first boot, then strips the secrets
+  # out of it and keeps the endpoints.
+  install -o "$USER" -g "$USER" -m 0600 "$IDENTITY" "$STATE_DIR/identity.json"
+  if [ ! -f "$CONFIG_DIR/agent.yaml" ]; then
+    cat > "$CONFIG_DIR/agent.yaml" <<EOF
+# Written by install.sh. Everything about this device's identity and endpoints
+# comes from identity.json; only local preferences belong here.
+identityFile: $STATE_DIR/identity.json
+stateDir: $STATE_DIR
+
+segmentDurationMs: 2000
+playlistWindow: 4
+idleShutdownSeconds: 30
+
+discoveryEnabled: true
+discoveryIntervalMinutes: 30
+
+# Cameras are normally approved centrally in the admin console. Anything listed
+# here is configured locally and takes precedence.
+cameras: []
+EOF
+    chown root:"$USER" "$CONFIG_DIR/agent.yaml"
+    chmod 640 "$CONFIG_DIR/agent.yaml"
+    echo "  wrote $CONFIG_DIR/agent.yaml"
+  fi
+elif [ -n "$CONFIG_SRC" ]; then
   # 0640 root:camstream — the config holds camera credentials.
   install -o root -g "$USER" -m 0640 "$CONFIG_SRC" "$CONFIG_DIR/agent.yaml"
 elif [ ! -f "$CONFIG_DIR/agent.yaml" ]; then
@@ -65,7 +106,7 @@ fi
 
 # Device identity lives with the state, not the config, so a config change
 # never risks orphaning the credential key.
-for f in device.p12 device.crt device.key credential-key.pem; do
+for f in device.crt device.key credential-key.pem; do
   [ -f "$HERE/$f" ] && install -o "$USER" -g "$USER" -m 0600 "$HERE/$f" "$STATE_DIR/$f"
 done
 

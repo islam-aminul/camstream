@@ -63,20 +63,61 @@ npx cdk deploy CamStreamApp                  # 3. everything else
 cd .. && ./scripts/deploy-web.sh             # 4. the player
 ```
 
+## Roles
+
+| | superadmin | admin | operator | viewer |
+|---|---|---|---|---|
+| Act across tenants | ✓ | | | |
+| Manage users and roles | ✓ | ✓ own tenant | | |
+| Premises, agents, cameras | ✓ | ✓ | ✓ | |
+| Set camera credentials | ✓ | ✓ | ✓ | |
+| Watch streams | ✓ | ✓ | ✓ | ✓ |
+
+Roles are Cognito groups rather than token attributes, so revoking one takes
+effect on the next token refresh instead of whenever a token happens to lapse.
+Operators may set camera credentials because whoever installs a camera has its
+password — splitting those makes every site visit a two-person job. Credentials
+are write-only for every role; there is no endpoint that returns one.
+
+A user restricted to exactly one premises receives a cookie scoped to that
+site's prefix. Restricting to several still grants the whole tenant, because a
+CloudFront policy carries a single wildcard — the admin console says so rather
+than implying otherwise.
+
 ## Installing an agent
 
 `packaging/build-dist.sh` produces a bundle per platform under `dist/`. Each
 carries the jar, the installer, a config template, and the licence notices.
 
 ```bash
-./packaging/build-dist.sh
+./packaging/build-dist.sh                 # build only
+CAMSTREAM_PUBLISH=1 ./packaging/build-dist.sh   # and publish for installers
 ```
 
-**Linux** (systemd, the primary target):
+Publishing uploads the bundles to a `downloads/` prefix that no CloudFront
+behaviour maps to, so they are reachable only through a presigned link the
+console generates.
+
+The normal path is zero-touch: create a premises, enrol an agent, and download
+its installer from the admin console. That download is a few kilobytes — it
+carries the identity inline and a presigned link to the generic bundle, which
+stays identical for every customer and cached. It contains a single-use
+enrollment token, so treat it as a secret until it has been run.
+
+```bash
+sudo ./install-demo--acme-hq--gate-01.sh     # fetches the bundle and enrols
+```
+
+On first boot the agent exchanges the shared claim certificate and its token for
+its own certificate. Nothing is copied by hand, and no device private key ever
+passes through the console or a browser.
+
+To install from a pre-built bundle instead:
 
 ```bash
 tar -xzf camstream-agent-0.1.0-linux.tar.gz
-sudo ./install.sh /path/to/agent.yaml     # journalctl -u camstream-agent -f
+sudo ./install.sh --identity identity.json   # journalctl -u camstream-agent -f
+sudo ./install.sh /path/to/agent.yaml        # already-provisioned device
 ```
 
 Runs as an unprivileged `camstream` user under a hardened unit —
