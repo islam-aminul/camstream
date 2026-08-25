@@ -1,0 +1,34 @@
+- generic [ref=e22]:
+  - banner [ref=e23]:
+    - heading "CamStream — administration" [level=1] [ref=e24]
+    - generic [ref=e25]:
+      - button "Refresh" [ref=e26] [cursor=pointer]
+      - button "← Live view" [ref=e27] [cursor=pointer]
+  - navigation [ref=e28]:
+    - button "Cameras" [ref=e29] [cursor=pointer]
+    - button "Agents" [ref=e30] [cursor=pointer]
+    - button "Users" [active] [ref=e31] [cursor=pointer]
+  - generic [ref=e33]:
+    - generic [ref=e34]:
+      - strong [ref=e35]: Invite a viewer
+      - paragraph [ref=e36]: They receive a temporary password by email and choose their own on first sign-in.
+      - generic [ref=e37]:
+        - generic [ref=e38]:
+          - text: Email
+          - textbox "Email" [ref=e39]
+        - generic [ref=e40]:
+          - checkbox "Administrator" [ref=e41]
+          - text: Administrator
+        - button "Invite" [disabled] [ref=e42]
+    - table [ref=e43]:
+      - rowgroup [ref=e44]:
+        - row [ref=e45]:
+          - columnheader "Email" [ref=e46]
+          - columnheader "Status" [ref=e47]
+          - columnheader [ref=e48]
+      - rowgroup [ref=e49]:
+        - row [ref=e50]:
+          - cell "aminulislam@outlook.com" [ref=e51]
+          - cell "confirmed" [ref=e52]
+          - cell [ref=e53]:
+            - button "Remove" [ref=e54] [cursor=pointer]
