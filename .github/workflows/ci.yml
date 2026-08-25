@@ -89,9 +89,9 @@ jobs:
           mkdir -p /tmp/unpack
           tar -xzf dist/camstream-agent-*-linux.tar.gz -C /tmp/unpack
           cat > /tmp/agent.yaml <<'YAML'
-          tenantId: ci
-          premisesId: runner
-          deviceId: check
+          tenantId: ci-tenant
+          premisesId: ci-site
+          deviceId: ci-agent
           region: ap-south-1
           bucket: example-bucket
           apiInvokeUrl: https://example.invalid
@@ -140,7 +140,17 @@ jobs:
           sleep 8
           sudo journalctl -u camstream-agent --no-pager -n 30 | tee /tmp/log.txt
           grep -qiE "certificate|TLS context|No such file" /tmp/log.txt \
-            || { echo "expected a certificate-related failure" >&2; exit 1; }
+            || { echo "expected a certificate-related failure; got the above" >&2; exit 1; }
+
+      # A camera outage must not become an agent outage, so the unit restarts
+      # indefinitely. Proving that needs the service to have failed at least
+      # twice, which only the journal can show.
+      - name: Service restarts after failing
+        run: |
+          sleep 15
+          restarts="$(sudo journalctl -u camstream-agent --no-pager | grep -c 'Started camstream-agent')"
+          echo "starts observed: $restarts"
+          [ "$restarts" -ge 2 ] || { echo "expected the unit to restart" >&2; exit 1; }
 
       - name: Uninstall cleanly
         run: |
