@@ -84,6 +84,12 @@ site's prefix. Restricting to several still grants the whole tenant, because a
 CloudFront policy carries a single wildcard — the admin console says so rather
 than implying otherwise.
 
+Verified against the deployed system: a viewer scoped to `acme-hq` is issued
+`https://camstream.online/live/demo--acme-hq--*` and receives 200 for that
+site's streams and **403** for another premises in the same tenant, while an
+unscoped account gets `live/demo--*` and reaches both. This is the reason
+premises is in the thing name and the S3 key rather than being an attribute.
+
 ## Installing an agent
 
 `packaging/build-dist.sh` produces a bundle per platform under `dist/`. Each
