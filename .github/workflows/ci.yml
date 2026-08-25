@@ -1,0 +1,184 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# No AWS credentials anywhere in this workflow: it builds, tests and installs,
+# but never deploys. Deployment stays a deliberate act from a workstation.
+permissions:
+  contents: read
+
+jobs:
+  agent:
+    name: Agent (x86_64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      - name: Build and test
+        working-directory: agent
+        run: mvn -B --no-transfer-progress verify
+
+      # Development happens on arm64, so this is the only place the jar is
+      # proven to run on the architecture most customers will deploy to. The
+      # AWS CRT native is loaded rather than merely present.
+      - name: Load the AWS CRT native on this architecture
+        run: |
+          echo "runner architecture: $(uname -m)"
+          cat > /tmp/CrtCheck.java <<'JAVA'
+          import software.amazon.awssdk.crt.CRT;
+          public class CrtCheck {
+            public static void main(String[] args) {
+              System.out.println("crt os identifier : " + CRT.getOSIdentifier());
+              System.out.println("crt architecture  : " + CRT.getArchIdentifier());
+              System.out.println("jvm architecture  : " + System.getProperty("os.arch"));
+            }
+          }
+          JAVA
+          javac -cp agent/target/camstream-agent.jar -d /tmp /tmp/CrtCheck.java
+          java -cp "agent/target/camstream-agent.jar:/tmp" CrtCheck
+
+      - name: Agent starts and reports usage
+        run: |
+          set +e
+          output="$(java -jar agent/target/camstream-agent.jar 2>&1)"
+          status=$?
+          echo "$output"
+          [ "$status" -eq 2 ] || { echo "expected exit 2, got $status" >&2; exit 1; }
+          case "$output" in *"usage: camstream-agent"*) ;; *) echo "unexpected output" >&2; exit 1;; esac
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: camstream-agent-jar
+          path: agent/target/camstream-agent.jar
+          retention-days: 7
+
+  installer:
+    name: Linux installer
+    needs: agent
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      - name: Install ffmpeg
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+
+      - name: Build the distributable bundles
+        run: ./packaging/build-dist.sh
+
+      # The installer had been syntax-checked but never run. This executes it
+      # against a real systemd, which is the only way to catch a bad unit file,
+      # a wrong permission or a broken preflight.
+      - name: Run the installer
+        run: |
+          mkdir -p /tmp/unpack
+          tar -xzf dist/camstream-agent-*-linux.tar.gz -C /tmp/unpack
+          cat > /tmp/agent.yaml <<'YAML'
+          tenantId: ci
+          premisesId: runner
+          deviceId: check
+          region: ap-south-1
+          bucket: example-bucket
+          apiInvokeUrl: https://example.invalid
+          iotDataEndpoint: example.invalid
+          iotCredentialsEndpoint: example.invalid
+          certificatePath: /var/lib/camstream/device.crt
+          privateKeyPath: /var/lib/camstream/device.key
+          discoveryEnabled: false
+          cameras: []
+          YAML
+          sudo /tmp/unpack/install.sh /tmp/agent.yaml
+
+      - name: Verify what the installer produced
+        run: |
+          set -e
+          echo "--- unit file is valid ---"
+          systemd-analyze verify /etc/systemd/system/camstream-agent.service
+          echo "--- service is enabled ---"
+          systemctl is-enabled camstream-agent
+          echo "--- runs as an unprivileged user ---"
+          id camstream
+          echo "--- permissions ---"
+          stat -c '%a %U:%G %n' /etc/camstream/agent.yaml /var/lib/camstream /opt/camstream/camstream-agent.jar
+          test "$(stat -c '%a' /etc/camstream/agent.yaml)" = "640"
+          test "$(stat -c '%a' /var/lib/camstream)" = "700"
+
+      # It cannot connect — there is no certificate and the endpoints are
+      # invalid — but it must fail by reporting that, not by hanging or by
+      # dying before it has read its configuration.
+      - name: Service fails loudly rather than silently
+        run: |
+          sleep 8
+          sudo journalctl -u camstream-agent --no-pager -n 30 | tee /tmp/log.txt
+          grep -qiE "certificate|TLS context|No such file" /tmp/log.txt \
+            || { echo "expected a certificate-related failure" >&2; exit 1; }
+
+      - name: Uninstall cleanly
+        run: |
+          sudo /tmp/unpack/uninstall.sh --purge
+          ! systemctl is-enabled camstream-agent 2>/dev/null
+          ! test -d /opt/camstream
+          ! test -d /etc/camstream
+          echo "removed"
+
+  cloud:
+    name: Cloud and web
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Infrastructure
+        working-directory: infra
+        run: |
+          npm ci --no-fund --no-audit
+          npx tsc --noEmit
+          npm test --if-present
+          # Synth needs an account; the value is irrelevant when not deploying.
+          CDK_DEFAULT_ACCOUNT=000000000000 npx cdk synth --quiet
+
+      - name: Web
+        working-directory: web
+        run: |
+          npm ci --no-fund --no-audit
+          npm run build
+
+  secrets:
+    name: No secrets committed
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Scan the tree
+        run: |
+          set -e
+          fail=0
+          # Private keys of any kind, AWS access key ids, and the device
+          # material that must never leave a customer's premises.
+          if git grep -nIE -- '-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----' \
+               -- . ':(exclude)infra/keys/*public*'; then
+            echo "::error::a private key is committed"; fail=1
+          fi
+          if git grep -nIE 'AKIA[0-9A-Z]{16}'; then
+            echo "::error::an AWS access key id is committed"; fail=1
+          fi
+          if git ls-files | grep -E '(^|/)devices/|\.p12$|identity\.json$'; then
+            echo "::error::device identity material is committed"; fail=1
+          fi
+          exit $fail
