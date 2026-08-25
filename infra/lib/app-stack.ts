@@ -12,6 +12,7 @@ import { Ingest } from './ingest';
 import { Api } from './api';
 import { Edge } from './edge';
 import { Signing, PRIVATE_KEY_PARAMETER } from './signing';
+import { Provisioning, CLAIM_CERT_PARAMETER } from './provisioning';
 
 export interface AppStackProps extends StackProps {
   readonly config: CamStreamConfig;
@@ -31,6 +32,15 @@ export class CamStreamAppStack extends Stack {
 
     const ingest = new Ingest(this, 'Ingest', { liveBucket: storage.liveBucket });
 
+    // Fleet provisioning by claim: an installer carries a shared claim
+    // certificate plus a per-agent one-time token, and the hook refuses
+    // anything else.
+    const provisioning = new Provisioning(this, 'Provisioning', {
+      registryTable: registry.table,
+      devicePolicyName: 'camstream-device-policy',
+      thingTypeName: 'camstream-agent',
+    });
+
     const api = new Api(this, 'Api', {
       config,
       userPool: identity.userPool,
@@ -38,6 +48,9 @@ export class CamStreamAppStack extends Stack {
       registryTable: registry.table,
       cloudFrontKeyPairId: signing.publicKey.publicKeyId,
       privateKeyParameterName: PRIVATE_KEY_PARAMETER,
+      liveBucketName: storage.liveBucket.bucketName,
+      claimCertParameterName: CLAIM_CERT_PARAMETER,
+      provisioningTemplateName: provisioning.templateName,
     });
 
     // Agents sign heartbeats with SigV4 using their IoT-issued credentials.
@@ -47,7 +60,10 @@ export class CamStreamAppStack extends Stack {
       new iam.PolicyStatement({
         sid: 'InvokeHeartbeat',
         actions: ['execute-api:Invoke'],
-        resources: [api.httpApi.arnForExecuteApi('POST', '/api/device/heartbeat')],
+        resources: [
+          api.httpApi.arnForExecuteApi('POST', '/api/device/report'),
+          api.httpApi.arnForExecuteApi('GET', '/api/device/config'),
+        ],
       }),
     );
 
@@ -79,6 +95,8 @@ export class CamStreamAppStack extends Stack {
     new CfnOutput(this, 'RegistryTable', { value: registry.table.tableName });
     new CfnOutput(this, 'CloudFrontKeyPairId', { value: signing.publicKey.publicKeyId });
     new CfnOutput(this, 'IotRoleAlias', { value: 'camstream-device' });
+    new CfnOutput(this, 'ProvisioningTemplate', { value: provisioning.templateName });
+    new CfnOutput(this, 'ClaimPolicyName', { value: provisioning.claimPolicyName });
     new CfnOutput(this, 'ApiInvokeUrl', {
       description: 'Direct API Gateway URL — agents must use this, not the CloudFront domain',
       value: api.httpApi.apiEndpoint,

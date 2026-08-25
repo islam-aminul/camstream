@@ -3,7 +3,7 @@ import { SSMClient, GetParameterCommand } from '@aws-sdk/client-ssm';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyEventV2WithJWTAuthorizer, APIGatewayProxyStructuredResultV2 } from 'aws-lambda';
-import { isValidId } from '../shared/tenant';
+import { isValidId, cookieResource } from '../shared/tenant';
 import { fail, json } from '../shared/http';
 import { SESSION_TTL_SECONDS, readSession, writeSession } from '../shared/session';
 
@@ -102,9 +102,16 @@ export async function handler(
 
   const expiresAt = now + SESSION_TTL_SECONDS;
 
-  // One wildcard covers every device belonging to this tenant, because thing
-  // names are `<tenantId>--<deviceId>` and ids may not contain `--`.
-  const resource = `https://${host}/live/${tenantId}--*`;
+  // A viewer restricted to a single site gets a policy scoped to it; everyone
+  // else gets the tenant-wide wildcard. Thing names are
+  // `<tenant>--<premises>--<device>` and ids may not contain `--`, so neither
+  // wildcard can reach across a boundary.
+  const premisesClaim = claims['custom:premises'];
+  const premises =
+    typeof premisesClaim === 'string' && premisesClaim.trim().length > 0
+      ? premisesClaim.split(',').map((id) => id.trim()).filter(isValidId)
+      : undefined;
+  const resource = cookieResource(`https://${host}`, tenantId, premises);
 
   const policy = JSON.stringify({
     Statement: [

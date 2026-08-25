@@ -132,7 +132,7 @@ export async function handler(
   const [demands, devices, cameras] = await Promise.all([
     queryPrefix<DemandRecord>(tenantId, 'DEMAND#'),
     queryPrefix<{ thingName: string }>(tenantId, 'DEVICE#'),
-    queryPrefix<CameraRecord>(tenantId, 'CAMERA#'),
+    queryPrefix<CameraRecord>(tenantId, 'LIVECAMERA#'),
   ]);
 
   const desired = resolveDesiredState(now, demands, devices, cameras);
