@@ -61,12 +61,15 @@ export async function handler(
     return fail(403, 'Account is not associated with a valid tenant');
   }
 
-  // Derive the cookie/policy origin from the request host so that the apex,
-  // www and the raw *.cloudfront.net domain each get cookies that actually
-  // match the URLs the player will request.
-  const host = (event.headers?.host ?? '').toLowerCase().split(':')[0];
+  // Derive the cookie/policy origin from the host the viewer actually used, so
+  // that the apex and www each get cookies matching the URLs their player will
+  // request. CloudFront rewrites Host to the origin before API Gateway sees it,
+  // so the real value arrives in a header set by a viewer-request function.
+  const host = (event.headers?.['x-camstream-viewer-host'] ?? event.headers?.host ?? '')
+    .toLowerCase()
+    .split(':')[0];
   if (!ALLOWED_HOSTS.includes(host)) {
-    return fail(400, 'Unrecognised host');
+    return fail(400, `Unrecognised host: ${host || '(none)'}`);
   }
 
   let body: { sessionId?: unknown } = {};
