@@ -48,6 +48,26 @@ function Assert-Prerequisites {
   if ($versionLine -match 'version "(\d+)') {
     if ([int]$Matches[1] -lt 21) { throw "Java 21 or newer is required (found $($Matches[1]))." }
   }
+
+  # What matters is the JVM's architecture, not the machine's: AWS CRT ships no
+  # native for Windows on ARM64, but an x64 JVM running under Windows 11's
+  # emulation reports x86_64 and loads the x64 library perfectly well.
+  $props = (& java -XshowSettings:properties -version 2>&1) -join "`n"
+  $jvmArch = if ($props -match 'os\.arch\s*=\s*(\S+)') { $Matches[1] } else { 'unknown' }
+  Write-Host "  jvm architecture: $jvmArch"
+
+  if ($jvmArch -eq 'aarch64' -or $jvmArch -eq 'arm64') {
+    throw @'
+This is an ARM64 JVM, and the AWS CRT native library is not published for
+Windows on ARM — the agent would fail at startup with an UnsatisfiedLinkError.
+
+Install an x64 JRE instead and re-run. Windows 11 on ARM runs x64 binaries under
+emulation, and the agent works normally that way.
+'@
+  }
+  if ($jvmArch -eq 'x86') {
+    Write-Warning 'A 32-bit JVM is installed. Use a 64-bit JRE unless this machine really is 32-bit.'
+  }
   # CamStream stream-copies and needs no GPL codec. Warn, do not block.
   $config = (& ffmpeg -hide_banner -version 2>&1) -join ' '
   if ($config -match '--enable-gpl|--enable-nonfree') {
