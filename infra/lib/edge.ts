@@ -6,6 +6,7 @@ import * as s3 from 'aws-cdk-lib/aws-s3';
 import { Construct } from 'constructs';
 import { CamStreamConfig } from './config';
 import { SpaRouter } from './spa-router';
+import { HostForwarder } from './host-forwarder';
 
 export interface EdgeProps {
   readonly config: CamStreamConfig;
@@ -123,6 +124,12 @@ export class Edge extends Construct {
         '/live/*': { ...signedMedia, cachePolicy: segmentCachePolicy, compress: false },
         '/api/*': {
           origin: apiOrigin,
+          functionAssociations: [
+            {
+              function: new HostForwarder(this, 'HostForwarder').function,
+              eventType: cloudfront.FunctionEventType.VIEWER_REQUEST,
+            },
+          ],
           viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.HTTPS_ONLY,
           allowedMethods: cloudfront.AllowedMethods.ALLOW_ALL,
           cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
