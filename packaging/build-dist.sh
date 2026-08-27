@@ -32,6 +32,12 @@ stage() {
   cp "$ROOT/LICENSE" "$dir/"
   cp "$ROOT/NOTICE" "$dir/"
   cp "$ROOT/scripts/check-ffmpeg-license.sh" "$dir/"
+  # The runtime is not shipped: the operator chooses the Java and FFmpeg
+  # builds, and their licences, and drops the archives in here. The installer
+  # extracts them into the installation directory and pins the agent to those
+  # exact binaries rather than to anything on PATH.
+  mkdir -p "$dir/dependencies"
+  cp "$ROOT/packaging/dependencies/README.txt" "$dir/dependencies/"
   for f in "$@"; do cp "$f" "$dir/"; done
   echo "$dir"
 }
