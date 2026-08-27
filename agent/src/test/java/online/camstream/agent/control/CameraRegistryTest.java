@@ -147,4 +147,39 @@ class CameraRegistryTest {
         assertEquals(camera.mainStreamUrl, camera.subStreamUrl,
                 "one stream should serve both the grid and the detail view");
     }
+
+    @Test
+    void keepsPublishingWhenACameraGainsANewIdentity() {
+        // Reading the MAC over ONVIF renames a camera that was identified by
+        // its serial. The approval still names the serial, and honouring that
+        // is what stops a working camera going dark until somebody notices.
+        DiscoveredCamera found = new DiscoveredCamera();
+        found.id = "mac-2818fdf1e5be";
+        found.alternateIds = List.of("sn-123456", "ip-192-168-0-113");
+        found.ipAddress = "192.168.0.113";
+        DiscoveredCamera.DiscoveredProfile sub = new DiscoveredCamera.DiscoveredProfile();
+        sub.token = "SubProfile"; sub.width = 640; sub.height = 360;
+        DiscoveredCamera.DiscoveredProfile main = new DiscoveredCamera.DiscoveredProfile();
+        main.token = "MainProfile"; main.width = 1920; main.height = 1080;
+        found.profiles.put("SubProfile", sub);
+        found.profiles.put("MainProfile", main);
+
+        // The scan is indexed by what the camera is called now. Looking a
+        // stream up under the superseded name finds nothing, and the camera
+        // resolves, reports its profiles, and is then dropped for having no
+        // stream — which is exactly what happened.
+        StubDiscovery discovery = new StubDiscovery(List.of(found), Map.of(
+                "mac-2818fdf1e5be/SubProfile", "rtsp://user:pass@192.168.0.113/sub",
+                "mac-2818fdf1e5be/MainProfile", "rtsp://user:pass@192.168.0.113/main"));
+
+        CameraRegistry registry = new CameraRegistry(config(), discovery);
+        registry.setApproved(List.of(new CameraRegistry.Approved(
+                "sn-123456", "reception", "Reception", "SubProfile", "MainProfile")));
+
+        CameraConfig camera = registry.get("reception");
+        assertNotNull(camera, "an approval under the old identity must still resolve");
+        assertEquals("rtsp://user:pass@192.168.0.113/sub", camera.subStreamUrl);
+        assertEquals("rtsp://user:pass@192.168.0.113/main", camera.mainStreamUrl);
+        assertEquals("192.168.0.113", camera.ipAddress);
+    }
 }

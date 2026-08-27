@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Player } from './Player';
 import {
-  SessionSuperseded, declinedTranscodes, listCameras, manifestFor, playsNatively,
+  SessionSuperseded, cameraKey, declinedTranscodes, listCameras, manifestFor, playsNatively,
   startSession, watch,
   type Camera, type DeclinedTranscode, type SessionInfo } from './api';
 import { NewPasswordRequired, completeNewPassword, currentSession, signIn, signOut } from './auth';
@@ -45,15 +45,6 @@ export default function App() {
    * edge and S3 requests per segment.
    */
   const [visible, setVisible] = useState<string[]>([]);
-
-  // Read by the keepalive timer, which must not restart every time the
-  // selection or the page changes.
-  const selectedRef = useRef<Camera | null>(null);
-  selectedRef.current = selected;
-  const transcodingRef = useRef<string[]>([]);
-  transcodingRef.current = transcoding;
-  const visibleRef = useRef<string[]>([]);
-  visibleRef.current = visible;
 
   const endSession = useCallback(async (message: string | null) => {
     await signOut();
@@ -102,32 +93,47 @@ export default function App() {
     return () => clearInterval(timer);
   }, [session, endSession]);
 
-  // Tell the agents what to publish, now and every keepalive interval. Without
-  // this heartbeat the edge stops encoding and the streams go quiet.
+  /**
+   * What this viewer is asking the agents to publish.
+   *
+   * Opening a camera narrows demand to that one: the grid behind it is not on
+   * screen, and leaving two dozen streams running to keep it warm would spend
+   * the customer's edge CPU on pictures nobody is looking at.
+   */
+  const demand = selected ? [cameraKey(selected)] : visible;
+
+  /**
+   * One announcer, and only one.
+   *
+   * There were briefly two — a keepalive on a timer and an effect watching the
+   * selection — and each wrote the whole demand record. The first announcement
+   * carries an empty page, because the grid has not measured itself yet, so
+   * whichever call landed last decided what the agents did. When that was the
+   * empty one the site stopped publishing for a full keepalive interval, and
+   * every tile sat waiting on a stream nobody had asked for. Re-announcing on
+   * change and restarting the timer costs nothing and cannot race with itself.
+   */
   useEffect(() => {
     if (!session) return;
     let cancelled = false;
 
     const announce = async () => {
-      const pinned = selectedRef.current;
       try {
         const result = await watch(
           session.sessionId,
-          visibleRef.current,
-          pinned ? { thingName: pinned.thingName, cameraId: pinned.cameraId } : undefined,
-          transcodingRef.current,
+          demand,
+          selected ? { thingName: selected.thingName, cameraId: selected.cameraId } : undefined,
+          transcoding,
         );
         if (!cancelled) {
           setQueued(declinedTranscodes(result));
           const { cameras: list } = await listCameras();
           if (!cancelled) setCameras(list);
         }
-        return result.keepaliveInSeconds;
       } catch (err) {
         if (err instanceof SessionSuperseded && !cancelled) {
           void endSession('You were signed out because this account signed in elsewhere.');
         }
-        return 30;
       }
     };
 
@@ -137,19 +143,7 @@ export default function App() {
       cancelled = true;
       clearInterval(timer);
     };
-  }, [session, endSession]);
-
-  // Re-announce the moment the page, the pinned camera or the transcode set
-  // changes, so paging does not wait out the keepalive before anything appears.
-  useEffect(() => {
-    if (!session) return;
-    void watch(
-      session.sessionId,
-      visible,
-      selected ? { thingName: selected.thingName, cameraId: selected.cameraId } : undefined,
-      transcoding,
-    ).then((result) => setQueued(declinedTranscodes(result))).catch(() => undefined);
-  }, [selected, session, transcoding, visible]);
+  }, [session, endSession, demand.join(','), selected, transcoding.join(',')]);
 
   const places = useMemo(() => placesOf(cameras), [cameras]);
   useResolvedScope(places, scope, setScope);

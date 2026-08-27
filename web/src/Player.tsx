@@ -148,6 +148,18 @@ export function Player({
 
     let mediaRecoveries = 0;
     let settled = false;
+    /**
+     * How long to keep waiting for a manifest that does not exist yet.
+     *
+     * A rendition is published on demand: the agent has to be told, connect to
+     * the camera, fill a segment and upload it, so the manifest legitimately
+     * 404s — S3 says 403 — for the first several seconds. hls.js treats a 4xx
+     * as final and will not retry it, which turned a normal cold start into
+     * "this camera is not being published". So the retry is done here.
+     */
+    const MANIFEST_WAIT_MS = 75_000;
+    const startedWaiting = Date.now();
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
 
     /**
      * Some browsers accept a codec, load the metadata and then never decode a
@@ -233,13 +245,22 @@ export function Player({
         case Hls.ErrorTypes.NETWORK_ERROR:
           if (data.details === Hls.ErrorDetails.MANIFEST_LOAD_ERROR
               || data.details === Hls.ErrorDetails.MANIFEST_LOAD_TIMEOUT) {
-            // The retries are exhausted: nothing is being published here.
-            if (!settled) {
-              settled = true;
-              setStatus('failed');
-              hls.destroy();
-              onUnavailable?.();
+            if (settled) return;
+            if (Date.now() - startedWaiting < MANIFEST_WAIT_MS) {
+              // Still within the window where "not there yet" is the ordinary
+              // answer. Reloading the source rather than calling startLoad:
+              // hls.js has already given up on this manifest.
+              clearTimeout(retryTimer);
+              retryTimer = setTimeout(() => {
+                if (!settled) hls.loadSource(src);
+              }, 2000);
+              return;
             }
+            // Long enough that the agent would have started by now.
+            settled = true;
+            setStatus('failed');
+            hls.destroy();
+            onUnavailable?.();
             return;
           }
           hls.startLoad();
@@ -305,6 +326,7 @@ export function Player({
     hls.attachMedia(video);
     return () => {
       clearTimeout(stallTimer);
+      clearTimeout(retryTimer);
       clearInterval(sampler);
       hls.destroy();
     };
