@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Player } from './Player';
-import { SessionSuperseded, listCameras, manifestFor, startSession, watch, type Camera, type SessionInfo } from './api';
+import { SessionSuperseded, listCameras, manifestFor, playable, startSession, watch, type Camera, type SessionInfo } from './api';
 import { NewPasswordRequired, completeNewPassword, currentSession, signIn, signOut } from './auth';
 import { Admin } from './Admin';
 import { canAdminister } from './admin';
@@ -180,7 +180,12 @@ export default function App() {
               onClick={() => camera.online && setSelected(camera)}
               disabled={!camera.online}
             >
-              {camera.online ? (
+              {!playable(camera) ? (
+                // Saying so beats a spinner that never resolves.
+                <div className="player">
+                  <div className="player-overlay">This browser cannot decode {camera.sourceCodec}</div>
+                </div>
+              ) : camera.online ? (
                 <Player src={manifestFor(camera, 'sub')} />
               ) : (
                 <div className="player"><div className="player-overlay">Offline</div></div>

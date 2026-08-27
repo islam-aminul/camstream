@@ -14,11 +14,25 @@ export interface Camera {
 }
 
 /**
+ * Whether a transcoded rendition would actually help.
+ *
+ * Mirrors the control plane's rule exactly. H.264 is the universal floor, so a
+ * camera already emitting it has no better variant to offer — asking for one
+ * yields a path the agent is never told to publish, and the player waits on a
+ * 403 forever. A browser that cannot decode H.264 cannot be helped by
+ * transcoding to H.264.
+ */
+function transcodeWouldHelp(sourceCodec: string | undefined): boolean {
+  const codec = (sourceCodec ?? 'h264').toLowerCase();
+  return codec !== 'h264' && codec !== 'avc' && codec !== 'avc1';
+}
+
+/**
  * The URL this browser should actually load: the camera's own stream when it
- * can decode it, the transcoded one only when it cannot.
+ * can decode it, the transcoded one only when that would help.
  */
 export function manifestFor(camera: Camera, profile: 'sub' | 'main'): string {
-  const native = supports(camera.sourceCodec ?? 'h264');
+  const native = supports(camera.sourceCodec ?? 'h264') || !transcodeWouldHelp(camera.sourceCodec);
   if (profile === 'main') {
     // The master playlist exists only while both rungs are publishing, which
     // is exactly what opening the camera causes — so the detail view can take
@@ -39,6 +53,11 @@ export interface SessionInfo {
 
 export interface WatchResult {
   keepaliveInSeconds: number;
+}
+
+/** True when no rendition of this camera can play here. */
+export function playable(camera: Camera): boolean {
+  return supports(camera.sourceCodec ?? 'h264') || supports('h264');
 }
 
 /** Thrown when this browser's session has been displaced by a newer sign-in. */
