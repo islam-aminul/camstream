@@ -102,9 +102,33 @@ jobs:
           discoveryEnabled: false
           cameras: []
           YAML
-          # sudo does not inherit the runner's PATH, so the JRE is named
-          # explicitly — exactly the situation the installer's check is for.
-          sudo /tmp/unpack/install.sh --java "$JAVA_HOME/bin/java" /tmp/agent.yaml
+
+          # Stand in for what an operator downloads: archives shaped like a
+          # Temurin JRE and a static ffmpeg release, put into dependencies/.
+          # The installer must extract these and pin the agent to them, taking
+          # nothing from PATH — which is the whole point, since sudo does not
+          # inherit the runner's PATH anyway.
+          mkdir -p /tmp/deps/ffmpeg-release-amd64-static
+          tar czf /tmp/deps/OpenJDK21U-jre_x64_linux_hotspot.tar.gz \
+            -C "$(dirname "$JAVA_HOME")" "$(basename "$JAVA_HOME")"
+          cp "$(command -v ffmpeg)" "$(command -v ffprobe)" /tmp/deps/ffmpeg-release-amd64-static/
+          tar cJf /tmp/deps/ffmpeg-release-amd64-static.tar.xz \
+            -C /tmp/deps ffmpeg-release-amd64-static
+          rm -rf /tmp/deps/ffmpeg-release-amd64-static
+          cp /tmp/deps/* /tmp/unpack/dependencies/
+
+          echo "--- the dry run reports what it found, and installs nothing ---"
+          /tmp/unpack/install.sh --check
+          test ! -d /opt/camstream
+
+          echo "--- an empty dependencies directory is refused, with instructions ---"
+          mkdir -p /tmp/bare && tar -xzf dist/camstream-agent-*-linux.tar.gz -C /tmp/bare
+          if /tmp/bare/install.sh --check 2>/tmp/bare.err; then
+            echo "an empty bundle should not have passed" >&2; exit 1
+          fi
+          grep -q "dependencies/ directory is empty" /tmp/bare.err
+
+          sudo /tmp/unpack/install.sh /tmp/agent.yaml
 
       - name: Verify what the installer produced
         run: |
@@ -128,9 +152,14 @@ jobs:
           sudo -u nobody cat /etc/camstream/agent.yaml 2>/dev/null \
             && { echo "config is world-readable" >&2; exit 1; } || echo "config is not readable by others"
 
-          echo "--- the unit runs the JRE that was verified ---"
+          echo "--- the agent runs the bundled runtime, not anything on PATH ---"
           sudo grep -E '^ExecStart=' /etc/systemd/system/camstream-agent.service
-          sudo grep -qE "^ExecStart=$JAVA_HOME/bin/java " /etc/systemd/system/camstream-agent.service
+          sudo grep -qE '^ExecStart=/opt/camstream/runtime/' /etc/systemd/system/camstream-agent.service
+          # ffmpeg and ffprobe are named absolutely in the config, so a system
+          # upgrade cannot change which binaries the service runs.
+          sudo grep -qE '^ffmpegPath: /opt/camstream/runtime/' /etc/camstream/agent.yaml
+          sudo grep -qE '^ffprobePath: /opt/camstream/runtime/' /etc/camstream/agent.yaml
+          test -x "$(sudo sed -n 's/^ffmpegPath: //p' /etc/camstream/agent.yaml)"
 
       # It cannot connect — there is no certificate and the endpoints are
       # invalid — but it must fail by reporting that, not by hanging or by

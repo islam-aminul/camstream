@@ -74,9 +74,29 @@ function posixScript(thing: string, identity: string, url: string, version: stri
 # token is spent on first boot, and re-running this script afterwards will
 # report that the device is already enrolled.
 #
+# The agent ships without a Java runtime or FFmpeg, so that you choose those
+# builds and their licences. Put both archives in a directory and pass it:
+#
+#   sudo ./install-${thing}.sh --dependencies ~/camstream-deps
+#
+# With no --dependencies, a "dependencies" directory beside this script is
+# used. Either way the binaries are extracted into the installation and the
+# agent is pinned to them — nothing is taken from PATH.
+#
 set -euo pipefail
 
 THING="${thing}"
+HERE="$(cd "$(dirname "\${BASH_SOURCE[0]}")" && pwd)"
+DEPS="$HERE/dependencies"
+EXTRA=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --dependencies) DEPS="\${2:-}"; shift 2 ;;
+    --dependencies=*) DEPS="\${1#*=}"; shift ;;
+    --allow-system-tools) EXTRA+=(--allow-system-tools); shift ;;
+    *) echo "Unknown option: $1" >&2; exit 2 ;;
+  esac
+done
 BUNDLE_URL="${url}"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -101,7 +121,13 @@ ${identity}
 CAMSTREAM_IDENTITY
 chmod 600 "$WORK/identity.json"
 
-"$WORK/install.sh" --identity "$WORK/identity.json"
+# The bundle ships an empty dependencies/ directory; fill it from wherever the
+# operator put the archives, so install.sh finds them where it expects.
+if [ -d "$DEPS" ]; then
+  cp -f "$DEPS"/* "$WORK/dependencies/" 2>/dev/null || true
+fi
+
+"$WORK/install.sh" --identity "$WORK/identity.json" "\${EXTRA[@]+"\${EXTRA[@]}"}"
 `;
 }
 
@@ -114,13 +140,29 @@ function windowsScript(thing: string, identity: string, url: string, version: st
   first boot, and re-running this afterwards reports the device as already
   enrolled.
 
+  The agent ships without a Java runtime or FFmpeg, so that you choose those
+  builds and their licences. Put both archives in a folder and pass it:
+
+    .\\install-${thing}.ps1 -Dependencies C:\\camstream-deps
+
+  With no -Dependencies, a "dependencies" folder beside this script is used.
+  Either way the binaries are extracted into the installation and the agent is
+  pinned to them — nothing is taken from PATH.
+
   Run from an elevated PowerShell prompt.
 #>
+[CmdletBinding()]
+param(
+  [string]$Dependencies,
+  [switch]$AllowSystemTools
+)
 $ErrorActionPreference = 'Stop'
 
 $Thing     = '${thing}'
 $BundleUrl = '${url}'
 $Work      = Join-Path $env:TEMP ("camstream-" + [guid]::NewGuid())
+$Here      = Split-Path -Parent $MyInvocation.MyCommand.Path
+if (-not $Dependencies) { $Dependencies = Join-Path $Here 'dependencies' }
 
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 if (-not (New-Object Security.Principal.WindowsPrincipal($identity)).IsInRole(
@@ -139,7 +181,15 @@ ${identity}
 '@
   Set-Content -Path "$Work\\identity.json" -Value $identityJson -Encoding UTF8
 
-  & "$Work\\install.ps1" -IdentityPath "$Work\\identity.json"
+  # The bundle ships an empty dependencies\\ folder; fill it from wherever the
+  # operator put the archives, so install.ps1 finds them where it expects.
+  if (Test-Path $Dependencies) {
+    Copy-Item "$Dependencies\\*" "$Work\\dependencies\\" -Force -ErrorAction SilentlyContinue
+  }
+
+  $args = @{ IdentityPath = "$Work\\identity.json" }
+  if ($AllowSystemTools) { $args['AllowSystemTools'] = $true }
+  & "$Work\\install.ps1" @args
 } finally {
   Remove-Item -Recurse -Force $Work -ErrorAction SilentlyContinue
 }
