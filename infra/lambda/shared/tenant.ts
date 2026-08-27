@@ -50,6 +50,33 @@ export function parseThingName(name: string): DeviceIdentity | null {
 export const THING_NAME_PATTERN = /^[a-z0-9-]{3,32}--[a-z0-9-]{3,32}--[a-z0-9-]{3,32}$/;
 
 /**
+ * Premises a caller may see, from the `custom:premises` claim.
+ * Empty means every site in the tenant.
+ */
+export function premisesScope(claims: Record<string, unknown> | undefined): string[] {
+  const raw = claims?.['custom:premises'];
+  if (typeof raw !== 'string' || raw.trim().length === 0) {
+    return [];
+  }
+  return raw.split(',').map((id) => id.trim()).filter(isValidId);
+}
+
+/**
+ * Whether a thing belongs to a premises this caller may see.
+ *
+ * Applied to listings as well as playback: a viewer restricted to one site
+ * should not learn from a camera list that other sites exist, what their agents
+ * are called, or what is watched there.
+ */
+export function withinScope(thingName: string, scope: string[]): boolean {
+  if (scope.length === 0) {
+    return true;
+  }
+  const identity = parseThingName(thingName);
+  return identity !== null && scope.includes(identity.premisesId);
+}
+
+/**
  * CloudFront resource wildcard for a viewer.
  *
  * A viewer restricted to particular premises gets one policy per site, and

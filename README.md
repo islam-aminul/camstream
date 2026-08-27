@@ -126,6 +126,12 @@ Operators may set camera credentials because whoever installs a camera has its
 password — splitting those makes every site visit a two-person job. Credentials
 are write-only for every role; there is no endpoint that returns one.
 
+Scoping applies to listings as well as playback. A viewer restricted to one site
+does not see other sites' cameras in `/api/streams`, and cannot cause their
+agents to start publishing through `/api/watch` — otherwise a restriction that
+blocked viewing would still leak the shape of the estate, and still spend money
+at sites the account is not entitled to.
+
 A user restricted to exactly one premises receives a cookie scoped to that
 site's prefix. Restricting to several still grants the whole tenant, because a
 CloudFront policy carries a single wildcard — the admin console says so rather

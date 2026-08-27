@@ -118,7 +118,12 @@ export class Api extends Construct {
     registryTable.grantReadWriteData(deviceFn);
     // Needed to turn the certificate id in the caller's ARN into a thing name.
     deviceFn.addToRolePolicy(
-      new iam.PolicyStatement({ actions: ['iot:ListPrincipalThings'], resources: ['*'] }),
+      new iam.PolicyStatement({
+        actions: ['iot:ListPrincipalThings'],
+        // The principal being listed is a certificate, so the grant needs no
+        // wider reach than certificates in this account.
+        resources: [stack.formatArn({ service: 'iot', resource: 'cert', resourceName: '*' })],
+      }),
     );
 
     const presenceFn = new NodejsFunction(this, 'PresenceFunction', {
