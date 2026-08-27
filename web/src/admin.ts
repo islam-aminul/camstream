@@ -58,6 +58,8 @@ export interface DiscoveredCamera {
   identity: string;
   identityStable: boolean;
   macAddress?: string;
+  /** Which fact the identity was derived from: "mac", "serial" or "address". */
+  identifiedBy?: 'mac' | 'serial' | 'address';
   manufacturer?: string;
   model?: string;
   lastSeen: number;

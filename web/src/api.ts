@@ -20,6 +20,9 @@ export interface Camera {
   /** Grouping keys, so the console can bifurcate an estate without parsing ids. */
   premisesId?: string | null;
   siteName?: string | null;
+  /** Where it is on the customer's network, and its hardware address. */
+  ipAddress?: string | null;
+  macAddress?: string | null;
   resolutionLabel?: string;
   manifestUrl: { sub: string; main: string; subH264: string; mainH264: string; master: string };
 }

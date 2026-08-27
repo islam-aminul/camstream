@@ -9,6 +9,9 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 /**
  * Finds cameras on the local network and works out how to stream from them.
@@ -119,6 +122,25 @@ public final class DiscoveryService implements CameraSource {
             camera.macAddress = mac;
         }
 
+        // A MAC seen at more than one address is not a camera's MAC. ARP only
+        // holds on-link entries, so this normally cannot happen — but proxy ARP
+        // and some consumer routers answer for hosts behind them, and every
+        // camera on the far side then reports the router's address. Left alone
+        // that would fold a dozen cameras into one identity, so the value is
+        // dropped and identity falls through to the serial.
+        Map<String, Long> perMac = found.values().stream()
+                .map(camera -> camera.macAddress)
+                .filter(Objects::nonNull)
+                .collect(Collectors.groupingBy(mac -> mac, Collectors.counting()));
+        for (DiscoveredCamera camera : found.values()) {
+            if (camera.macAddress != null && perMac.getOrDefault(camera.macAddress, 0L) > 1) {
+                log.warn("{} devices report MAC {} — a router is answering for them, "
+                                + "so it cannot identify any of them",
+                        perMac.get(camera.macAddress), camera.macAddress);
+                camera.macAddress = null;
+            }
+        }
+
         for (DiscoveredCamera camera : found.values()) {
             // Identity first, from whatever is already known, so that
             // per-camera credentials can be selected before authenticating.
@@ -145,23 +167,58 @@ public final class DiscoveryService implements CameraSource {
     }
 
     /**
-     * Serial number, then MAC, then IP.
+     * MAC address, then serial number, then IP.
+     *
+     * The MAC leads because it is the only one of the three the camera cannot
+     * get wrong. It is assigned by the manufacturer, unique by construction,
+     * and read off the network rather than out of the firmware — so it is
+     * there even when ONVIF refuses to authenticate, and it survives a factory
+     * reset that clears everything else. Serial numbers come from the firmware,
+     * and budget OEM cameras routinely report a blank one, a shared one, or the
+     * model name.
      *
      * Falling through to the IP is recorded rather than hidden: that identity
      * will not survive the next DHCP lease, and an operator approving such a
      * camera deserves to be told.
      */
     private static void assignIdentity(DiscoveredCamera camera) {
-        if (camera.serialNumber != null && !camera.serialNumber.isBlank()) {
-            camera.id = "sn-" + camera.serialNumber.trim().replaceAll("[^A-Za-z0-9._-]", "");
+        String mac = macIdentity(camera);
+        String serial = serialIdentity(camera);
+        String ip = "ip-" + camera.ipAddress.replace('.', '-');
+
+        if (mac != null) {
+            camera.id = mac;
             camera.identityStable = true;
-        } else if (camera.macAddress != null && !camera.macAddress.isBlank()) {
-            camera.id = "mac-" + camera.macAddress.replace(":", "");
+        } else if (serial != null) {
+            camera.id = serial;
             camera.identityStable = true;
         } else {
-            camera.id = "ip-" + camera.ipAddress.replace('.', '-');
+            camera.id = ip;
             camera.identityStable = false;
         }
+
+        // Everything this camera would also have been called. An approval made
+        // before the MAC was readable — or before this ordering changed — names
+        // one of these, and matching on them keeps that camera publishing
+        // instead of silently going dark until somebody re-approves it.
+        camera.alternateIds = Stream.of(mac, serial, ip)
+                .filter(Objects::nonNull)
+                .filter(id -> !id.equals(camera.id))
+                .toList();
+    }
+
+    private static String macIdentity(DiscoveredCamera camera) {
+        if (camera.macAddress == null || camera.macAddress.isBlank()) {
+            return null;
+        }
+        return "mac-" + camera.macAddress.replace(":", "").toLowerCase(java.util.Locale.ROOT);
+    }
+
+    private static String serialIdentity(DiscoveredCamera camera) {
+        if (camera.serialNumber == null || camera.serialNumber.isBlank()) {
+            return null;
+        }
+        return "sn-" + camera.serialNumber.trim().replaceAll("[^A-Za-z0-9._-]", "");
     }
 
     /** Tries each known credential until one authenticates. */

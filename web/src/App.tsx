@@ -244,6 +244,7 @@ export default function App() {
                 {transcoding.includes(selected.cameraId) ? 'main · transcoded' : 'main stream'}
               </span>
               {selected.siteName && <span className="detail-meta">{selected.siteName}</span>}
+              {selected.ipAddress && <span className="detail-meta"><code>{selected.ipAddress}</code></span>}
             </div>
             <div className="detail-stage">
               <div className="player">

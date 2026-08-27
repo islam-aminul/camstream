@@ -113,7 +113,17 @@ public final class CameraRegistry {
         DiscoveredCamera found = scan.stream()
                 .filter(camera -> assignment.identity().equals(camera.id))
                 .findFirst()
+                // An approval made under an earlier identity — before the MAC
+                // could be read, or before the MAC became the identity at all —
+                // still names this camera. Honouring that keeps it publishing
+                // rather than going dark until somebody re-approves it.
+                .or(() -> scan.stream()
+                        .filter(camera -> camera.alternateIds.contains(assignment.identity()))
+                        .findFirst())
                 .orElse(null);
+        if (found != null && !assignment.identity().equals(found.id)) {
+            log.info("camera approved as {} is now identified as {}", assignment.identity(), found.id);
+        }
         if (found == null) {
             log.debug("approved camera {} has not been seen by this agent yet", assignment.identity());
             return null;
@@ -148,6 +158,8 @@ public final class CameraRegistry {
         // it. `defaultRtspTransport` is the knob for sites that genuinely need
         // otherwise.
         camera.rtspTransport = config.defaultRtspTransport;
+        camera.ipAddress = found.ipAddress;
+        camera.macAddress = found.macAddress;
 
         DiscoveredCamera.DiscoveredProfile sub = found.profiles.get(subToken);
         DiscoveredCamera.DiscoveredProfile main = found.profiles.get(mainToken);

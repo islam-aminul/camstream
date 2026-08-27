@@ -72,12 +72,17 @@ export function Admin({ onExit }: { onExit: () => void }) {
   };
 
   return (
-    <div className="app">
-      <header>
-        <h1>CamStream — administration</h1>
-        <div className="header-right">
-          <button onClick={() => void refresh()} disabled={busy}>{busy ? 'Working…' : 'Refresh'}</button>
-          <button onClick={onExit}>← Live view</button>
+    <div className="admin">
+      <header className="topbar">
+        <span className="brand"><span className="brand-mark">C</span>CamStream</span>
+        <span className="tenant">administration</span>
+        <span className="topbar-spacer" />
+        <div className="topbar-right">
+          {me && <span className="tenant">{me.tenantId} · {me.role}</span>}
+          <button className="btn ghost" onClick={() => void refresh()} disabled={busy}>
+            {busy ? 'Working…' : 'Refresh'}
+          </button>
+          <button className="btn" onClick={onExit}>← Live view</button>
         </div>
       </header>
 
@@ -85,14 +90,13 @@ export function Admin({ onExit }: { onExit: () => void }) {
         {(['cameras', 'agents', 'premises', 'users'] as Tab[])
           .filter((name) => name !== 'users' || me?.role === 'admin' || me?.role === 'superadmin')
           .map((name) => (
-            <button key={name} className={tab === name ? 'tab active' : 'tab'} onClick={() => setTab(name)}>
-              {name[0].toUpperCase() + name.slice(1)}
+            <button key={name} className={tab === name ? 'on' : ''} onClick={() => setTab(name)}>
+              {name}
             </button>
           ))}
-        {me && <span className="role-chip">{me.tenantId} · {me.role}</span>}
       </nav>
 
-      {error && <div className="notice error-notice">{error}</div>}
+      {error && <div className="notice error">{error}</div>}
 
       {tab === 'cameras' && <Cameras cameras={cameras} agents={agents} act={act} />}
       {tab === 'agents' && <Agents agents={agents} premises={premises} act={act} />}
@@ -140,7 +144,6 @@ function CameraRow({ camera, agents, act }: {
       <div className="card-head">
         <div>
           <strong>{camera.manufacturer ?? 'Unknown'} {camera.model ?? ''}</strong>
-          <span className="muted"> · {sighting?.ipAddress}</span>
           {camera.approved && <span className="badge ok">approved</span>}
           {!camera.identityStable && (
             <span className="badge warn" title="Identified only by IP address, which changes when the DHCP lease renews">
@@ -151,6 +154,25 @@ function CameraRow({ camera, agents, act }: {
         <code className="muted">{camera.identity}</code>
       </div>
 
+      {/* Both addresses, always, and labelled. The identity is derived from the
+          MAC, so showing them together makes that derivation visible instead of
+          leaving the operator to decode an opaque string — and the IP is what
+          they need to open the camera's own web interface. */}
+      <div className="addresses">
+        <span><span className="addr-label">MAC</span>
+          <code>{camera.macAddress ?? <span className="muted">not readable</span>}</code>
+        </span>
+        <span><span className="addr-label">IP</span>
+          <code>{sighting?.ipAddress ?? <span className="muted">unknown</span>}</code>
+        </span>
+        {camera.identifiedBy && (
+          <span className="muted small">
+            identified by {camera.identifiedBy === 'mac' ? 'hardware address'
+              : camera.identifiedBy === 'serial' ? 'serial number' : 'network address'}
+          </span>
+        )}
+      </div>
+
       {camera.reachableBy.length > 1 && (
         <p className="muted small">
           Seen by {camera.reachableBy.length} agents. Only the one you assign will publish it.
@@ -158,11 +180,11 @@ function CameraRow({ camera, agents, act }: {
       )}
 
       <div className="row">
-        <label>
+        <label className="field">
           Name
           <input value={displayName} onChange={(e) => setDisplayName(e.target.value)} />
         </label>
-        <label>
+        <label className="field">
           Published by
           <select value={assignedTo} onChange={(e) => setAssignedTo(e.target.value)}>
             {camera.reachableBy.map((s) => (
@@ -181,7 +203,7 @@ function CameraRow({ camera, agents, act }: {
       )}
 
       <div className="row">
-        <button
+        <button className="btn"
           disabled={!assignedTo}
           onClick={() => void act(() => approveCamera({
             identity: camera.identity,
@@ -195,7 +217,7 @@ function CameraRow({ camera, agents, act }: {
           {camera.approved ? 'Update' : 'Approve'}
         </button>
         {camera.approved && (
-          <button onClick={() => void act(() => removeCamera(camera.identity))}>Remove</button>
+          <button className="btn" onClick={() => void act(() => removeCamera(camera.identity))}>Remove</button>
         )}
       </div>
 
@@ -242,17 +264,17 @@ function CredentialForm({ scope, agent, act }: {
         and it cannot be recovered later — only replaced.
       </p>
       <div className="row">
-        <label>
+        <label className="field">
           Username
           <input value={username} autoComplete="off" onChange={(e) => setUsername(e.target.value)} />
         </label>
-        <label>
+        <label className="field">
           Password
           <input type="password" value={password} autoComplete="new-password" onChange={(e) => setPassword(e.target.value)} />
         </label>
       </div>
       <div className="row">
-        <button
+        <button className="btn"
           disabled={!username}
           onClick={() => void act(async () => {
             const ciphertext = await sealCredential(agent.credentialPublicKey!, username, password);
@@ -264,7 +286,7 @@ function CredentialForm({ scope, agent, act }: {
         >
           Encrypt and send
         </button>
-        <button onClick={() => setOpen(false)}>Cancel</button>
+        <button className="btn" onClick={() => setOpen(false)}>Cancel</button>
       </div>
     </div>
   );
@@ -290,7 +312,7 @@ function Agents({ agents, premises, act }: {
           box, and the agent enrols itself — no certificates to copy.
         </p>
         <div className="row">
-          <label>
+          <label className="field">
             Premises
             <select value={premisesId} onChange={(e) => setPremisesId(e.target.value)}>
               <option value="">Choose…</option>
@@ -299,16 +321,16 @@ function Agents({ agents, premises, act }: {
               ))}
             </select>
           </label>
-          <label>
+          <label className="field">
             Device id
             <input value={deviceId} placeholder="gate-01"
                    onChange={(e) => setDeviceId(e.target.value.toLowerCase())} />
           </label>
-          <label>
+          <label className="field">
             Label
             <input value={siteName} placeholder="Main Gate" onChange={(e) => setSiteName(e.target.value)} />
           </label>
-          <button
+          <button className="btn"
             disabled={!premisesId || !deviceId}
             onClick={() => void act(async () => {
               await createAgent({ premisesId, deviceId, siteName: siteName || deviceId });
@@ -375,13 +397,13 @@ function Agents({ agents, premises, act }: {
                     <select value={platform} onChange={(e) => setPlatform(e.target.value as Platform)}>
                       {PLATFORMS.map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}
                     </select>
-                    <button onClick={() => void act(async () => {
+                    <button className="btn" onClick={() => void act(async () => {
                       setDownloaded(await downloadInstaller(agent.thingName, platform));
                     })}>
                       Download
                     </button>
                     {agent.online && (
-                      <button onClick={() => void act(() => requestScan(agent.thingName))}>Scan now</button>
+                      <button className="btn" onClick={() => void act(() => requestScan(agent.thingName))}>Scan now</button>
                     )}
                   </div>
                 </td>
@@ -422,7 +444,7 @@ function TranscodeLimit({ agent, act }: {
         aria-label={`Concurrent transcodes for ${agent.thingName}`}
       />
       {changed && (
-        <button onClick={() => void act(async () => {
+        <button className="btn" onClick={() => void act(async () => {
           await setTranscodeLimit(agent.thingName, Number(value));
         })}>
           Save
@@ -450,20 +472,20 @@ function PremisesTab({ premises, agents, act }: {
           changed afterwards — and it is what lets a viewer be restricted to one site.
         </p>
         <div className="row">
-          <label>
+          <label className="field">
             Id
             <input value={premisesId} placeholder="acme-hq"
                    onChange={(e) => setPremisesId(e.target.value.toLowerCase())} />
           </label>
-          <label>
+          <label className="field">
             Name
             <input value={displayName} placeholder="Acme HQ" onChange={(e) => setDisplayName(e.target.value)} />
           </label>
-          <label>
+          <label className="field">
             Address
             <input value={address} onChange={(e) => setAddress(e.target.value)} />
           </label>
-          <button
+          <button className="btn"
             disabled={!premisesId}
             onClick={() => void act(async () => {
               await createPremises({ premisesId, displayName: displayName || premisesId, address });
@@ -490,7 +512,7 @@ function PremisesTab({ premises, agents, act }: {
                   <td>{site.address ?? '—'}</td>
                   <td>{attached}</td>
                   <td>
-                    <button
+                    <button className="btn"
                       disabled={attached > 0}
                       title={attached > 0 ? 'Remove its agents first' : undefined}
                       onClick={() => void act(() => deletePremises(site.premisesId))}
@@ -523,11 +545,11 @@ function Users({ users, premises, me, act }: {
         <strong>Invite a viewer</strong>
         <p className="muted small">They receive a temporary password by email and choose their own on first sign-in.</p>
         <div className="row">
-          <label>
+          <label className="field">
             Email
             <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} />
           </label>
-          <label>
+          <label className="field">
             Role
             <select value={role} onChange={(e) => setRole(e.target.value as Role)}>
               <option value="viewer">Viewer — watch only</option>
@@ -536,7 +558,7 @@ function Users({ users, premises, me, act }: {
               {me?.role === 'superadmin' && <option value="superadmin">Superadmin — all tenants</option>}
             </select>
           </label>
-          <label>
+          <label className="field">
             Premises
             <select
               multiple
@@ -549,7 +571,7 @@ function Users({ users, premises, me, act }: {
               ))}
             </select>
           </label>
-          <button
+          <button className="btn"
             disabled={!email}
             onClick={() => void act(async () => {
               await createUser({ email, role, premises: scoped });
@@ -576,7 +598,7 @@ function Users({ users, premises, me, act }: {
               <td className="muted small">{user.premises || 'all sites'}</td>
               <td><span className="muted">{user.status?.toLowerCase().replace(/_/g, ' ')}</span></td>
               <td>
-                <button onClick={() => void act(() => deleteUser(user.username))}>Remove</button>
+                <button className="btn" onClick={() => void act(() => deleteUser(user.username))}>Remove</button>
               </td>
             </tr>
           ))}

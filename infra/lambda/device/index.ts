@@ -219,6 +219,10 @@ async function writeCameras(pk: string, thingName: string, cameras: unknown[], n
             && /^[a-z0-9 :.+-]{1,32}$/i.test(camera.sourceCodecProfile)
               ? camera.sourceCodecProfile.toLowerCase()
               : undefined,
+          // Both originate on the customer's network and reach here through
+          // the agent, so they are shaped rather than trusted.
+          ipAddress: ipAddress(camera.ipAddress),
+          macAddress: macAddress(camera.macAddress),
           profiles: Array.isArray(camera.profiles)
             ? camera.profiles.filter((p): p is string => p === 'sub' || p === 'main')
             : ['sub'],
