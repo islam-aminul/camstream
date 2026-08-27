@@ -40,7 +40,12 @@ export class Identity extends Construct {
         requireSymbols: false,
       },
       accountRecovery: cognito.AccountRecovery.EMAIL_ONLY,
-      removalPolicy: RemovalPolicy.DESTROY,
+      // Every account in the deployment. A pool cannot be restored from a
+      // backup the way a table can, so losing it means re-inviting every
+      // viewer and administrator — and re-tenanting them, since custom
+      // attributes are immutable by design.
+      deletionProtection: true,
+      removalPolicy: RemovalPolicy.RETAIN,
     });
 
     // Roles are groups, not token attributes: a group can be revoked centrally
