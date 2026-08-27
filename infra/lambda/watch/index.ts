@@ -243,7 +243,12 @@ export async function handler(
 
   return json(200, {
     keepaliveInSeconds: Math.floor(DEMAND_TTL_SECONDS / 2),
-    desired,
+    // Scoped like every other listing. The full set above drives the agents,
+    // but returning it verbatim told a viewer restricted to one site the thing
+    // name of every agent in the tenant — which encodes the premises — along
+    // with the cameras other viewers had open there. A restriction that
+    // blocked viewing would otherwise still leak the shape of the estate.
+    desired: desired.filter((state) => withinScope(state.thingName, scope)),
   });
 }
 
