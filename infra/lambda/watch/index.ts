@@ -1,5 +1,5 @@
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, QueryCommand, PutCommand } from '@aws-sdk/lib-dynamodb';
+import { DynamoDBDocumentClient, QueryCommand, PutCommand, GetCommand } from '@aws-sdk/lib-dynamodb';
 import { IoTDataPlaneClient, PublishCommand } from '@aws-sdk/client-iot-data-plane';
 import type { APIGatewayProxyEventV2WithJWTAuthorizer, APIGatewayProxyStructuredResultV2 } from 'aws-lambda';
 import { isValidId, parseThingName, premisesScope, withinScope } from '../shared/tenant';
@@ -28,6 +28,14 @@ interface DemandRecord {
   mainCameraId?: string;
   /** Codecs this viewer's browser can actually decode. */
   codecs?: string[];
+  /**
+   * When each requested transcode was first asked for.
+   *
+   * Slots go to the earliest request, which is what stops a later one from
+   * evicting a stream somebody is already watching. Keyed by cameraId and
+   * carried across keepalives, so a viewer's place in the queue survives.
+   */
+  transcodeSince?: Record<string, number>;
   /**
    * Cameras this viewer has explicitly asked the agent to transcode.
    *
@@ -161,6 +169,19 @@ export async function handler(
   }
 
   const now = Math.floor(Date.now() / 1000);
+
+  // Carried forward rather than restamped: a keepalive must not move a viewer
+  // to the back of the queue, and a second request must not evict the first.
+  const previous = await ddb.send(new GetCommand({
+    TableName: TABLE,
+    Key: { pk: `TENANT#${tenantId}`, sk: `DEMAND#${body.sessionId}` },
+  }));
+  const wasRequestedAt = (previous.Item?.transcodeSince ?? {}) as Record<string, number>;
+  const transcodeSince: Record<string, number> = {};
+  for (const cameraId of transcode) {
+    transcodeSince[cameraId] = wasRequestedAt[cameraId] ?? now;
+  }
+
   await ddb.send(
     new PutCommand({
       TableName: TABLE,
@@ -173,6 +194,7 @@ export async function handler(
         mainCameraId,
         codecs,
         transcode,
+        transcodeSince,
         scope,
         expiresAt: now + DEMAND_TTL_SECONDS,
       },
@@ -237,6 +259,9 @@ export function resolveDesiredState(
     byThing.set(device.thingName, new Map());
   }
 
+  // The earliest moment anybody asked for each transcode, across all viewers.
+  const requestedAt = new Map<string, number>();
+
   const want = (
     thingName: string,
     cameraId: string,
@@ -260,6 +285,12 @@ export function resolveDesiredState(
   for (const demand of live) {
     const viewerCodecs = demand.codecs ?? [];
     const transcodeRequested = demand.transcode ?? [];
+    for (const [cameraId, at] of Object.entries(demand.transcodeSince ?? {})) {
+      const existing = requestedAt.get(cameraId);
+      if (existing === undefined || at < existing) {
+        requestedAt.set(cameraId, at);
+      }
+    }
     if (demand.grid) {
       for (const camera of cameras) {
         if (!withinScope(camera.thingName, demand.scope ?? [])) {
@@ -286,7 +317,8 @@ export function resolveDesiredState(
     const sorted = [...renditions.values()].sort(
       (a, b) => a.cameraId.localeCompare(b.cameraId) || a.profile.localeCompare(b.profile) || a.variant.localeCompare(b.variant),
     );
-    return applyTranscodeCap(thingName, sorted, capOf.get(thingName) ?? DEFAULT_MAX_TRANSCODES);
+    return applyTranscodeCap(
+      thingName, sorted, capOf.get(thingName) ?? DEFAULT_MAX_TRANSCODES, requestedAt);
   });
 }
 
@@ -306,18 +338,29 @@ function applyTranscodeCap(
   thingName: string,
   renditions: { cameraId: string; profile: 'sub' | 'main'; variant: Variant }[],
   cap: number,
+  requestedAt: Map<string, number>,
 ): DesiredState {
   const kept: typeof renditions = [];
   const declined: { cameraId: string; profile: 'sub' | 'main' }[] = [];
-  let slots = cap;
+
+  // Slots go to whoever asked first. Allocating them by name instead let a
+  // later request evict a transcode somebody was already watching — and, with
+  // two viewers, let one silently take the other's stream away. Ties fall back
+  // to the name so the choice is at least stable between calls.
+  const contenders = renditions
+    .filter((r) => r.variant === 'h264')
+    .sort((a, b) => (requestedAt.get(a.cameraId) ?? Infinity) - (requestedAt.get(b.cameraId) ?? Infinity)
+      || a.cameraId.localeCompare(b.cameraId)
+      || a.profile.localeCompare(b.profile));
+  const granted = new Set(contenders.slice(0, Math.max(0, cap))
+    .map((r) => `${r.cameraId}/${r.profile}`));
 
   for (const rendition of renditions) {
     if (rendition.variant !== 'h264') {
       kept.push(rendition);
       continue;
     }
-    if (slots > 0) {
-      slots -= 1;
+    if (granted.has(`${rendition.cameraId}/${rendition.profile}`)) {
       kept.push(rendition);
     } else {
       declined.push({ cameraId: rendition.cameraId, profile: rendition.profile });

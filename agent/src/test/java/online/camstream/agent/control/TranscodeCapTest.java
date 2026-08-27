@@ -95,4 +95,55 @@ class TranscodeCapTest {
         assertEquals("sub", StreamProfile.SUB.key());
         assertEquals("main", StreamProfile.MAIN.key());
     }
+
+    private static Rendition transcode(String cameraId) {
+        return new Rendition(cameraId, StreamProfile.SUB, Variant.H264);
+    }
+
+    @Test
+    void grantsOnlyAsManySlotsAsRemain() {
+        List<Rendition> wanted = List.of(transcode("cam-a"), transcode("cam-b"), transcode("cam-c"));
+
+        StreamManager.Split none = StreamManager.withinCap(wanted, 0, 1);
+        assertEquals(List.of(transcode("cam-a")), none.start());
+        assertEquals(2, none.refuse().size());
+
+        StreamManager.Split some = StreamManager.withinCap(wanted, 1, 3);
+        assertEquals(2, some.start().size(), "two slots left of three");
+        assertEquals(1, some.refuse().size());
+    }
+
+    @Test
+    void refusesEverythingWhenTheSlotsAreAlreadyFull() {
+        List<Rendition> wanted = List.of(transcode("cam-a"));
+        StreamManager.Split split = StreamManager.withinCap(wanted, 2, 2);
+        assertTrue(split.start().isEmpty());
+        assertEquals(wanted, split.refuse());
+    }
+
+    @Test
+    void neverTakesASlotBackFromAStreamAlreadyRunning() {
+        // Being one over the limit until a stream stops on its own is better
+        // than cutting off somebody who is watching it.
+        StreamManager.Split split = StreamManager.withinCap(List.of(), 5, 1);
+        assertTrue(split.start().isEmpty());
+        assertTrue(split.refuse().isEmpty());
+    }
+
+    @Test
+    void refusesEverythingWhenTheSiteIsSetNotToTranscode() {
+        StreamManager.Split split = StreamManager.withinCap(List.of(transcode("cam-a")), 0, 0);
+        assertTrue(split.start().isEmpty());
+        assertEquals(1, split.refuse().size());
+    }
+
+    @Test
+    void picksTheSameOneEachTimeRatherThanFlapping() {
+        List<Rendition> oneOrder = List.of(transcode("cam-c"), transcode("cam-a"), transcode("cam-b"));
+        List<Rendition> another = List.of(transcode("cam-b"), transcode("cam-c"), transcode("cam-a"));
+
+        assertEquals(StreamManager.withinCap(oneOrder, 0, 1).start(),
+                StreamManager.withinCap(another, 0, 1).start(),
+                "a set arriving in a different order must not move the stream");
+    }
 }
