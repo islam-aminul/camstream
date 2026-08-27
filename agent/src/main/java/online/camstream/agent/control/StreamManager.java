@@ -53,6 +53,8 @@ public final class StreamManager implements AutoCloseable {
     private final Map<Rendition, Instant> retryAfter = new ConcurrentHashMap<>();
     /** cameraId -> the rendition set the current master playlist describes. */
     private final Map<String, String> publishedLadders = new ConcurrentHashMap<>();
+    /** Renditions whose next pipeline follows an encoder restart. */
+    private final java.util.Set<Rendition> restartedRenditions = ConcurrentHashMap.newKeySet();
 
     private volatile Instant lastInstruction = Instant.now();
 
@@ -111,6 +113,9 @@ public final class StreamManager implements AutoCloseable {
                 Duration wait = backoff.failed();
                 log.warn("[{}] ffmpeg exited (attempt {}) — retrying in {}s",
                         rendition, backoff.consecutiveFailures(), wait.toSeconds());
+                // Carried into the next pipeline so the playlist marks where
+                // the timeline actually broke.
+                restartedRenditions.add(rendition);
                 stop(rendition);
                 retryAfter.put(rendition, Instant.now().plus(wait));
             }
@@ -191,8 +196,12 @@ public final class StreamManager implements AutoCloseable {
 
             FfmpegHls ffmpeg = new FfmpegHls(config, camera, rendition, directory);
             HlsPublisher publisher = new HlsPublisher(
-                    s3, config.bucket, config.keyPrefix() + rendition.keySuffix(), directory, rendition.toString());
+                    s3, config.bucket, config.keyPrefix() + rendition.keySuffix(), directory,
+                    rendition.toString(), config.playlistWindow);
 
+            if (restartedRenditions.remove(rendition)) {
+                publisher.encoderRestarted();
+            }
             active.put(rendition, new Pipeline(ffmpeg, publisher, directory, Instant.now()));
             retryAfter.remove(rendition);
             backoffs.computeIfAbsent(rendition, r -> new Backoff(MIN_BACKOFF, MAX_BACKOFF, HEALTHY_AFTER))
