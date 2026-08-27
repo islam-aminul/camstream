@@ -197,6 +197,7 @@ export default function App() {
             || transcoding.includes(selected.cameraId) ? (
             <Player
               src={manifestFor(selected, 'main', transcoding.includes(selected.cameraId))}
+              preferHighest
               onUndecodable={() => setUndecodable((ids) =>
                 ids.includes(selected.cameraId) ? ids : [...ids, selected.cameraId])}
               onUnavailable={() => setUnavailable((ids) =>
