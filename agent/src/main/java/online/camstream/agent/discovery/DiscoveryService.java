@@ -361,7 +361,7 @@ public final class DiscoveryService implements CameraSource {
      * ONVIF returns a bare rtsp:// URL; ffmpeg needs the credentials inline.
      * This value stays on the agent — {@link DiscoveredCamera#redacted()} drops it.
      */
-    private static String withCredentials(String rtspUrl, Credential credential) {
+    static String withCredentials(String rtspUrl, Credential credential) {
         if (credential.username() == null || credential.username().isEmpty()) {
             return rtspUrl;
         }
@@ -370,8 +370,8 @@ public final class DiscoveryService implements CameraSource {
             if (uri.getUserInfo() != null) {
                 return rtspUrl;
             }
-            String encodedUser = java.net.URLEncoder.encode(credential.username(), java.nio.charset.StandardCharsets.UTF_8);
-            String encodedPass = java.net.URLEncoder.encode(credential.password(), java.nio.charset.StandardCharsets.UTF_8);
+            String encodedUser = percentEncode(credential.username());
+            String encodedPass = percentEncode(credential.password());
             return uri.getScheme() + "://" + encodedUser + ":" + encodedPass + "@"
                     + uri.getHost() + (uri.getPort() > 0 ? ":" + uri.getPort() : "")
                     + (uri.getRawPath() == null ? "" : uri.getRawPath())
@@ -379,5 +379,40 @@ public final class DiscoveryService implements CameraSource {
         } catch (Exception e) {
             return rtspUrl;
         }
+    }
+
+    /**
+     * Percent-encodes one userinfo component, per RFC 3986.
+     *
+     * Not URLEncoder, which this used to be. URLEncoder implements HTML form
+     * encoding, and its defining difference is that a space becomes '+' rather
+     * than %20 — so a password with a space in it reached the camera as a
+     * different password, and one containing '+' arrived as a space. The
+     * camera answered 401, which the agent reads as a refusal and backs off
+     * from for five minutes with "check the credentials". The credentials were
+     * correct; this was not.
+     *
+     * Everything outside the unreserved set is escaped. That is stricter than
+     * userinfo strictly requires, which costs nothing: a percent-encoded
+     * unreserved character is equivalent to the character itself, so
+     * over-escaping is always safe and under-escaping is not.
+     */
+    private static String percentEncode(String value) {
+        if (value == null) {
+            return "";
+        }
+        StringBuilder out = new StringBuilder(value.length() + 8);
+        for (byte raw : value.getBytes(java.nio.charset.StandardCharsets.UTF_8)) {
+            int c = raw & 0xFF;
+            boolean unreserved = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
+                    || c == '-' || c == '.' || c == '_' || c == '~';
+            if (unreserved) {
+                out.append((char) c);
+            } else {
+                out.append('%').append(Character.toUpperCase(Character.forDigit(c >> 4, 16)))
+                        .append(Character.toUpperCase(Character.forDigit(c & 0x0F, 16)));
+            }
+        }
+        return out.toString();
     }
 }
