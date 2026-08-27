@@ -1,7 +1,7 @@
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, QueryCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyEventV2WithJWTAuthorizer, APIGatewayProxyStructuredResultV2 } from 'aws-lambda';
-import { isValidId } from '../shared/tenant';
+import { isValidId, premisesScope, withinScope } from '../shared/tenant';
 import { fail, json } from '../shared/http';
 
 const TABLE = process.env.REGISTRY_TABLE!;
@@ -23,10 +23,12 @@ interface CameraRecord {
 export async function handler(
   event: APIGatewayProxyEventV2WithJWTAuthorizer,
 ): Promise<APIGatewayProxyStructuredResultV2> {
-  const tenantId = event.requestContext.authorizer?.jwt?.claims?.['custom:tenantId'];
+  const claims = event.requestContext.authorizer?.jwt?.claims;
+  const tenantId = claims?.['custom:tenantId'];
   if (!isValidId(tenantId)) {
     return fail(403, 'Account is not associated with a valid tenant');
   }
+  const scope = premisesScope(claims as Record<string, unknown> | undefined);
 
   const result = await ddb.send(
     new QueryCommand({
@@ -37,7 +39,11 @@ export async function handler(
   );
 
   const now = Math.floor(Date.now() / 1000);
-  const cameras = (result.Items ?? []).map((item) => {
+  const cameras = (result.Items ?? [])
+    // A restricted viewer must not learn which other sites exist, what their
+    // agents are called, or what is watched there.
+    .filter((item) => withinScope(String((item as CameraRecord).thingName ?? ''), scope))
+    .map((item) => {
     const record = item as CameraRecord;
     return {
       thingName: record.thingName,

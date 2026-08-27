@@ -2,7 +2,7 @@ import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, QueryCommand, PutCommand } from '@aws-sdk/lib-dynamodb';
 import { IoTDataPlaneClient, PublishCommand } from '@aws-sdk/client-iot-data-plane';
 import type { APIGatewayProxyEventV2WithJWTAuthorizer, APIGatewayProxyStructuredResultV2 } from 'aws-lambda';
-import { isValidId, parseThingName } from '../shared/tenant';
+import { isValidId, parseThingName, premisesScope, withinScope } from '../shared/tenant';
 import { fail, json } from '../shared/http';
 import { readSession } from '../shared/session';
 
@@ -26,6 +26,8 @@ interface DemandRecord {
   mainCameraId?: string;
   /** Codecs this viewer's browser can actually decode. */
   codecs?: string[];
+  /** Premises this viewer may drive. Empty means the whole tenant. */
+  scope?: string[];
   expiresAt: number;
 }
 
@@ -85,6 +87,9 @@ export async function handler(
   }
 
   const grid = body.grid !== false;
+  // Bounds which agents this viewer can cause to start publishing. Without it
+  // a restricted viewer drives — and bills — cameras at sites they cannot see.
+  const scope = premisesScope(claims as Record<string, unknown>);
 
   // Declared by the player from MediaSource.isTypeSupported. Absent means we
   // assume the conservative floor and transcode anything exotic.
@@ -105,6 +110,9 @@ export async function handler(
     if (!parsed || parsed.tenantId !== tenantId) {
       return fail(403, 'Device does not belong to this tenant');
     }
+    if (!withinScope(main.thingName, scope)) {
+      return fail(403, 'Device is not within your permitted premises');
+    }
     if (!isValidId(main.cameraId)) {
       return fail(400, 'Invalid cameraId');
     }
@@ -124,6 +132,7 @@ export async function handler(
         mainThingName,
         mainCameraId,
         codecs,
+        scope,
         expiresAt: now + DEMAND_TTL_SECONDS,
       },
     }),
@@ -200,6 +209,9 @@ export function resolveDesiredState(
 
     if (demand.grid) {
       for (const camera of cameras) {
+        if (!withinScope(camera.thingName, demand.scope ?? [])) {
+          continue;
+        }
         want(camera.thingName, camera.cameraId, 'sub', viewerCodecs);
       }
     }

@@ -1,5 +1,8 @@
 import { describe, it, expect } from 'vitest';
-import { isValidId, thingName, parseThingName, cookieResource, THING_NAME_PATTERN } from '../shared/tenant';
+import {
+  isValidId, thingName, parseThingName, cookieResource, THING_NAME_PATTERN,
+  premisesScope, withinScope,
+} from '../shared/tenant';
 import { slugFor } from '../shared/registry';
 
 describe('identifiers', () => {
@@ -85,5 +88,35 @@ describe('slugFor', () => {
 
   it('always meets the minimum length', () => {
     expect(slugFor('a').length).toBeGreaterThanOrEqual(3);
+  });
+});
+
+describe('premises scoping of listings', () => {
+  it('lets an unscoped account see every site', () => {
+    expect(withinScope('acme--acme-hq--gate-01', [])).toBe(true);
+    expect(withinScope('acme--acme-dc--rack-01', [])).toBe(true);
+  });
+
+  it('hides other sites from a restricted account', () => {
+    // Not only playback: a restricted viewer must not learn from a camera list
+    // that other sites exist or what their agents are called.
+    expect(withinScope('acme--acme-hq--gate-01', ['acme-hq'])).toBe(true);
+    expect(withinScope('acme--acme-dc--rack-01', ['acme-hq'])).toBe(false);
+  });
+
+  it('does not match a premises by prefix', () => {
+    expect(withinScope('acme--acme-hq-annex--gate-01', ['acme-hq'])).toBe(false);
+  });
+
+  it('refuses a thing name it cannot parse', () => {
+    expect(withinScope('nonsense', ['acme-hq'])).toBe(false);
+    expect(withinScope('acme--gate-01', ['acme-hq'])).toBe(false);
+  });
+
+  it('reads and sanitises the premises claim', () => {
+    expect(premisesScope({ 'custom:premises': 'acme-hq, acme-dc' })).toEqual(['acme-hq', 'acme-dc']);
+    expect(premisesScope({ 'custom:premises': '' })).toEqual([]);
+    expect(premisesScope(undefined)).toEqual([]);
+    expect(premisesScope({ 'custom:premises': 'BAD,ok--no,xy' })).toEqual([]);
   });
 });
