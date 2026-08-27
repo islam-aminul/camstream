@@ -29,3 +29,6 @@ devices/
 
 # Local scratch: account id is resolved from credentials at deploy time
 aws-account
+
+# Playwright MCP scratch output
+.playwright-mcp/

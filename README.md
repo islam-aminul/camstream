@@ -37,6 +37,26 @@ driven by viewing:
 `segmentDurationMs` is the dial: 2s gives ~5s latency, 4s halves request cost
 for roughly double the delay.
 
+### Measured
+
+One real camera — a CP Plus sub-stream at 640×360, h264 — sampled while
+publishing:
+
+| | |
+|---|---|
+| Segments | 0.31/s (~3.2s each) |
+| S3 PUTs | 0.61/s — media plus the rewritten playlist |
+| Bandwidth | 12.6 KB/s (103 kbps) |
+| **Cost, watched 8h/day** | **$3.85/month** |
+| **Cost, watched 24/7** | **$11.55/month** |
+
+Nothing while nobody is watching. Two things in those figures are worth noting:
+segments came out at ~3.2s rather than the configured 2s, because the agent
+stream-copies and can only cut on a keyframe — the camera's GOP sets the floor.
+And the measured 103 kbps is a twentieth of the 2048 kbps the same camera
+advertises over ONVIF, which is why the ABR ladder ignores declared bitrates
+that fail to discriminate.
+
 ## Repository layout
 
 | Path | What it is |
