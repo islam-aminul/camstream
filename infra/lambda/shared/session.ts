@@ -22,6 +22,13 @@ export interface SessionRecord {
   tenantId: string;
   issuedAt: number;
   expiresAt: number;
+  /**
+   * Cognito's `origin_jti`, which identifies the sign-in rather than the token.
+   * It survives a token refresh but changes on a fresh authentication, so
+   * comparing it detects a displaced session on any request — without the
+   * client having to send anything extra.
+   */
+  originJti?: string;
 }
 
 const key = (userSub: string) => ({ pk: `USER#${userSub}`, sk: 'SESSION' });
@@ -33,6 +40,34 @@ export async function readSession(
 ): Promise<SessionRecord | undefined> {
   const result = await ddb.send(new GetCommand({ TableName: table, Key: key(userSub), ConsistentRead: true }));
   return result.Item as SessionRecord | undefined;
+}
+
+/**
+ * Refuses a request whose sign-in has been superseded.
+ *
+ * Single session has to hold on every authenticated route, not just the ones
+ * that happen to carry a session id: a displaced administrator holding a valid
+ * token could otherwise keep managing the estate until that token lapsed.
+ *
+ * Absence of a record means the record's TTL passed, not that someone else
+ * signed in — so that case is allowed rather than inventing a second way to be
+ * locked out.
+ */
+export async function sessionSuperseded(
+  ddb: DynamoDBDocumentClient,
+  table: string,
+  userSub: string,
+  claims: Record<string, unknown> | undefined,
+): Promise<boolean> {
+  const originJti = claims?.origin_jti;
+  if (typeof originJti !== 'string' || originJti.length === 0) {
+    return false;
+  }
+  const current = await readSession(ddb, table, userSub);
+  if (!current || !current.originJti) {
+    return false;
+  }
+  return current.originJti !== originJti;
 }
 
 export async function writeSession(

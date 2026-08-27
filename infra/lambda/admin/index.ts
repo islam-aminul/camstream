@@ -11,6 +11,7 @@ import type { APIGatewayProxyEventV2WithJWTAuthorizer, APIGatewayProxyStructured
 import { isValidId, parseThingName, thingName as buildThingName, THING_NAME_PATTERN } from '../shared/tenant';
 import { identify, can, targetTenant, ROLES, type Caller, type Role } from '../shared/roles';
 import { fail, json } from '../shared/http';
+import { sessionSuperseded } from '../shared/session';
 
 /** A refusal the caller can act on, as distinct from an unexpected failure. */
 class Refused extends Error {
@@ -46,6 +47,13 @@ export async function handler(
   const caller = identify(event);
   if (!caller) {
     return fail(403, 'Not a recognised account');
+  }
+
+  // A displaced administrator must stop being an administrator immediately,
+  // not whenever their token happens to expire.
+  const claims = (event.requestContext.authorizer?.jwt?.claims ?? {}) as Record<string, unknown>;
+  if (await sessionSuperseded(ddb, TABLE, caller.sub, claims)) {
+    return fail(409, 'Session superseded by a newer sign-in');
   }
 
   const route = `${event.requestContext.http.method} ${event.routeKey.split(' ')[1] ?? ''}`;

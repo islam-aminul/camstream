@@ -4,7 +4,7 @@ import { IoTDataPlaneClient, PublishCommand } from '@aws-sdk/client-iot-data-pla
 import type { APIGatewayProxyEventV2WithJWTAuthorizer, APIGatewayProxyStructuredResultV2 } from 'aws-lambda';
 import { isValidId, parseThingName, premisesScope, withinScope } from '../shared/tenant';
 import { fail, json } from '../shared/http';
-import { readSession } from '../shared/session';
+import { readSession, sessionSuperseded } from '../shared/session';
 
 const TABLE = process.env.REGISTRY_TABLE!;
 const IOT_ENDPOINT = process.env.IOT_DATA_ENDPOINT!;
@@ -82,7 +82,8 @@ export async function handler(
     return fail(400, 'Body must include sessionId');
   }
   const current = await readSession(ddb, TABLE, userSub);
-  if (!current || current.sessionId !== body.sessionId) {
+  if (!current || current.sessionId !== body.sessionId
+      || await sessionSuperseded(ddb, TABLE, userSub, claims as Record<string, unknown>)) {
     return fail(409, 'Session superseded by a newer sign-in');
   }
 
