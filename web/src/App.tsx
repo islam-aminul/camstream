@@ -1,11 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Player } from './Player';
 import {
-  SessionSuperseded, listCameras, manifestFor, playsNatively, startSession,
-  transcodeWouldHelp, watch, type Camera, type SessionInfo, declinedTranscodes, type DeclinedTranscode } from './api';
+  SessionSuperseded, declinedTranscodes, listCameras, manifestFor, playsNatively,
+  startSession, watch,
+  type Camera, type DeclinedTranscode, type SessionInfo } from './api';
 import { NewPasswordRequired, completeNewPassword, currentSession, signIn, signOut } from './auth';
 import { Admin } from './Admin';
 import { canAdminister } from './admin';
+import { CameraGrid, TranscodeQueued, Unplayable } from './CameraGrid';
+import { Sidebar, WHOLE_ESTATE, scopeMatches, type Scope } from './Sidebar';
 import type { CognitoUser } from 'amazon-cognito-identity-js';
 
 type Screen = 'loading' | 'login' | 'newPassword' | 'live';
@@ -15,6 +18,7 @@ export default function App() {
   const [session, setSession] = useState<SessionInfo | null>(null);
   const [cameras, setCameras] = useState<Camera[]>([]);
   const [selected, setSelected] = useState<Camera | null>(null);
+  const [scope, setScope] = useState<Scope>(WHOLE_ESTATE);
   const [notice, setNotice] = useState<string | null>(null);
   /**
    * Cameras the viewer has asked the agent to transcode. Held here rather than
@@ -35,24 +39,34 @@ export default function App() {
   const [pendingUser, setPendingUser] = useState<CognitoUser | null>(null);
   const [admin, setAdmin] = useState(false);
   const [showAdmin, setShowAdmin] = useState(false);
+  /**
+   * The cameras currently rendered, which is what the agents are told to
+   * publish. A screenful, never the estate: each one costs an encoder at the
+   * edge and S3 requests per segment.
+   */
+  const [visible, setVisible] = useState<string[]>([]);
 
   // Read by the keepalive timer, which must not restart every time the
-  // selection changes.
+  // selection or the page changes.
   const selectedRef = useRef<Camera | null>(null);
   selectedRef.current = selected;
   const transcodingRef = useRef<string[]>([]);
   transcodingRef.current = transcoding;
+  const visibleRef = useRef<string[]>([]);
+  visibleRef.current = visible;
 
   const endSession = useCallback(async (message: string | null) => {
     await signOut();
     setSession(null);
     setCameras([]);
     setSelected(null);
+    setScope(WHOLE_ESTATE);
     setAdmin(false);
     setShowAdmin(false);
     setTranscoding([]);
     setUndecodable([]);
     setUnavailable([]);
+    setVisible([]);
     setNotice(message);
     setScreen('login');
   }, []);
@@ -99,7 +113,7 @@ export default function App() {
       try {
         const result = await watch(
           session.sessionId,
-          true,
+          visibleRef.current,
           pinned ? { thingName: pinned.thingName, cameraId: pinned.cameraId } : undefined,
           transcodingRef.current,
         );
@@ -125,17 +139,24 @@ export default function App() {
     };
   }, [session, endSession]);
 
-  // Re-announce immediately when the pinned camera changes, so switching to the
-  // main stream does not wait for the next tick.
+  // Re-announce the moment the page, the pinned camera or the transcode set
+  // changes, so paging does not wait out the keepalive before anything appears.
   useEffect(() => {
     if (!session) return;
     void watch(
       session.sessionId,
-      true,
+      visible,
       selected ? { thingName: selected.thingName, cameraId: selected.cameraId } : undefined,
       transcoding,
     ).then((result) => setQueued(declinedTranscodes(result))).catch(() => undefined);
-  }, [selected, session, transcoding]);
+  }, [selected, session, transcoding, visible]);
+
+  const onVisible = useCallback((keys: string[]) => {
+    // Compared before setting: the grid recomputes this on every render, and a
+    // new array with the same contents would re-announce demand needlessly.
+    setVisible((current) =>
+      current.length === keys.length && current.every((k, i) => k === keys[i]) ? current : keys);
+  }, []);
 
   if (screen === 'loading') return <div className="centre">Loading…</div>;
 
@@ -174,179 +195,86 @@ export default function App() {
     );
   }
 
+  const inScope = cameras.filter((camera) => scopeMatches(scope, camera));
+  const scopeTitle = scope.thingName
+    ? (inScope[0]?.siteName || scope.thingName.split('--').pop() || 'Agent')
+    : scope.premisesId ?? 'All cameras';
+
+  const markUndecodable = (camera: Camera) =>
+    setUndecodable((ids) => ids.includes(camera.cameraId) ? ids : [...ids, camera.cameraId]);
+  const markUnavailable = (camera: Camera) =>
+    setUnavailable((ids) => ids.includes(camera.cameraId) ? ids : [...ids, camera.cameraId]);
+  const requestTranscode = (camera: Camera) => {
+    setUndecodable((ids) => ids.filter((id) => id !== camera.cameraId));
+    setTranscoding((ids) => ids.includes(camera.cameraId) ? ids : [...ids, camera.cameraId]);
+  };
+
+  const queuedFor = (camera: Camera) => queued.find((q) => q.cameraId === camera.cameraId);
+
   return (
-    <div className="app">
-      <header>
-        <h1>CamStream</h1>
-        <div className="header-right">
+    <div className={`shell${selected ? ' no-sidebar' : ''}`}>
+      <header className="topbar">
+        <span className="brand"><span className="brand-mark">C</span>CamStream</span>
+        <span className="topbar-spacer" />
+        <div className="topbar-right">
           {session && <span className="tenant">{session.tenantId}</span>}
-          {admin && <button onClick={() => setShowAdmin(true)}>Administration</button>}
-          <button onClick={() => void endSession(null)}>Sign out</button>
+          {admin && (
+            <button className="btn ghost" onClick={() => setShowAdmin(true)}>Administration</button>
+          )}
+          <button className="btn ghost" onClick={() => void endSession(null)}>Sign out</button>
         </div>
       </header>
 
-      {notice && <div className="notice">{notice}</div>}
+      {!selected && <Sidebar cameras={cameras} scope={scope} onScope={setScope} />}
 
-      {selected ? (
-        <section className="detail">
-          <div className="detail-bar">
-            <button onClick={() => setSelected(null)}>← All cameras</button>
-            <strong>{selected.displayName}</strong>
-            <span className="badge">
-              {transcoding.includes(selected.cameraId) ? 'main · transcoded' : 'main stream'}
-            </span>
-          </div>
-          {queuedFor(queued, selected) ? (
-            <TranscodeQueued limit={queuedFor(queued, selected)!.limit} />
-          ) : (playsNatively(selected) && !undecodable.includes(selected.cameraId))
-            || transcoding.includes(selected.cameraId) ? (
-            <Player
-              src={manifestFor(selected, 'main', transcoding.includes(selected.cameraId))}
-              preferHighest
-              showStats
-              onUndecodable={() => setUndecodable((ids) =>
-                ids.includes(selected.cameraId) ? ids : [...ids, selected.cameraId])}
-              onUnavailable={() => setUnavailable((ids) =>
-                ids.includes(selected.cameraId) ? ids : [...ids, selected.cameraId])}
-            />
-          ) : (
-            <Unplayable
-              camera={selected}
-              onTranscode={() => {
-                setUndecodable((ids) => ids.filter((id) => id !== selected.cameraId));
-                setTranscoding((ids) => [...ids, selected.cameraId]);
-              }}
-            />
-          )}
-        </section>
-      ) : (
-        <section className="grid">
-          {cameras.length === 0 && <p className="empty">No cameras are reporting in yet.</p>}
-          {cameras.map((camera) => (
-            <button
-              key={`${camera.thingName}/${camera.cameraId}`}
-              className="tile"
-              onClick={() => {
-                const usable = ((playsNatively(camera) && !undecodable.includes(camera.cameraId))
-                  || transcoding.includes(camera.cameraId))
-                  && !queuedFor(queued, camera);
-                if (camera.online && usable) {
-                  setSelected(camera);
-                }
-              }}
-              disabled={!camera.online}
-            >
-              {!camera.online ? (
-                <div className="player"><div className="player-overlay">Offline</div></div>
-              ) : queuedFor(queued, camera) ? (
-                // Checked before the player, so a capped transcode never
-                // becomes a stream that mysteriously fails to arrive.
-                <TranscodeQueued limit={queuedFor(queued, camera)!.limit} />
-              ) : unavailable.includes(camera.cameraId) ? (
-                <NotPublishing name={camera.displayName} />
-              ) : (playsNatively(camera) && !undecodable.includes(camera.cameraId))
-                  || transcoding.includes(camera.cameraId) ? (
-                <Player
-                  src={manifestFor(camera, 'sub', transcoding.includes(camera.cameraId))}
-                  onUndecodable={() => setUndecodable((ids) =>
-                    ids.includes(camera.cameraId) ? ids : [...ids, camera.cameraId])}
-                  onUnavailable={() => setUnavailable((ids) =>
-                    ids.includes(camera.cameraId) ? ids : [...ids, camera.cameraId])}
-                />
-              ) : (
-                <Unplayable
-                  camera={camera}
-                  onTranscode={() => {
-                    setUndecodable((ids) => ids.filter((id) => id !== camera.cameraId));
-                    setTranscoding((ids) => [...ids, camera.cameraId]);
-                  }}
-                />
-              )}
-              <span className="tile-label">
-                {camera.displayName}
-                {transcoding.includes(camera.cameraId) && <span className="badge">transcoded</span>}
+      <main className="main">
+        {notice && <div className="notice">{notice}</div>}
+
+        {selected ? (
+          <section className="detail">
+            <div className="detail-bar">
+              <button className="btn ghost" onClick={() => setSelected(null)}>← All cameras</button>
+              <span className="detail-title">{selected.displayName}</span>
+              <span className="badge">
+                {transcoding.includes(selected.cameraId) ? 'main · transcoded' : 'main stream'}
               </span>
-            </button>
-          ))}
-        </section>
-      )}
-    </div>
-  );
-}
-
-/**
- * Offered rather than applied.
- *
- * Transcoding runs on the customer's own hardware and costs CPU there, so a
- * browser's limitations are surfaced as a choice with its price stated, not
- * silently turned into work at the edge.
- */
-function Unplayable({ camera, onTranscode }: { camera: Camera; onTranscode: () => void }) {
-  const possible = transcodeWouldHelp(camera);
-  // Naming the profile matters when it is the profile that is unplayable:
-  // "cannot play H264" reads as nonsense to someone whose browser plays H.264
-  // perfectly well, and hides that the camera is set to a 10-bit mode.
-  const format = [
-    (camera.sourceCodec ?? '').toUpperCase(),
-    camera.sourceCodecProfile ? `(${camera.sourceCodecProfile})` : '',
-  ].filter(Boolean).join(' ');
-  return (
-    <div className="player">
-      <div className="player-overlay unplayable">
-        <span>This browser cannot play {format}</span>
-        {possible ? (
-          <>
-            <button onClick={(e) => { e.stopPropagation(); onTranscode(); }}>
-              Transcode on the agent
-            </button>
-            <small>Converts to H.264 on the recorder. Uses CPU at the site.</small>
-          </>
+              {selected.siteName && <span className="detail-meta">{selected.siteName}</span>}
+            </div>
+            <div className="detail-stage">
+              <div className="player">
+                {queuedFor(selected) ? (
+                  <TranscodeQueued limit={queuedFor(selected)!.limit} />
+                ) : (playsNatively(selected) && !undecodable.includes(selected.cameraId))
+                  || transcoding.includes(selected.cameraId) ? (
+                  <Player
+                    src={manifestFor(selected, 'main', transcoding.includes(selected.cameraId))}
+                    preferHighest
+                    showStats
+                    onUndecodable={() => markUndecodable(selected)}
+                    onUnavailable={() => markUnavailable(selected)}
+                  />
+                ) : (
+                  <Unplayable camera={selected} onTranscode={() => requestTranscode(selected)} />
+                )}
+              </div>
+            </div>
+          </section>
         ) : (
-          <small>No other rendition would help — try Safari or Chrome.</small>
+          <CameraGrid
+            title={scopeTitle}
+            cameras={inScope}
+            transcoding={transcoding}
+            undecodable={undecodable}
+            unavailable={unavailable}
+            queued={queued}
+            onSelect={setSelected}
+            onTranscode={requestTranscode}
+            onUndecodable={markUndecodable}
+            onUnavailable={markUnavailable}
+            onVisible={onVisible}
+          />
         )}
-      </div>
-    </div>
-  );
-}
-
-/** Whether this camera's transcode is waiting for a free slot. */
-function queuedFor(queued: DeclinedTranscode[], camera: Camera): DeclinedTranscode | undefined {
-  return queued.find((entry) => entry.cameraId === camera.cameraId);
-}
-
-/**
- * The site is already transcoding as much as it is allowed to.
- *
- * Said plainly, with the limit and where it is changed, because the viewer
- * cannot act on this themselves and the alternative — a stream that never
- * arrives — sends them looking for a fault that is not there.
- */
-function TranscodeQueued({ limit }: { limit: number }) {
-  return (
-    <div className="player">
-      <div className="player-overlay unplayable">
-        <span>Waiting for a transcoding slot</span>
-        <small>
-          {limit === 0
-            ? 'This site is set not to transcode. An administrator can allow it.'
-            : `This site transcodes ${limit} camera${limit === 1 ? '' : 's'} at a time, and `
-              + `${limit === 1 ? 'that slot is' : 'those slots are'} in use. Close another `
-              + 'transcoded camera, or ask an administrator to raise the limit.'}
-        </small>
-      </div>
-    </div>
-  );
-}
-
-/** The agent is not publishing this camera, which is not a playback problem. */
-function NotPublishing({ name }: { name: string }) {
-  return (
-    <div className="player">
-      <div className="player-overlay unplayable">
-        <span>{name} is not being published</span>
-        <small>The agent is connected but this camera is not streaming — it may be
-          unreachable or refusing connections.</small>
-      </div>
+      </main>
     </div>
   );
 }
@@ -380,23 +308,23 @@ function LoginScreen({ notice, needsNewPassword, onSignIn, onSetPassword }: Logi
 
   return (
     <form className="login" onSubmit={submit}>
-      <h1>CamStream</h1>
+      <h1><span className="brand-mark">C</span>CamStream</h1>
       {notice && <p className="notice">{notice}</p>}
       {!needsNewPassword && (
-        <label>
+        <label className="field">
           Email
           <input type="email" value={email} autoComplete="username" required
                  onChange={(e) => setEmail(e.target.value)} />
         </label>
       )}
-      <label>
+      <label className="field">
         {needsNewPassword ? 'New password' : 'Password'}
         <input type="password" value={password} required
                autoComplete={needsNewPassword ? 'new-password' : 'current-password'}
                onChange={(e) => setPassword(e.target.value)} />
       </label>
-      {error && <p className="error">{error}</p>}
-      <button type="submit" disabled={busy}>
+      {error && <p className="login-error">{error}</p>}
+      <button className="btn primary" type="submit" disabled={busy}>
         {busy ? 'Working…' : needsNewPassword ? 'Set password' : 'Sign in'}
       </button>
     </form>

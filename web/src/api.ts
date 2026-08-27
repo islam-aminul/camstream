@@ -17,6 +17,10 @@ export interface Camera {
    * 10 reports the same codec name as the H.264 every browser decodes.
    */
   sourceCodecProfile?: string | null;
+  /** Grouping keys, so the console can bifurcate an estate without parsing ids. */
+  premisesId?: string | null;
+  siteName?: string | null;
+  resolutionLabel?: string;
   manifestUrl: { sub: string; main: string; subH264: string; mainH264: string; master: string };
 }
 
@@ -194,9 +198,17 @@ export function listCameras(): Promise<{ cameras: Camera[] }> {
  * asked for here, so this call is what starts and stops the cameras — and the
  * billing.
  */
+/**
+ * Tells the control plane what this viewer is showing.
+ *
+ * `visible` is the cameras actually on screen, as "thingName/cameraId" — not
+ * "the grid is open". Every published rendition is an ffmpeg process at the
+ * customer's edge and S3 requests per segment, so a site with a thousand
+ * cameras must not start a thousand streams because somebody opened a page.
+ */
 export function watch(
   sessionId: string,
-  grid: boolean,
+  visible: string[],
   main?: { thingName: string; cameraId: string },
   transcode: string[] = [],
 ): Promise<WatchResult> {
@@ -205,6 +217,11 @@ export function watch(
     // Capabilities let the agent skip encoding for viewers who do not need it;
     // `transcode` names the cameras a viewer has explicitly asked it to encode
     // anyway, so nothing is spent on inference.
-    body: JSON.stringify({ sessionId, grid, main, codecs: supportedCodecs(), transcode }),
+    body: JSON.stringify({ sessionId, visible, main, codecs: supportedCodecs(), transcode }),
   });
+}
+
+/** The key a camera is named by everywhere demand is expressed. */
+export function cameraKey(camera: { thingName: string; cameraId: string }): string {
+  return `${camera.thingName}/${camera.cameraId}`;
 }

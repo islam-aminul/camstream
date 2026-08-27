@@ -2,8 +2,9 @@ import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, QueryCommand } from '@aws-sdk/lib-dynamodb';
 import { sessionSuperseded } from '../shared/session';
 import type { APIGatewayProxyEventV2WithJWTAuthorizer, APIGatewayProxyStructuredResultV2 } from 'aws-lambda';
-import { isValidId, premisesScope, withinScope } from '../shared/tenant';
+import { isValidId, parseThingName, premisesScope, withinScope } from '../shared/tenant';
 import { fail, json } from '../shared/http';
+import { queryAllPages } from '../shared/registry';
 
 const TABLE = process.env.REGISTRY_TABLE!;
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
@@ -36,12 +37,10 @@ export async function handler(
     return fail(409, 'Session superseded by a newer sign-in');
   }
 
-  const [result, devices] = await Promise.all([
-    ddb.send(new QueryCommand({
-      TableName: TABLE,
-      KeyConditionExpression: 'pk = :pk AND begins_with(sk, :prefix)',
-      ExpressionAttributeValues: { ':pk': `TENANT#${tenantId}`, ':prefix': 'LIVECAMERA#' },
-    })),
+  const [records, devices] = await Promise.all([
+    queryAllPages<Record<string, unknown>>(
+      (input) => ddb.send(new QueryCommand(input)),
+      TABLE, `TENANT#${tenantId}`, 'LIVECAMERA#'),
     ddb.send(new QueryCommand({
       TableName: TABLE,
       KeyConditionExpression: 'pk = :pk AND begins_with(sk, :prefix)',
@@ -56,13 +55,19 @@ export async function handler(
   const connected = new Map<string, boolean>(
     (devices.Items ?? []).map((device) => [String(device.thingName ?? ''), device.connected === true]),
   );
+  const siteOf = new Map<string, string>(
+    (devices.Items ?? [])
+      .filter((device) => typeof device.siteName === 'string')
+      .map((device) => [String(device.thingName ?? ''), String(device.siteName)]),
+  );
 
-  const cameras = (result.Items ?? [])
+  const cameras = records
     // A restricted viewer must not learn which other sites exist, what their
     // agents are called, or what is watched there.
-    .filter((item) => withinScope(String((item as CameraRecord).thingName ?? ''), scope))
-    .map((item) => {
-    const record = item as CameraRecord;
+    .filter((item: Record<string, unknown>) =>
+      withinScope(String((item as unknown as CameraRecord).thingName ?? ''), scope))
+    .map((item: Record<string, unknown>) => {
+    const record = item as unknown as CameraRecord;
     return {
       thingName: record.thingName,
       cameraId: record.cameraId,
@@ -70,6 +75,10 @@ export async function handler(
       resolution: record.width && record.height ? `${record.width}x${record.height}` : undefined,
       lastSeen: record.lastSeen,
       online: connected.get(record.thingName) === true,
+      // Grouping and filtering keys. The thing name already encodes premises,
+      // but parsing it in the client would tie the UI to that format.
+      premisesId: parseThingName(String(record.thingName ?? ''))?.premisesId ?? null,
+      siteName: siteOf.get(String(record.thingName ?? '')) ?? null,
       // Every URL is returned, but a rendition only exists in S3 while some
       // viewer has asked for it via /api/watch. The player picks `source` when
       // it can decode sourceCodec and `h264` otherwise.
