@@ -129,3 +129,39 @@ export function slugFor(identity: string): string {
  * machine, so it belongs to whoever knows that machine.
  */
 export const DEFAULT_MAX_TRANSCODES = 1;
+
+/**
+ * Every item under one partition and sort-key prefix.
+ *
+ * DynamoDB caps a Query response at 1MB and hands back a cursor for the rest.
+ * A single Query therefore reads about three thousand camera records and then
+ * silently stops — the caller sees a short list, not an error, and an estate
+ * larger than that loses cameras from the console with nothing to indicate it.
+ * Following the cursor is the difference between "works in the demo" and
+ * "works at the size this is sold for".
+ */
+export async function queryAllPages<T>(
+  send: (input: {
+    TableName: string;
+    KeyConditionExpression: string;
+    ExpressionAttributeValues: Record<string, unknown>;
+    ExclusiveStartKey?: Record<string, unknown>;
+  }) => Promise<{ Items?: Record<string, unknown>[]; LastEvaluatedKey?: Record<string, unknown> }>,
+  table: string,
+  pk: string,
+  prefix: string,
+): Promise<T[]> {
+  const items: Record<string, unknown>[] = [];
+  let cursor: Record<string, unknown> | undefined;
+  do {
+    const page = await send({
+      TableName: table,
+      KeyConditionExpression: 'pk = :pk AND begins_with(sk, :prefix)',
+      ExpressionAttributeValues: { ':pk': pk, ':prefix': prefix },
+      ExclusiveStartKey: cursor,
+    });
+    items.push(...(page.Items ?? []));
+    cursor = page.LastEvaluatedKey;
+  } while (cursor);
+  return items as T[];
+}

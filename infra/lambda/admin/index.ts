@@ -21,7 +21,7 @@ class Refused extends Error {
     this.name = 'Refused';
   }
 }
-import { key, slugFor, DEFAULT_MAX_TRANSCODES, type CameraRecord, type DiscoveredRecord, type PremisesRecord } from '../shared/registry';
+import { key, slugFor, DEFAULT_MAX_TRANSCODES, queryAllPages, type CameraRecord, type DiscoveredRecord, type PremisesRecord } from '../shared/registry';
 import { buildInstaller, isPlatform, PLATFORMS } from './installer';
 
 const TABLE = process.env.REGISTRY_TABLE!;
@@ -98,13 +98,10 @@ export async function handler(
   }
 }
 
-async function queryPrefix<T>(tenantId: string, prefix: string): Promise<T[]> {
-  const result = await ddb.send(new QueryCommand({
-    TableName: TABLE,
-    KeyConditionExpression: 'pk = :pk AND begins_with(sk, :prefix)',
-    ExpressionAttributeValues: { ':pk': key.tenant(tenantId), ':prefix': prefix },
-  }));
-  return (result.Items ?? []) as T[];
+function queryPrefix<T>(tenantId: string, prefix: string): Promise<T[]> {
+  return queryAllPages<T>(
+    (input) => ddb.send(new QueryCommand(input)),
+    TABLE, key.tenant(tenantId), prefix);
 }
 
 /** Premises this caller may act on. Empty claim means all within the tenant. */

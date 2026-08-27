@@ -4,12 +4,20 @@ import { resolveDesiredState } from '../watch/index';
 const NOW = 1_000;
 const LATER = NOW + 10_000;
 
-/** A viewer that can decode ordinary H.264 and nothing else — the common case. */
-function viewer(sessionId: string, transcode: string[] = []) {
+const THING = 'demo--site--box';
+
+/**
+ * A viewer that can decode ordinary H.264 and nothing else — the common case.
+ *
+ * `visible` names the cameras actually on screen: demand follows what is being
+ * shown, not the size of the estate.
+ */
+function viewer(sessionId: string, transcode: string[] = [], visible?: string[]) {
+  const cameras = visible ?? ['one', 'two', 'three'];
   return {
     sk: `DEMAND#${sessionId}`,
     sessionId,
-    grid: true,
+    visible: cameras.map((id) => `${THING}/${id}`),
     codecs: ['h264'],
     transcode,
     scope: [],
@@ -18,7 +26,7 @@ function viewer(sessionId: string, transcode: string[] = []) {
 }
 
 const HEVC_CAMERAS = ['one', 'two', 'three'].map((id) => ({
-  thingName: 'demo--site--box',
+  thingName: THING,
   cameraId: id,
   sourceCodec: 'hevc',
   sourceCodecProfile: 'Main',
@@ -29,7 +37,7 @@ describe('holding an agent to its transcode limit', () => {
     const [state] = resolveDesiredState(
       NOW,
       [viewer('s1', ['one', 'two', 'three'])],
-      [{ thingName: 'demo--site--box' }],
+      [{ thingName: THING }],
       HEVC_CAMERAS,
     );
 
@@ -69,13 +77,13 @@ describe('holding an agent to its transcode limit', () => {
     // the cheap cameras that were working perfectly well.
     const cameras = [
       ...HEVC_CAMERAS,
-      { thingName: 'demo--site--box', cameraId: 'aaa-plain', sourceCodec: 'h264', sourceCodecProfile: 'Main' },
-      { thingName: 'demo--site--box', cameraId: 'zzz-plain', sourceCodec: 'h264', sourceCodecProfile: 'High' },
+      { thingName: THING, cameraId: 'aaa-plain', sourceCodec: 'h264', sourceCodecProfile: 'Main' },
+      { thingName: THING, cameraId: 'zzz-plain', sourceCodec: 'h264', sourceCodecProfile: 'High' },
     ];
     const [state] = resolveDesiredState(
       NOW,
-      [viewer('s1', ['one', 'two', 'three'])],
-      [{ thingName: 'demo--site--box' }],
+      [viewer('s1', ['one', 'two', 'three'], ['one', 'two', 'three', 'aaa-plain', 'zzz-plain'])],
+      [{ thingName: THING }],
       cameras,
     );
 
@@ -87,9 +95,9 @@ describe('holding an agent to its transcode limit', () => {
   it('says nothing about limits when nothing was declined', () => {
     const [state] = resolveDesiredState(
       NOW,
-      [viewer('s1')],
-      [{ thingName: 'demo--site--box' }],
-      [{ thingName: 'demo--site--box', cameraId: 'one', sourceCodec: 'h264', sourceCodecProfile: 'Main' }],
+      [viewer('s1', [], ['one'])],
+      [{ thingName: THING }],
+      [{ thingName: THING, cameraId: 'one', sourceCodec: 'h264', sourceCodecProfile: 'Main' }],
     );
 
     expect(state.declined).toBeUndefined();
@@ -100,7 +108,7 @@ describe('holding an agent to its transcode limit', () => {
     const run = () => resolveDesiredState(
       NOW,
       [viewer('s1', ['three', 'one', 'two'])],
-      [{ thingName: 'demo--site--box' }],
+      [{ thingName: THING }],
       HEVC_CAMERAS,
     )[0].renditions[0].cameraId;
 
@@ -116,7 +124,7 @@ describe('who gets the slot when more than one wants it', () => {
   ) => ({
     sk: `DEMAND#${sessionId}`,
     sessionId,
-    grid: true,
+    visible: ['aaa', 'zzz'].map((id) => `${THING}/${id}`),
     codecs: ['h264'],
     transcode,
     transcodeSince,
@@ -131,10 +139,10 @@ describe('who gets the slot when more than one wants it', () => {
     const [state] = resolveDesiredState(
       NOW,
       [withTimes('s1', ['zzz', 'aaa'], { zzz: 100, aaa: 200 })],
-      [{ thingName: 'demo--site--box' }],
+      [{ thingName: THING }],
       [
-        { thingName: 'demo--site--box', cameraId: 'aaa', sourceCodec: 'hevc' },
-        { thingName: 'demo--site--box', cameraId: 'zzz', sourceCodec: 'hevc' },
+        { thingName: THING, cameraId: 'aaa', sourceCodec: 'hevc' },
+        { thingName: THING, cameraId: 'zzz', sourceCodec: 'hevc' },
       ],
     );
 
@@ -150,10 +158,10 @@ describe('who gets the slot when more than one wants it', () => {
         withTimes('early', ['zzz'], { zzz: 100 }),
         withTimes('late', ['aaa'], { aaa: 500 }),
       ],
-      [{ thingName: 'demo--site--box' }],
+      [{ thingName: THING }],
       [
-        { thingName: 'demo--site--box', cameraId: 'aaa', sourceCodec: 'hevc' },
-        { thingName: 'demo--site--box', cameraId: 'zzz', sourceCodec: 'hevc' },
+        { thingName: THING, cameraId: 'aaa', sourceCodec: 'hevc' },
+        { thingName: THING, cameraId: 'zzz', sourceCodec: 'hevc' },
       ],
     );
 
@@ -165,10 +173,10 @@ describe('who gets the slot when more than one wants it', () => {
     const [state] = resolveDesiredState(
       NOW,
       [withTimes('s1', ['zzz', 'aaa'], { zzz: 100, aaa: 100 })],
-      [{ thingName: 'demo--site--box' }],
+      [{ thingName: THING }],
       [
-        { thingName: 'demo--site--box', cameraId: 'aaa', sourceCodec: 'hevc' },
-        { thingName: 'demo--site--box', cameraId: 'zzz', sourceCodec: 'hevc' },
+        { thingName: THING, cameraId: 'aaa', sourceCodec: 'hevc' },
+        { thingName: THING, cameraId: 'zzz', sourceCodec: 'hevc' },
       ],
     );
 

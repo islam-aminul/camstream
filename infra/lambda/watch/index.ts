@@ -6,7 +6,7 @@ import { isValidId, parseThingName, premisesScope, withinScope } from '../shared
 import { fail, json } from '../shared/http';
 import { readSession, sessionSuperseded } from '../shared/session';
 import { canDecode } from '../shared/playability';
-import { DEFAULT_MAX_TRANSCODES } from '../shared/registry';
+import { DEFAULT_MAX_TRANSCODES, queryAllPages } from '../shared/registry';
 
 const TABLE = process.env.REGISTRY_TABLE!;
 const IOT_ENDPOINT = process.env.IOT_DATA_ENDPOINT!;
@@ -20,10 +20,21 @@ const DEMAND_TTL_SECONDS = 60;
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const iot = new IoTDataPlaneClient({ endpoint: `https://${IOT_ENDPOINT}` });
 
+/** The most cameras one viewer can hold open at once. */
+export const MAX_VISIBLE = 64;
+
 interface DemandRecord {
   sk: string;
   sessionId: string;
-  grid: boolean;
+  /**
+   * The cameras this viewer is actually showing, as "thingName/cameraId".
+   *
+   * Not "the grid is open": a site with a thousand cameras cannot publish a
+   * thousand streams because somebody opened a page. Each one costs an ffmpeg
+   * process at the edge and S3 requests per segment, so demand follows what is
+   * on screen — a screenful, not an estate.
+   */
+  visible?: string[];
   mainThingName?: string;
   mainCameraId?: string;
   /** Codecs this viewer's browser can actually decode. */
@@ -109,7 +120,7 @@ export async function handler(
 
   let body: {
     sessionId?: unknown;
-    grid?: unknown;
+    visible?: unknown;
     main?: unknown;
     codecs?: unknown;
     transcode?: unknown;
@@ -131,7 +142,14 @@ export async function handler(
     return fail(409, 'Session superseded by a newer sign-in');
   }
 
-  const grid = body.grid !== false;
+  // Capped rather than rejected: a client asking for more than it can show is
+  // a client bug, and cutting it to a screenful is the safe reading.
+  const visible = Array.isArray(body.visible)
+    ? body.visible
+        .filter((v: unknown): v is string => typeof v === 'string' && v.length <= 160 && v.includes('/'))
+        .slice(0, MAX_VISIBLE)
+    : [];
+
   // Bounds which agents this viewer can cause to start publishing. Without it
   // a restricted viewer drives — and bills — cameras at sites they cannot see.
   const scope = premisesScope(claims as Record<string, unknown>);
@@ -189,7 +207,7 @@ export async function handler(
         pk: `TENANT#${tenantId}`,
         sk: `DEMAND#${body.sessionId}`,
         sessionId: body.sessionId,
-        grid,
+        visible,
         mainThingName,
         mainCameraId,
         codecs,
@@ -230,8 +248,9 @@ export async function handler(
 }
 
 /**
- * Union of what every live session wants: the grid needs every camera's sub
- * stream, and each viewer may pin one camera to its main stream.
+ * Union of what every live session wants: the sub stream of each camera a
+ * viewer currently has on screen, plus the main stream of the one they have
+ * pinned open.
  *
  * TTL deletion is best-effort and can lag by minutes, so expired demand rows
  * are filtered by timestamp rather than trusted to be gone.
@@ -291,13 +310,19 @@ export function resolveDesiredState(
         requestedAt.set(cameraId, at);
       }
     }
-    if (demand.grid) {
-      for (const camera of cameras) {
-        if (!withinScope(camera.thingName, demand.scope ?? [])) {
-          continue;
-        }
-        want(camera.thingName, camera.cameraId, 'sub', viewerCodecs, transcodeRequested);
+    for (const entry of demand.visible ?? []) {
+      const slash = entry.indexOf('/');
+      const thingName = entry.slice(0, slash);
+      const cameraId = entry.slice(slash + 1);
+      if (!withinScope(thingName, demand.scope ?? [])) {
+        continue;
       }
+      // Checked against the registry: a viewer must not be able to name a
+      // camera into existence, only ask for one that is already assigned.
+      if (!cameras.some((c) => c.thingName === thingName && c.cameraId === cameraId)) {
+        continue;
+      }
+      want(thingName, cameraId, 'sub', viewerCodecs, transcodeRequested);
     }
     if (demand.mainThingName && demand.mainCameraId) {
       // The pinned camera gets both rungs: the sub it already had, plus main.
@@ -372,13 +397,8 @@ function applyTranscodeCap(
     : { thingName, renditions: kept };
 }
 
-async function queryPrefix<T>(tenantId: string, prefix: string): Promise<T[]> {
-  const result = await ddb.send(
-    new QueryCommand({
-      TableName: TABLE,
-      KeyConditionExpression: 'pk = :pk AND begins_with(sk, :prefix)',
-      ExpressionAttributeValues: { ':pk': `TENANT#${tenantId}`, ':prefix': prefix },
-    }),
-  );
-  return (result.Items ?? []) as T[];
+function queryPrefix<T>(tenantId: string, prefix: string): Promise<T[]> {
+  return queryAllPages<T>(
+    (input) => ddb.send(new QueryCommand(input)),
+    TABLE, `TENANT#${tenantId}`, prefix);
 }
