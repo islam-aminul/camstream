@@ -92,6 +92,13 @@ public final class MasterPlaylist {
      * estimates derived from resolution, which at least order correctly.
      */
     static List<Rung> discriminate(List<Rung> rungs) {
+        // Rungs differing by codec are alternatives for different clients, not
+        // a bitrate ladder — a player picks by what it can decode. Only rungs
+        // sharing a codec need to be told apart by bandwidth.
+        long distinctCodecs = rungs.stream().map(Rung::codec).distinct().count();
+        if (distinctCodecs > 1) {
+            return rungs;
+        }
         long distinct = rungs.stream().map(Rung::bandwidthBps).distinct().count();
         if (distinct == rungs.size()) {
             return rungs;

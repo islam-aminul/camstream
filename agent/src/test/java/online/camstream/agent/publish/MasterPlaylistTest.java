@@ -54,6 +54,17 @@ class MasterPlaylistTest {
     }
 
     @Test
+    void leavesCodecAlternativesAlone() {
+        // The same camera published as HEVC and as transcoded H.264 is two
+        // options for different browsers, not two steps of a ladder — and
+        // re-estimating from resolution would make them identical anyway.
+        List<MasterPlaylist.Rung> alternatives = List.of(
+                new MasterPlaylist.Rung(StreamProfile.SUB, "sub/index.m3u8", 640, 360, 691200, "hevc"),
+                new MasterPlaylist.Rung(StreamProfile.SUB, "sub-h264/index.m3u8", 640, 360, 691200, "h264"));
+        assertEquals(alternatives, MasterPlaylist.discriminate(alternatives));
+    }
+
+    @Test
     void keepsDeclaredBitratesWhenTheyAlreadyDiffer() {
         List<MasterPlaylist.Rung> reported = List.of(
                 new MasterPlaylist.Rung(StreamProfile.MAIN, "main/index.m3u8", 1920, 1080, 4000000, "h264"),

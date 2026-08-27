@@ -160,13 +160,18 @@ public final class StreamManager implements AutoCloseable {
                 if (width == null || height == null) {
                     continue;
                 }
+                // Each rung must declare what it actually carries. A
+                // transcoded rendition is H.264 whatever the camera emits, and
+                // labelling it with the source codec makes a player that cannot
+                // decode that codec reject the very rung produced for it.
+                String rungCodec = rendition.variant() == Variant.H264 ? "h264" : camera.sourceCodec;
                 rungs.add(new MasterPlaylist.Rung(
                         rendition.profile(),
                         // Relative to the camera prefix, where master.m3u8 sits.
                         rendition.keySuffix().substring(cameraId.length() + 1) + "index.m3u8",
                         width, height,
                         MasterPlaylist.estimateBandwidth(width, height, camera.bitrateFor(rendition.profile())),
-                        camera.sourceCodec));
+                        rungCodec));
             }
 
             if (MasterPlaylist.publish(s3, config.bucket, config.keyPrefix() + cameraId + "/", rungs)) {
