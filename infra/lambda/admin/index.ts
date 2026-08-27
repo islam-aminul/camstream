@@ -34,6 +34,9 @@ const LIVE_BUCKET = process.env.LIVE_BUCKET!;
 const API_INVOKE_URL = process.env.API_INVOKE_URL!;
 const AGENT_VERSION = process.env.AGENT_VERSION ?? '0.1.0';
 
+/** The shape of a discovered camera's identity, as the agent reports it. */
+const CAMERA_IDENTITY = /^[A-Za-z0-9._-]{3,64}$/;
+
 /** An installer is useless without a token, so the token is short-lived. */
 const ENROLLMENT_TTL_SECONDS = 14 * 24 * 60 * 60;
 
@@ -102,6 +105,24 @@ function queryPrefix<T>(tenantId: string, prefix: string): Promise<T[]> {
   return queryAllPages<T>(
     (input) => ddb.send(new QueryCommand(input)),
     TABLE, key.tenant(tenantId), prefix);
+}
+
+/**
+ * One record by its exact sort key.
+ *
+ * Several lookups used to pass a complete identifier to `queryPrefix` and take
+ * the first row, which is a `begins_with` scan wearing a point lookup's
+ * clothing: `PREMISES#hq` matches `PREMISES#hq-2`, so an agent could be
+ * enrolled against a premises that does not exist, and `DISCOVERED#sn-ABC`
+ * matches `DISCOVERED#sn-ABCD`, so a camera could be approved from a
+ * different camera's record.
+ */
+async function getRecord<T>(tenantId: string, sk: string): Promise<T | undefined> {
+  const result = await ddb.send(new GetCommand({
+    TableName: TABLE,
+    Key: { pk: key.tenant(tenantId), sk },
+  }));
+  return result.Item as T | undefined;
 }
 
 /** Premises this caller may act on. Empty claim means all within the tenant. */
@@ -321,8 +342,8 @@ async function createAgent(caller: Caller, rawBody: string | undefined) {
   }
   if (!visible(caller, premisesId)) return fail(403, 'Not permitted for that premises');
 
-  const premises = await queryPrefix<PremisesRecord>(tenantId, key.premises(premisesId));
-  if (premises.length === 0) return fail(404, 'No such premises');
+  const premises = await getRecord<PremisesRecord>(tenantId, key.premises(premisesId));
+  if (!premises) return fail(404, 'No such premises');
 
   const thingName = buildThingName({ tenantId, premisesId, deviceId });
   const token = randomBytes(32).toString('base64url');
@@ -485,12 +506,11 @@ async function approveCamera(caller: Caller, rawBody: string | undefined) {
   const identity = String(body.identity ?? '');
   const assignedTo = String(body.assignedTo ?? '');
 
-  if (!/^[A-Za-z0-9._-]{3,64}$/.test(identity)) return fail(400, 'Invalid camera identity');
+  if (!CAMERA_IDENTITY.test(identity)) return fail(400, 'Invalid camera identity');
   const outOfScope = refuseOutOfScope(caller, assignedTo);
   if (outOfScope) return outOfScope;
 
-  const discovered = await queryPrefix<DiscoveredRecord>(caller.tenantId, key.discovered(identity));
-  const record = discovered[0];
+  const record = await getRecord<DiscoveredRecord>(caller.tenantId, key.discovered(identity));
   if (!record) return fail(404, 'No such discovered camera');
   // Assigning to an agent that cannot see it yields a stream that never starts.
   if (!Object.keys(record.reachableBy ?? {}).includes(assignedTo)) {
@@ -507,24 +527,39 @@ async function approveCamera(caller: Caller, rawBody: string | undefined) {
     sourceCodec: body.sourceCodec ? String(body.sourceCodec) : undefined,
     approvedAt: Math.floor(Date.now() / 1000), approvedBy: caller.email,
   };
+  const previousOwner = (await getRecord<CameraRecord>(caller.tenantId, key.camera(identity)))?.assignedTo;
+
   await ddb.send(new PutCommand({ TableName: TABLE, Item: camera }));
   await pushConfig(caller.tenantId, assignedTo);
-  return json(200, { approved: camera.cameraId, assignedTo });
+  // Reassignment used to tell the new owner and nobody else. The old agent's
+  // configVersion never moved, so it never refetched, never learned the camera
+  // had been taken away, and went on publishing into the same S3 prefix the
+  // new one now writes — two agents interleaving segments under one key, which
+  // is the exact outcome single ownership exists to prevent.
+  if (previousOwner && previousOwner !== assignedTo) {
+    await pushConfig(caller.tenantId, previousOwner);
+  }
+  return json(200, { approved: camera.cameraId, assignedTo, reassignedFrom: previousOwner ?? null });
 }
 
 async function removeCamera(caller: Caller, identity: string | undefined) {
   if (!can(caller, 'manageEstate')) return fail(403, 'Not permitted');
-  if (!identity) return fail(400, 'Camera identity is required');
+  // Shaped like the identity approveCamera accepts. Without this an unbounded
+  // path parameter reached a key expression unchecked.
+  if (!identity || !CAMERA_IDENTITY.test(identity)) return fail(400, 'Invalid camera identity');
 
-  const existing = await queryPrefix<CameraRecord>(caller.tenantId, key.camera(identity));
-  if (existing[0]?.assignedTo) {
-    const outOfScope = refuseOutOfScope(caller, existing[0].assignedTo);
-    if (outOfScope) return outOfScope;
-  }
+  const existing = await getRecord<CameraRecord>(caller.tenantId, key.camera(identity));
+  if (!existing) return fail(404, 'No such camera');
+  // The scope check used to sit inside `if (assignedTo)`, so a record without
+  // an owner was deleted by anyone in the tenant, and a 200 came back either
+  // way whether or not anything had been there.
+  const outOfScope = existing.assignedTo ? refuseOutOfScope(caller, existing.assignedTo) : null;
+  if (outOfScope) return outOfScope;
+
   await ddb.send(new DeleteCommand({
     TableName: TABLE, Key: { pk: key.tenant(caller.tenantId), sk: key.camera(identity) },
   }));
-  if (existing[0]?.assignedTo) await pushConfig(caller.tenantId, existing[0].assignedTo);
+  if (existing.assignedTo) await pushConfig(caller.tenantId, existing.assignedTo);
   return json(200, { removed: identity });
 }
 
