@@ -14,6 +14,15 @@ interface PlayerProps {
   onUndecodable?: () => void;
   /** The stream is not being published — distinct from being unplayable. */
   onUnavailable?: () => void;
+  /**
+   * Start on the highest rendition rather than climbing to it.
+   *
+   * Adaptive bitrate begins low by default, which is right for a grid of
+   * thumbnails but wrong for a camera someone has deliberately opened: they
+   * asked for the detail view, so they should get the detail. ABR can still
+   * drop if the connection cannot sustain it.
+   */
+  preferHighest?: boolean;
 }
 
 /** Codec failures are worth reacting to; a missing segment is not. */
@@ -35,14 +44,18 @@ function isCodecFailure(details: string): boolean {
  * not publishing, which is a different problem from one that is slow to start,
  * and saying "starting" indefinitely hides it.
  */
-export function Player({ src, muted = true, onUndecodable, onUnavailable }: PlayerProps) {
+export function Player({ src, muted = true, onUndecodable, onUnavailable, preferHighest }: PlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [status, setStatus] = useState<'starting' | 'playing' | 'failed'>('starting');
+  // Distinguishing "waiting for the agent" from "have data, decoding" tells a
+  // viewer which of the two slow things is happening.
+  const [buffering, setBuffering] = useState(false);
 
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
     setStatus('starting');
+    setBuffering(false);
 
     // Safari plays HLS natively and does it with lower overhead than MSE.
     if (!Hls.isSupported()) {
@@ -85,16 +98,26 @@ export function Player({ src, muted = true, onUndecodable, onUnavailable }: Play
     let settled = false;
 
     /**
-     * Some browsers accept a codec, load the metadata and then simply never
-     * decode a frame — Firefox does exactly that with HEVC, reporting no error
-     * at all. Without a watchdog that is indistinguishable from a slow start,
-     * and the viewer waits forever on a stream that will never appear.
+     * Some browsers accept a codec, load the metadata and then never decode a
+     * frame, reporting no error at all. Catching that needs care, because two
+     * innocent situations look identical from the outside: segments that have
+     * not arrived yet, and autoplay the browser declined to start.
+     *
+     * So this only fires once data has actually been buffered and the element
+     * is genuinely trying to play. Buffered media that a playing element
+     * refuses to advance through is a decoder problem; anything else is not.
      */
     let stallTimer: ReturnType<typeof setTimeout> | undefined;
+    let buffered = false;
     const armStallWatchdog = () => {
       clearTimeout(stallTimer);
       stallTimer = setTimeout(() => {
         if (settled || video.currentTime > 0) {
+          return;
+        }
+        if (!buffered || video.paused || video.readyState < 2) {
+          // Nothing to decode yet, or nobody asked it to — keep waiting.
+          armStallWatchdog();
           return;
         }
         settled = true;
@@ -107,11 +130,17 @@ export function Player({ src, muted = true, onUndecodable, onUnavailable }: Play
     hls.on(Hls.Events.MANIFEST_PARSED, () => {
       // Segments exist from here on, so anything after this is decoding.
       armStallWatchdog();
+      if (preferHighest && hls.levels.length > 1) {
+        hls.startLevel = hls.levels.length - 1;
+        hls.nextLevel = hls.levels.length - 1;
+      }
       video.play().catch(() => {
         /* autoplay refusal is not fatal; the poster stays until the user clicks */
       });
     });
     hls.on(Hls.Events.FRAG_BUFFERED, () => {
+      buffered = true;
+      setBuffering(true);
       if (video.currentTime > 0) {
         clearTimeout(stallTimer);
         setStatus('playing');
@@ -174,14 +203,18 @@ export function Player({ src, muted = true, onUndecodable, onUnavailable }: Play
       clearTimeout(stallTimer);
       hls.destroy();
     };
-  }, [src, onUndecodable, onUnavailable]);
+  }, [src, onUndecodable, onUnavailable, preferHighest]);
 
   return (
     <div className="player">
       <video ref={videoRef} muted={muted} playsInline controls={false} />
       {status !== 'playing' && (
         <div className="player-overlay">
-          {status === 'starting' ? 'Starting stream…' : 'Unavailable'}
+          {status === 'failed'
+            ? 'Unavailable'
+            : buffering
+              ? 'Buffering…'
+              : 'Starting stream…'}
         </div>
       )}
     </div>
