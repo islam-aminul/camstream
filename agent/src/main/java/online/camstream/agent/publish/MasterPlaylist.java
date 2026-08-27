@@ -6,6 +6,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.services.s3.model.DeleteObjectRequest;
 import software.amazon.awssdk.services.s3.model.PutObjectRequest;
 
 import java.nio.charset.StandardCharsets;
@@ -35,8 +36,17 @@ public final class MasterPlaylist {
     }
 
     /**
-     * Writes {@code master.m3u8} beside the rendition directories, or removes
-     * the need for one by returning false when fewer than two rungs exist.
+     * Writes {@code master.m3u8} beside the rendition directories, or deletes
+     * it and returns false when fewer than two rungs exist.
+     *
+     * Deleting is the part that matters. Returning false used to mean only
+     * "no ladder", which left the previous run's master in the bucket naming
+     * rungs that {@code StreamManager.retirePlaylist} had already deleted — so
+     * the detail view, which loads {@code master.m3u8} first, was handed a
+     * playlist whose every entry 404s. Worse when the surviving master was
+     * written for the source codec and the rungs now running are the
+     * transcodes: a viewer who asked for H.264 precisely because they cannot
+     * decode HEVC was offered two HEVC rungs, both missing.
      */
     public static boolean publish(S3Client s3, String bucket, String cameraPrefix, List<Rung> rungs) {
         List<Rung> usable = rungs.stream()
@@ -44,6 +54,7 @@ public final class MasterPlaylist {
                 .filter(rung -> rung.width() > 0 && rung.height() > 0)
                 .toList();
         if (usable.size() < 2) {
+            remove(s3, bucket, cameraPrefix);
             return false;
         }
 
@@ -79,6 +90,22 @@ public final class MasterPlaylist {
         } catch (RuntimeException e) {
             log.warn("could not publish master playlist for {}: {}", cameraPrefix, e.toString());
             return false;
+        }
+    }
+
+    /**
+     * Deletes a camera's master playlist.
+     *
+     * Never throws: a master left behind is untidy and self-corrects the next
+     * time the camera is watched, but failing here would take down the tick
+     * that publishes segments for every other camera on the agent.
+     */
+    public static void remove(S3Client s3, String bucket, String cameraPrefix) {
+        String key = cameraPrefix + "master.m3u8";
+        try {
+            s3.deleteObject(DeleteObjectRequest.builder().bucket(bucket).key(key).build());
+        } catch (RuntimeException e) {
+            log.debug("could not remove {}: {}", key, e.toString());
         }
     }
 
