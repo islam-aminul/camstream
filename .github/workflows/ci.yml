@@ -173,7 +173,10 @@ jobs:
         working-directory: infra
         run: |
           npm ci --no-fund --no-audit
-          npx tsc --noEmit
+          # Both projects: the root tsconfig excludes lambda/, so this alone
+          # checked the CDK app and nothing that actually runs in production.
+          # An undefined identifier reached a deploy that way.
+          npm run typecheck
           npm test --if-present
           # Synth needs an account; the value is irrelevant when not deploying.
           CDK_DEFAULT_ACCOUNT=000000000000 npx cdk synth --quiet

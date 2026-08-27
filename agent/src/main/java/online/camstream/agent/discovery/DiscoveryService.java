@@ -54,6 +54,17 @@ public final class DiscoveryService implements CameraSource {
         return lastScan.values().stream().map(DiscoveredCamera::redacted).toList();
     }
 
+    @Override
+    public StreamFacts probeStream(String rtspUrl, String transport) {
+        RtspProbe.Result result = rtspProbe.probe(
+                rtspUrl, transport == null || transport.isBlank() ? rtspTransport : transport);
+        if (result == null) {
+            return null;
+        }
+        return new StreamFacts(
+                result.codec(), result.profile(), result.level(), result.width(), result.height());
+    }
+
     /** The usable RTSP URL for a camera profile, or null. Agent-internal. */
     @Override
     public String streamUrl(String cameraId, String profileToken) {

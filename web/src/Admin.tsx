@@ -4,8 +4,7 @@ import {
   downloadInstaller, listAgents, listDiscovered, listPremises, listUsers,
   removeCamera, requestScan, storeCredential, whoAmI,
   type Agent, type AdminUser, type DiscoveredCamera, type Me, type Platform,
-  type Premises, type Role, type Sighting,
-} from './admin';
+  type Premises, type Role, type Sighting, setTranscodeLimit } from './admin';
 import { cryptoAvailable, sealCredential } from './crypto';
 
 type Tab = 'cameras' | 'agents' | 'premises' | 'users';
@@ -339,7 +338,7 @@ function Agents({ agents, premises, act }: {
           <thead>
             <tr>
               <th>Agent</th><th>Premises</th><th>Version</th><th>Cameras</th>
-              <th>Status</th><th>Installer</th>
+              <th>Status</th><th>Transcodes</th><th>Installer</th>
             </tr>
           </thead>
           <tbody>
@@ -359,6 +358,17 @@ function Agents({ agents, premises, act }: {
                   {!agent.online && agent.disconnectReason && (
                     <div className="muted small">{agent.disconnectReason.toLowerCase().replace(/_/g, ' ')}</div>
                   )}
+                  {agent.online && agent.health && !agent.health.healthy && (
+                    // Connected but not working — the case presence events
+                    // cannot see, and the reason the heartbeat exists.
+                    <div className="muted small">failing: {agent.health.failingTasks.join(', ')}</div>
+                  )}
+                  {agent.online && agent.health && agent.health.publishing > 0 && (
+                    <div className="muted small">{agent.health.publishing} streaming</div>
+                  )}
+                </td>
+                <td>
+                  <TranscodeLimit agent={agent} act={act} />
                 </td>
                 <td>
                   <div className="row tight">
@@ -379,6 +389,44 @@ function Agents({ agents, premises, act }: {
             ))}
           </tbody>
         </table>
+      )}
+    </div>
+  );
+}
+
+/**
+ * How many renditions this agent will encode at once.
+ *
+ * Only the operator knows what the box can take, so the default is the
+ * cautious one — an encode costs roughly a core per 1080p stream, and the
+ * agent usually shares a small machine with whatever else it was bought for.
+ * Zero is a legitimate setting: it means this site serves camera bytes only,
+ * and viewers who need a transcode are told so rather than left waiting.
+ */
+function TranscodeLimit({ agent, act }: {
+  agent: Agent;
+  act: (work: () => Promise<unknown>) => Promise<void>;
+}) {
+  const [value, setValue] = useState(String(agent.maxConcurrentTranscodes ?? 1));
+  const changed = value !== String(agent.maxConcurrentTranscodes ?? 1);
+
+  return (
+    <div className="row tight">
+      <input
+        type="number"
+        min={0}
+        max={64}
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+        style={{ width: '4.5rem' }}
+        aria-label={`Concurrent transcodes for ${agent.thingName}`}
+      />
+      {changed && (
+        <button onClick={() => void act(async () => {
+          await setTranscodeLimit(agent.thingName, Number(value));
+        })}>
+          Save
+        </button>
       )}
     </div>
   );

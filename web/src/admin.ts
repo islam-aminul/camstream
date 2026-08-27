@@ -33,6 +33,16 @@ export interface Agent {
   /** Null until the agent has enrolled; credentials cannot be sent before then. */
   credentialPublicKey: string | null;
   enrolled: boolean;
+  /** Health from the agent's own heartbeat, or null if none has arrived. */
+  health?: {
+    at: number | null;
+    healthy: boolean;
+    failingTasks: string[];
+    publishing: number;
+    uptimeSeconds: number | null;
+  } | null;
+  /** Renditions this box will encode at once. Set here, enforced both ends. */
+  maxConcurrentTranscodes: number;
 }
 
 export interface Sighting {
@@ -171,4 +181,17 @@ export async function canAdminister(): Promise<boolean> {
   if (!session) return false;
   const groups = session.getIdToken().payload['cognito:groups'];
   return Array.isArray(groups) && groups.some((g) => MANAGE_ROLES.includes(g as Role));
+}
+
+/**
+ * Sets how many renditions an agent will transcode at once.
+ *
+ * A property of the hardware, so it is per-agent rather than per-tenant: the
+ * same software runs on a rack server and a Raspberry Pi.
+ */
+export function setTranscodeLimit(thingName: string, limit: number) {
+  return call(`/api/admin/agents/${encodeURIComponent(thingName)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ maxConcurrentTranscodes: limit }),
+  });
 }

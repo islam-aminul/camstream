@@ -133,6 +133,22 @@ public final class AgentConfig {
     public int heartbeatIdleMinutes = 15;
 
     /**
+     * How many renditions this agent will transcode at once.
+     *
+     * A stream copy costs almost nothing; an encode costs roughly a core per
+     * 1080p stream, and an edge box is usually a small one doing this
+     * alongside whatever else it was bought for. Without a cap, a handful of
+     * viewers opening HEVC cameras can take the machine down and stop the
+     * copies too — so the failure lands on cameras that were working.
+     *
+     * One by default, because that is the safe assumption for hardware nobody
+     * has measured. An administrator who knows the box raises it from the
+     * console; the control plane enforces the same number, so a viewer is told
+     * their transcode is queued rather than watching it never start.
+     */
+    public int maxConcurrentTranscodes = 1;
+
+    /**
      * Ceiling on addresses scanned per sweep. 0 means scan whatever the
      * interface netmask covers, which is the right answer on a normal site
      * network and the default.
@@ -256,6 +272,9 @@ public final class AgentConfig {
         }
         if (defaultRtspTransport == null || !defaultRtspTransport.matches("tcp|udp")) {
             throw new IllegalArgumentException("defaultRtspTransport must be \"tcp\" or \"udp\"");
+        }
+        if (maxConcurrentTranscodes < 0 || maxConcurrentTranscodes > 64) {
+            throw new IllegalArgumentException("maxConcurrentTranscodes must be between 0 and 64");
         }
         if (heartbeatActiveMinutes < 1 || heartbeatActiveMinutes > 1440) {
             throw new IllegalArgumentException("heartbeatActiveMinutes must be between 1 and 1440");

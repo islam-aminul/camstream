@@ -3,6 +3,7 @@ package online.camstream.agent;
 import online.camstream.agent.config.AgentConfig;
 import online.camstream.agent.control.CameraRegistry;
 import online.camstream.agent.control.Rendition;
+import online.camstream.agent.control.SourceVerifier;
 import online.camstream.agent.control.StreamManager;
 import online.camstream.agent.control.WatchListener;
 import online.camstream.agent.credentials.CredentialEnvelope;
@@ -54,6 +55,15 @@ public final class Main {
      * to blunt it. It costs a wakeup and nothing else.
      */
     private static final Duration HEARTBEAT_TICK = Duration.ofSeconds(20);
+
+    /**
+     * How often configured cameras are re-checked against what they stream.
+     *
+     * Slow on purpose: a camera's encoder settings change when somebody
+     * changes them, and each check costs an ffprobe against the camera. The
+     * result is cached per URL, so a settled site does no work at all here.
+     */
+    private static final Duration VERIFY_INTERVAL = Duration.ofMinutes(30);
 
     public static void main(String[] args) throws Exception {
         if (args.length != 1) {
@@ -188,6 +198,20 @@ public final class Main {
                 watch.set(listener);
                 supervisor.supervise(new Supervisor.Task("publish", SYNC_INTERVAL, manager::tick));
                 supervisor.supervise(new Supervisor.Task("heartbeat", HEARTBEAT_TICK, heartbeat::tick));
+
+                // Runs immediately as well as on the interval: a camera
+                // mis-declared in agent.yaml should be corrected before the
+                // first viewer meets it, not half an hour later.
+                SourceVerifier verifier = new SourceVerifier(discovery, registry);
+                supervisor.supervise(new Supervisor.Task(
+                        "verify-sources", VERIFY_INTERVAL, true,
+                        () -> {
+                            if (verifier.verify()) {
+                                // What the control plane believed about these
+                                // cameras was wrong, so it needs telling.
+                                device.report(true);
+                            }
+                        }));
 
                 if (config.discoveryEnabled) {
                     supervisor.supervise(new Supervisor.Task(

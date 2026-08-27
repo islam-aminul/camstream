@@ -16,6 +16,12 @@ class CameraRegistryTest {
     /** Stands in for a real scan; returns whatever the test planted. */
     private record StubDiscovery(List<DiscoveredCamera> results, Map<String, String> urls) implements CameraSource {
 
+        /** These tests are about resolution, not about what a stream carries. */
+        @Override
+        public StreamFacts probeStream(String rtspUrl, String transport) {
+            return null;
+        }
+
         @Override
         public List<DiscoveredCamera> redactedResults() {
             return results;

@@ -82,6 +82,10 @@ public final class CameraRegistry {
         // made a deliberate choice that a remote assignment should not silently
         // override.
         for (CameraConfig camera : config.cameras) {
+            // Marked so the verifier knows to ask the stream what it carries;
+            // the operator wrote down what the camera's own UI told them, and
+            // that UI calls High 10 "H.264" like everything else.
+            camera.locallyConfigured = true;
             resolved.put(camera.id, camera);
         }
 

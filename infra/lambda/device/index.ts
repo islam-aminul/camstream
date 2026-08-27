@@ -3,7 +3,7 @@ import { DynamoDBDocumentClient, QueryCommand, UpdateCommand, BatchWriteCommand 
 import { IoTClient, ListPrincipalThingsCommand } from '@aws-sdk/client-iot';
 import type { APIGatewayProxyEventV2WithIAMAuthorizer, APIGatewayProxyStructuredResultV2 } from 'aws-lambda';
 import { parseThingName, isValidId } from '../shared/tenant';
-import { key, type CameraRecord } from '../shared/registry';
+import { key, type CameraRecord, DEFAULT_MAX_TRANSCODES } from '../shared/registry';
 import { base64Key, bounded, ipAddress, label, macAddress, oneOf } from '../shared/sanitise';
 import { fail, json } from '../shared/http';
 
@@ -109,8 +109,12 @@ async function sendConfig(pk: string, thingName: string): Promise<APIGatewayProx
     })),
   ]);
 
+  const record = device.Items?.[0] ?? {};
   return json(200, {
-    configVersion: Number(device.Items?.[0]?.configVersion ?? 0),
+    configVersion: Number(record.configVersion ?? 0),
+    // How much CPU this box can spare is the operator's knowledge, not
+    // something the agent can measure, so it is set from the console.
+    maxConcurrentTranscodes: Number(record.maxConcurrentTranscodes ?? DEFAULT_MAX_TRANSCODES),
     // Ciphertext the control plane relayed but cannot open.
     credentials: credentials
       .map((item) => ({ scope: String(item.scope ?? '*'), ciphertext: String(item.ciphertext ?? '') }))

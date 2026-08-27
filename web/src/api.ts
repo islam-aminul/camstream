@@ -107,6 +107,38 @@ export interface SessionInfo {
 
 export interface WatchResult {
   keepaliveInSeconds: number;
+  desired?: {
+    thingName: string;
+    declined?: { cameraId: string; profile: 'sub' | 'main' }[];
+    maxConcurrentTranscodes?: number;
+  }[];
+}
+
+/** A transcode the site has no free slot to run. */
+export interface DeclinedTranscode {
+  cameraId: string;
+  limit: number;
+}
+
+/**
+ * Transcodes the control plane turned away, flattened for the client.
+ *
+ * Without this a capped transcode looks exactly like a broken one: the
+ * rendition never appears, the player waits out its retries, and the camera is
+ * reported as not being published — which sends the viewer looking for a fault
+ * that does not exist.
+ */
+export function declinedTranscodes(result: WatchResult): DeclinedTranscode[] {
+  const out = new Map<string, DeclinedTranscode>();
+  for (const state of result.desired ?? []) {
+    for (const entry of state.declined ?? []) {
+      out.set(entry.cameraId, {
+        cameraId: entry.cameraId,
+        limit: state.maxConcurrentTranscodes ?? 1,
+      });
+    }
+  }
+  return [...out.values()];
 }
 
 /** Thrown when this browser's session has been displaced by a newer sign-in. */
