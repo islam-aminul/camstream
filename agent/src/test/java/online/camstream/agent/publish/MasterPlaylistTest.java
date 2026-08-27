@@ -101,4 +101,109 @@ class MasterPlaylistTest {
     void ignoresADeclaredBitrateOfZero() {
         assertTrue(MasterPlaylist.estimateBandwidth(640, 360, 0) >= 200_000);
     }
+
+    // ------------------------------------------------------- retirement
+
+    private static final String PREFIX = "live/demo--acme-hq--gate-02/reception/";
+    private static final String MASTER = PREFIX + "master.m3u8";
+
+    private static MasterPlaylist.Rung rung(StreamProfile profile, String path, int w, int h) {
+        return new MasterPlaylist.Rung(profile, path, w, h, w * h * 3, "h264", "Main", 30);
+    }
+
+    @Test
+    void deletesTheMasterWhenTheLadderFallsBelowTwoRungs() {
+        // The bug this guards was live in production: returning false left the
+        // previous run's master in the bucket, naming rungs whose index.m3u8
+        // retirePlaylist had already deleted. The detail view loads the master
+        // first, so a returning viewer got a playlist where every entry 404s.
+        RecordingS3 s3 = new RecordingS3();
+
+        boolean published = MasterPlaylist.publish(s3, "bucket", PREFIX,
+                List.of(rung(StreamProfile.SUB, "sub/index.m3u8", 640, 360)));
+
+        assertFalse(published);
+        assertEquals(List.of(MASTER), s3.deleted);
+        assertTrue(s3.put.isEmpty(), "nothing should be written for a single rung");
+    }
+
+    @Test
+    void deletesTheMasterWhenNoRungsRemainAtAll() {
+        RecordingS3 s3 = new RecordingS3();
+        assertFalse(MasterPlaylist.publish(s3, "bucket", PREFIX, List.of()));
+        assertEquals(List.of(MASTER), s3.deleted);
+    }
+
+    @Test
+    void deletesTheMasterWhenTheSurvivingRungsHaveNoDimensions() {
+        // Rungs without width or height are filtered before the count, so this
+        // reaches the same path — and an unusable ladder must not be left
+        // advertising itself either.
+        RecordingS3 s3 = new RecordingS3();
+
+        assertFalse(MasterPlaylist.publish(s3, "bucket", PREFIX, List.of(
+                rung(StreamProfile.SUB, "sub/index.m3u8", 0, 0),
+                rung(StreamProfile.MAIN, "main/index.m3u8", 0, 0))));
+
+        assertEquals(List.of(MASTER), s3.deleted);
+    }
+
+    @Test
+    void writesTheMasterAndDeletesNothingWhenALadderExists() {
+        RecordingS3 s3 = new RecordingS3();
+
+        boolean published = MasterPlaylist.publish(s3, "bucket", PREFIX, List.of(
+                rung(StreamProfile.SUB, "sub/index.m3u8", 640, 360),
+                rung(StreamProfile.MAIN, "main/index.m3u8", 1920, 1080)));
+
+        assertTrue(published);
+        assertEquals(List.of(MASTER), s3.put);
+        assertTrue(s3.deleted.isEmpty(), "a live ladder must never be deleted");
+    }
+
+    @Test
+    void aFailedDeleteIsNotFatal() {
+        // This runs on the same tick that publishes segments for every other
+        // camera on the agent; a transient S3 error must not take that down.
+        RecordingS3 s3 = new RecordingS3();
+        s3.failDeletes = true;
+
+        assertFalse(MasterPlaylist.publish(s3, "bucket", PREFIX,
+                List.of(rung(StreamProfile.SUB, "sub/index.m3u8", 640, 360))));
+    }
+
+    /** Minimal S3Client recording the keys it was asked to write and remove. */
+    private static final class RecordingS3 implements software.amazon.awssdk.services.s3.S3Client {
+        final List<String> put = new java.util.ArrayList<>();
+        final List<String> deleted = new java.util.ArrayList<>();
+        boolean failDeletes;
+
+        @Override
+        public String serviceName() {
+            return "s3";
+        }
+
+        @Override
+        public void close() {
+        }
+
+        @Override
+        public software.amazon.awssdk.services.s3.model.PutObjectResponse putObject(
+                software.amazon.awssdk.services.s3.model.PutObjectRequest request,
+                software.amazon.awssdk.core.sync.RequestBody body) {
+            put.add(request.key());
+            return software.amazon.awssdk.services.s3.model.PutObjectResponse.builder().build();
+        }
+
+        @Override
+        public software.amazon.awssdk.services.s3.model.DeleteObjectResponse deleteObject(
+                software.amazon.awssdk.services.s3.model.DeleteObjectRequest request) {
+            if (failDeletes) {
+                throw software.amazon.awssdk.services.s3.model.S3Exception.builder()
+                        .message("simulated failure").build();
+            }
+            deleted.add(request.key());
+            return software.amazon.awssdk.services.s3.model.DeleteObjectResponse.builder().build();
+        }
+    }
 }

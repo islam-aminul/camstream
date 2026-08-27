@@ -283,7 +283,16 @@ public final class StreamManager implements AutoCloseable {
                 publishedLadders.remove(cameraId);
             }
         }
-        publishedLadders.keySet().removeIf(cameraId -> !byCamera.containsKey(cameraId));
+        // A camera whose last rendition stopped never entered the loop above,
+        // so its master would otherwise survive every manifest it names —
+        // which is the state a returning viewer loads first.
+        for (String cameraId : Set.copyOf(publishedLadders.keySet())) {
+            if (!byCamera.containsKey(cameraId)) {
+                MasterPlaylist.remove(s3, config.bucket, config.keyPrefix() + cameraId + "/");
+                publishedLadders.remove(cameraId);
+                log.info("[{}] retired the ABR ladder", cameraId);
+            }
+        }
     }
 
     private void start(Rendition rendition) {
@@ -300,6 +309,17 @@ public final class StreamManager implements AutoCloseable {
             Path directory = Files.createDirectories(
                     workRoot.resolve(rendition.keySuffix().replace('/', java.io.File.separatorChar)));
             clean(directory);
+            // Clear the published manifest too, not just the local files.
+            // stop() retires a playlist on the way down, but an agent that was
+            // killed, crashed or lost power never runs it — and the playlist it
+            // leaves behind still resolves, because the segments it names live
+            // until the bucket's lifecycle rule expires them a day later. A
+            // viewer opening this camera then watches yesterday's footage
+            // believing it is live, which is the one failure worse than the
+            // stream not starting at all. The new pipeline republishes within a
+            // segment; until it does, a 404 is what the player already reads as
+            // "starting".
+            retirePlaylist(rendition);
 
             FfmpegHls ffmpeg = new FfmpegHls(config, camera, rendition, directory);
             HlsPublisher publisher = new HlsPublisher(
@@ -330,7 +350,7 @@ public final class StreamManager implements AutoCloseable {
     }
 
     /**
-     * Removes the playlist when a rendition stops.
+     * Removes a rendition's published playlist.
      *
      * The segments it names stay in the bucket until their lifecycle rule
      * expires them, and the playlist would otherwise go on describing them as
@@ -339,7 +359,13 @@ public final class StreamManager implements AutoCloseable {
      * stream looked like it was working, and was showing the wrong day.
      *
      * Deleting it means the manifest 404s until real segments exist, which the
-     * player already understands as "starting". One DELETE per stop.
+     * player already understands as "starting".
+     *
+     * Called on both edges, not just the way down. Doing it only in stop()
+     * left every playlist behind whenever the process did not shut down
+     * cleanly — a kill, a crash, a power cut at the site — and those are
+     * exactly the cases where nobody is watching to notice. One DELETE per
+     * start and one per stop is a rounding error against a segment per second.
      */
     private void retirePlaylist(Rendition rendition) {
         String key = config.keyPrefix() + rendition.keySuffix() + "index.m3u8";
