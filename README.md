@@ -59,6 +59,24 @@ camera's GOP is the floor, whatever the setting says. And the measured ~80 kbps
 is a twentieth of the 2048 kbps this camera advertises over ONVIF, which is why
 the ABR ladder ignores declared bitrates that fail to discriminate.
 
+### Transcoding, verified
+
+A simulated H.265 camera served over RTSP, watched simultaneously by two
+accounts declaring different codec support:
+
+| Viewer declares | Control plane asks agent for | Published |
+|---|---|---|
+| `h264, hevc` | `variant: source` | `sub/` — hevc/Main, stream copy |
+| `h264` only | `variant: h264` | `sub-h264/` — h264/High, transcoded |
+
+Both renditions run at once off the same camera, and neither viewer pays for the
+other's. A site whose viewers all support HEVC never starts an encoder.
+
+The master playlist labels each rung with the codec it actually carries, so a
+browser without HEVC selects the H.264 rung rather than rejecting both — rungs
+differing only by codec are alternatives for different clients, not steps of a
+bitrate ladder.
+
 ### Why fMP4 rather than MPEG-TS
 
 Segments are fragmented MP4. MPEG-TS carries 188-byte packet framing that adds
