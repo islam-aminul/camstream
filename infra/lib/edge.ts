@@ -1,4 +1,4 @@
-import { Duration } from 'aws-cdk-lib';
+import { Duration, RemovalPolicy } from 'aws-cdk-lib';
 import * as acm from 'aws-cdk-lib/aws-certificatemanager';
 import * as cloudfront from 'aws-cdk-lib/aws-cloudfront';
 import * as origins from 'aws-cdk-lib/aws-cloudfront-origins';
@@ -24,6 +24,8 @@ export interface EdgeProps {
  */
 export class Edge extends Construct {
   public readonly distribution: cloudfront.Distribution;
+  /** Where access logs land, so other constructs can write beside them. */
+  public readonly logBucket: s3.Bucket;
 
   constructor(scope: Construct, id: string, props: EdgeProps) {
     super(scope, id);
@@ -80,6 +82,33 @@ export class Edge extends Construct {
           referrerPolicy: cloudfront.HeadersReferrerPolicy.SAME_ORIGIN,
           override: true,
         },
+        // The player is a same-origin SPA with no third-party scripts, so a
+        // strict policy costs nothing — and it is the control that would
+        // actually contain an XSS in the admin console, which is the one page
+        // that holds decrypted credential plaintext in memory before sealing
+        // it. blob: is for hls.js, which appends segments through MSE.
+        contentSecurityPolicy: {
+          contentSecurityPolicy: [
+            "default-src 'self'",
+            "script-src 'self'",
+            // hls.js builds its transmuxer worker with
+            // new Worker(URL.createObjectURL(blob)). worker-src falls back to
+            // script-src when unset, so without this the player loses its
+            // worker and transmuxes on the main thread instead — degraded
+            // rather than broken, and silent apart from a console error.
+            "worker-src 'self' blob:",
+            "style-src 'self' 'unsafe-inline'",
+            "img-src 'self' data: blob:",
+            "media-src 'self' blob:",
+            "connect-src 'self'",
+            "font-src 'self'",
+            "object-src 'none'",
+            "base-uri 'none'",
+            "form-action 'none'",
+            "frame-ancestors 'none'",
+          ].join('; '),
+          override: true,
+        },
       },
     });
 
@@ -91,8 +120,29 @@ export class Edge extends Construct {
       responseHeadersPolicy: securityHeaders,
     };
 
+    // Who watched what, and when. A CCTV customer asks that question sooner or
+    // later for compliance reasons, and incident response needs it before
+    // that; there was no way to answer it at all. Kept 90 days and then
+    // expired, so the audit trail does not quietly become a storage bill.
+    const logBucket = new s3.Bucket(this, 'LogBucket', {
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      encryption: s3.BucketEncryption.S3_MANAGED,
+      enforceSSL: true,
+      // CloudFront writes here directly, which needs an owner-preferred ACL.
+      objectOwnership: s3.ObjectOwnership.BUCKET_OWNER_PREFERRED,
+      lifecycleRules: [{ id: 'expire-logs', enabled: true, expiration: Duration.days(90) }],
+      removalPolicy: RemovalPolicy.RETAIN,
+    });
+    this.logBucket = logBucket;
+
     this.distribution = new cloudfront.Distribution(this, 'Distribution', {
       comment: 'CamStream',
+      enableLogging: true,
+      logBucket,
+      logFilePrefix: 'cloudfront/',
+      // Cookies carry the signed-cookie policy, which is not useful in a log
+      // and is a credential of sorts.
+      logIncludesCookies: false,
       domainNames: [config.appDomain, ...config.altDomains],
       certificate,
       httpVersion: cloudfront.HttpVersion.HTTP2_AND_3,
