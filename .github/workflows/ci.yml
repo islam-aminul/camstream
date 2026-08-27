@@ -109,12 +109,25 @@ jobs:
           # nothing from PATH — which is the whole point, since sudo does not
           # inherit the runner's PATH anyway.
           mkdir -p /tmp/deps/ffmpeg-release-amd64-static
-          tar czf /tmp/deps/OpenJDK21U-jre_x64_linux_hotspot.tar.gz \
+          # -h dereferences: setup-java puts a symlink in the tool cache, and
+          # without this tar archives the link itself — a 4KB tarball holding
+          # one dangling entry, which extracts fine and contains no java. The
+          # installer then correctly reports no JRE, and the fixture gets the
+          # blame it deserves only if we check for it.
+          tar czhf /tmp/deps/OpenJDK21U-jre_x64_linux_hotspot.tar.gz \
             -C "$(dirname "$JAVA_HOME")" "$(basename "$JAVA_HOME")"
           cp "$(command -v ffmpeg)" "$(command -v ffprobe)" /tmp/deps/ffmpeg-release-amd64-static/
           tar cJf /tmp/deps/ffmpeg-release-amd64-static.tar.xz \
             -C /tmp/deps ffmpeg-release-amd64-static
           rm -rf /tmp/deps/ffmpeg-release-amd64-static
+
+          # A fixture that is silently wrong tests nothing, and reads as a bug
+          # in the thing under test.
+          tar tzf /tmp/deps/OpenJDK21U-jre_x64_linux_hotspot.tar.gz | grep -q 'bin/java$' \
+            || { echo "fixture is broken: the JRE archive has no bin/java" >&2; exit 1; }
+          tar tJf /tmp/deps/ffmpeg-release-amd64-static.tar.xz | grep -q 'ffprobe$' \
+            || { echo "fixture is broken: the ffmpeg archive has no ffprobe" >&2; exit 1; }
+
           cp /tmp/deps/* /tmp/unpack/dependencies/
 
           echo "--- the dry run reports what it found, and installs nothing ---"
