@@ -299,7 +299,10 @@ frequently do not share a password.
 ## Adaptive bitrate
 
 The ladder is the camera's own sub and main profiles, so it costs nothing to
-generate — still pure stream copy. A `master.m3u8` appears beside the renditions
+generate — still pure stream copy. Where a camera declares bitrates that fail to
+distinguish its renditions — a real one reported 2048 kbps for both its 1080p
+and its 640x360 profile — the figures are replaced with estimates from
+resolution, since equal `BANDWIDTH` values leave a player unable to choose. A `master.m3u8` appears beside the renditions
 whenever a camera is publishing more than one, which in practice means a viewer
 has opened it. That is deliberate: the detail view is the only place a stream is
 large enough to outrun a connection, and advertising a rendition that is not
