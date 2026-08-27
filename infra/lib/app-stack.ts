@@ -1,4 +1,7 @@
-import { CfnOutput, Stack, StackProps } from 'aws-cdk-lib';
+import { CfnOutput, Duration, Stack, StackProps } from 'aws-cdk-lib';
+import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
+import * as cloudwatchActions from 'aws-cdk-lib/aws-cloudwatch-actions';
+import * as sns from 'aws-cdk-lib/aws-sns';
 import * as acm from 'aws-cdk-lib/aws-certificatemanager';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as route53 from 'aws-cdk-lib/aws-route53';
@@ -77,6 +80,37 @@ export class CamStreamAppStack extends Stack {
       keyGroup: signing.keyGroup,
       certificate,
     });
+
+    // Somebody has to be told when the control plane starts failing. Nothing
+    // alarmed at all before this, so a broken session mint or a wedged admin
+    // function would have been discovered by a customer rather than by us.
+    const alarmTopic = new sns.Topic(this, 'AlarmTopic', {
+      displayName: 'CamStream alarms',
+    });
+    new CfnOutput(this, 'AlarmTopicArn', {
+      description: 'Subscribe an address to this to receive control-plane alarms',
+      value: alarmTopic.topicArn,
+    });
+
+    for (const [name, fn] of Object.entries(api.functions)) {
+      new cloudwatch.Alarm(this, `${name}Errors`, {
+        alarmDescription: `${name} is returning errors`,
+        metric: fn.metricErrors({ period: Duration.minutes(5) }),
+        threshold: 1,
+        evaluationPeriods: 1,
+        // Missing data is no invocations, which is the normal state of an idle
+        // deployment and emphatically not a problem.
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      }).addAlarmAction(new cloudwatchActions.SnsAction(alarmTopic));
+    }
+
+    new cloudwatch.Alarm(this, 'ApiServerErrors', {
+      alarmDescription: 'The control plane is returning 5xx',
+      metric: api.httpApi.metricServerError({ period: Duration.minutes(5) }),
+      threshold: 5,
+      evaluationPeriods: 1,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    }).addAlarmAction(new cloudwatchActions.SnsAction(alarmTopic));
 
     const aliasTarget = route53.RecordTarget.fromAlias(
       new targets.CloudFrontTarget(edge.distribution),

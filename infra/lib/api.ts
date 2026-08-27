@@ -38,6 +38,8 @@ export interface ApiProps {
  */
 export class Api extends Construct {
   public readonly httpApi: apigwv2.HttpApi;
+  /** Every function here, so the stack can alarm on each without repeating itself. */
+  public readonly functions: Record<string, lambda.IFunction> = {};
 
   constructor(scope: Construct, id: string, props: ApiProps) {
     super(scope, id);
@@ -49,7 +51,7 @@ export class Api extends Construct {
     const logGroupFor = (functionName: string) =>
       new logs.LogGroup(this, `${functionName}Logs`, {
         logGroupName: `/aws/lambda/${functionName}`,
-        retention: logs.RetentionDays.ONE_WEEK,
+        retention: logs.RetentionDays.ONE_MONTH,
         removalPolicy: RemovalPolicy.DESTROY,
       });
 
@@ -138,6 +140,11 @@ export class Api extends Construct {
     presenceFn.addPermission('IotRuleInvoke', {
       principal: new iam.ServicePrincipal('iot.amazonaws.com'),
       sourceAccount: stack.account,
+      // Pinned to the rule, not merely the account: any topic rule in the
+      // account could otherwise invoke this and write agent liveness.
+      sourceArn: stack.formatArn({
+        service: 'iot', resource: 'rule', resourceName: 'camstream_agent_presence',
+      }),
     });
 
     // Lifecycle events replace the heartbeat poll entirely: this is the actual
@@ -271,6 +278,43 @@ export class Api extends Construct {
       // No CORS block: the API is reached same-origin through CloudFront.
       createDefaultStage: true,
     });
+
+    // The stage inherited the account default of 10,000 requests a second, so
+    // every authenticated route was unmetered per caller — and two of them are
+    // expensive by design: /api/session does an SSM read and an RSA signature,
+    // /api/watch reads three key ranges and publishes MQTT. One careless or
+    // compromised viewer account was a cost lever against the customer's own
+    // bill, which is awkward for a product whose headline is that it only
+    // spends money while somebody is watching.
+    //
+    // Generous enough that a real player never meets it: a viewer makes a few
+    // calls a minute, and an estate's agents do not come through here at all.
+    const stage = this.httpApi.defaultStage?.node.defaultChild as apigwv2.CfnStage;
+    stage.defaultRouteSettings = {
+      throttlingRateLimit: 50,
+      throttlingBurstLimit: 100,
+      detailedMetricsEnabled: true,
+    };
+
+    const accessLogs = new logs.LogGroup(this, 'ApiAccessLogs', {
+      logGroupName: '/aws/apigateway/camstream-api',
+      retention: logs.RetentionDays.THREE_MONTHS,
+      removalPolicy: RemovalPolicy.DESTROY,
+    });
+    stage.accessLogSettings = {
+      destinationArn: accessLogs.logGroupArn,
+      // Enough to answer "who called what, when, and did it work".
+      format: JSON.stringify({
+        requestId: '$context.requestId',
+        at: '$context.requestTime',
+        method: '$context.httpMethod',
+        path: '$context.path',
+        status: '$context.status',
+        latencyMs: '$context.responseLatency',
+        principal: '$context.authorizer.claims.sub',
+        ip: '$context.identity.sourceIp',
+      }),
+    };
 
     const viewerAuth = new authorizers.HttpUserPoolAuthorizer('ViewerAuthorizer', userPool, {
       userPoolClients: [userPoolClient],
@@ -418,6 +462,15 @@ export class Api extends Construct {
       methods: [apigwv2.HttpMethod.GET],
       authorizer: iamAuth,
       integration: deviceIntegration,
+    });
+
+    Object.assign(this.functions, {
+      Session: sessionFn,
+      Streams: streamsFn,
+      Device: deviceFn,
+      Presence: presenceFn,
+      Watch: watchFn,
+      Admin: adminFn,
     });
   }
 
