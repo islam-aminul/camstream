@@ -407,6 +407,13 @@ A user sees every camera belonging to their tenant, and no others.
 
 - **Latency is ~5s**, not sub-second. Sub-second needs blocking playlist
   reloads, which S3 cannot do. Genuine sub-second would mean WebRTC.
+- **Encoders are stopped in the shutdown hook**, not by try-with-resources on
+  the main thread. The JVM exits as soon as its hooks finish, and losing that
+  race orphans every ffmpeg child — orphans keep their RTSP sessions open, and a
+  camera with a handful of slots then refuses everyone, including the agent when
+  it restarts.
+- **Cameras approved centrally default to TCP**, rather than inheriting the
+  transport of whichever camera happens to be first in the local config.
 - **A camera is live when its agent is connected**, not when it last reported.
   Reports are event-driven, so their timestamps go stale within minutes on a
   quiet estate — judging liveness by them marked every camera offline while its

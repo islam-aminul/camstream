@@ -83,7 +83,7 @@ public final class Main {
         IotCredentialsProvider awsCredentials = new IotCredentialsProvider(config);
         DiscoveryService discovery = new DiscoveryService(
                 config.ffprobePath,
-                config.cameras.isEmpty() ? "tcp" : config.cameras.get(0).rtspTransport,
+                config.defaultRtspTransport,
                 config.rtspPaths,
                 config.discoveryMaxHosts,
                 config.discoveryNetworks,
@@ -155,6 +155,13 @@ public final class Main {
                 CountDownLatch shutdown = new CountDownLatch(1);
                 Runtime.getRuntime().addShutdownHook(new Thread(() -> {
                     log.info("shutting down");
+                    // Stop the encoders here rather than leaving it to
+                    // try-with-resources on the main thread: the JVM exits as
+                    // soon as the hooks finish, and losing that race orphans
+                    // every ffmpeg child. Orphans keep their RTSP sessions
+                    // open, and a camera with a handful of session slots then
+                    // refuses everyone — including the agent, once it restarts.
+                    manager.close();
                     shutdown.countDown();
                 }));
 
