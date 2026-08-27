@@ -114,17 +114,27 @@ export class Provisioning extends Construct {
     });
 
     // The claim certificate's entire world: request a certificate, and run the
-    // template. It cannot connect as a thing, publish, subscribe or assume the
-    // credentials role, so on its own it is worth nothing.
+    // template. It cannot publish, subscribe or assume the credentials role, so
+    // on its own it is worth nothing.
     new iot.CfnPolicy(this, 'ClaimPolicy', {
       policyName: this.claimPolicyName,
       policyDocument: {
         Version: '2012-10-17',
         Statement: [
           {
+            // Only under the prefix the provisioner uses, never a thing name.
+            //
+            // This was `client/*`, which let anything holding a claim
+            // certificate connect as any agent — and AWS IoT disconnects the
+            // existing session when a client id is reused, so that was a
+            // fleet-wide denial of service reachable from a file every
+            // customer downloads. The certificate is shared by every installer
+            // and cannot be treated as a secret, which is precisely why what
+            // it may do has to be narrow. FleetProvisioner already connects as
+            // `provision-<uuid>`, so nothing legitimate changes.
             Effect: 'Allow',
             Action: 'iot:Connect',
-            Resource: stack.formatArn({ service: 'iot', resource: 'client', resourceName: '*' }),
+            Resource: stack.formatArn({ service: 'iot', resource: 'client', resourceName: 'provision-*' }),
           },
           {
             Effect: 'Allow',
