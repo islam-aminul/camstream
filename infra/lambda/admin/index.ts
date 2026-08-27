@@ -2,6 +2,10 @@ import { randomBytes } from 'node:crypto';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, QueryCommand, PutCommand, DeleteCommand, UpdateCommand, GetCommand } from '@aws-sdk/lib-dynamodb';
 import { IoTDataPlaneClient, PublishCommand } from '@aws-sdk/client-iot-data-plane';
+import {
+  IoTClient, ListThingPrincipalsCommand, DetachThingPrincipalCommand, ListAttachedPoliciesCommand,
+  DetachPolicyCommand, UpdateCertificateCommand, DeleteCertificateCommand, DeleteThingCommand,
+} from '@aws-sdk/client-iot';
 import { SSMClient, GetParameterCommand } from '@aws-sdk/client-ssm';
 import {
   CognitoIdentityProviderClient, ListUsersCommand, AdminCreateUserCommand, AdminDeleteUserCommand, AdminGetUserCommand,
@@ -43,6 +47,8 @@ const ENROLLMENT_TTL_SECONDS = 14 * 24 * 60 * 60;
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const cognito = new CognitoIdentityProviderClient({});
 const iot = new IoTDataPlaneClient({ endpoint: `https://${IOT_ENDPOINT}` });
+/** Control plane rather than data plane: things and certificates, not messages. */
+const iotControl = new IoTClient({});
 const ssm = new SSMClient({});
 
 export async function handler(
@@ -72,6 +78,8 @@ export async function handler(
       case 'POST /api/admin/agents':     return await createAgent(caller, event.body);
       case 'PATCH /api/admin/agents/{thingName}':
         return await updateAgent(caller, event.pathParameters?.thingName, event.body);
+      case 'DELETE /api/admin/agents/{thingName}':
+        return await removeAgent(caller, event.pathParameters?.thingName);
       case 'GET /api/admin/agents/{thingName}/identity':
         return await agentIdentity(caller, event.pathParameters?.thingName);
       case 'GET /api/admin/agents/{thingName}/installer':
@@ -82,6 +90,9 @@ export async function handler(
       case 'DELETE /api/admin/cameras/{identity}':
         return await removeCamera(caller, event.pathParameters?.identity);
       case 'POST /api/admin/credentials':return await storeCredential(caller, event.body);
+      case 'DELETE /api/admin/credentials':
+        return await removeCredential(caller, event.queryStringParameters?.thingName,
+          event.queryStringParameters?.scope);
       case 'POST /api/admin/scan':       return await triggerScan(caller, event.body);
       case 'GET /api/admin/users':       return await listUsers(caller);
       case 'POST /api/admin/users':      return await createUser(caller, event.body);
@@ -297,6 +308,115 @@ async function updateAgent(caller: Caller, thingName: string | undefined, rawBod
   await pushConfig(caller.tenantId, thing);
 
   return json(200, { thingName: thing, maxConcurrentTranscodes: cap });
+}
+
+/**
+ * Retires an agent: its records, its credentials, and its identity.
+ *
+ * There was no way to do this. Enrolment was one-way, so a decommissioned edge
+ * box stayed in the registry permanently — listed, counted, and able to
+ * reconnect and resume publishing while its certificate lived. It compounded
+ * one level up: `deletePremises` refuses while agents are attached, quite
+ * rightly, so a premises that had ever held an agent could not be deleted
+ * either. The estate could only grow.
+ *
+ * Cameras are refused rather than cascaded. Which agent takes over a camera is
+ * a decision with a cost attached, and it belongs to the administrator, not to
+ * a delete.
+ */
+async function removeAgent(caller: Caller, thingName: string | undefined) {
+  if (!can(caller, 'manageEstate')) return fail(403, 'Not permitted to remove agents');
+  const thing = thingName ?? '';
+  const outOfScope = refuseOutOfScope(caller, thing);
+  if (outOfScope) return outOfScope;
+
+  const existing = await getRecord<Record<string, unknown>>(caller.tenantId, key.device(thing));
+  if (!existing) return fail(404, 'No such agent');
+
+  const cameras = await queryPrefix<CameraRecord>(caller.tenantId, 'CAMERA#');
+  const owned = cameras.filter((camera) => camera.assignedTo === thing);
+  if (owned.length > 0) {
+    return fail(400,
+      `${owned.length} camera(s) are still assigned to this agent — reassign or remove them first`);
+  }
+
+  // The identity goes first. A record without a certificate is untidy; a
+  // certificate without a record is an agent that can still publish.
+  const retired = await retireThing(thing);
+
+  const stale = [
+    key.device(thing),
+    `HEALTH#${thing}`,
+    ...(await queryPrefix<Record<string, unknown>>(caller.tenantId, `CREDENTIAL#${thing}#`))
+      .map((item) => String(item.sk)),
+    ...(await queryPrefix<Record<string, unknown>>(caller.tenantId, `LIVECAMERA#${thing}#`))
+      .map((item) => String(item.sk)),
+  ];
+  for (const sk of stale) {
+    await ddb.send(new DeleteCommand({ TableName: TABLE, Key: { pk: key.tenant(caller.tenantId), sk } }));
+  }
+
+  return json(200, { removed: thing, records: stale.length, identityRevoked: retired });
+}
+
+/**
+ * Detaches and deletes the thing's certificate, then the thing.
+ *
+ * Reports rather than throws. An agent enrolled but never booted has no
+ * certificate at all, and a half-torn-down identity should not leave the
+ * registry records behind — that is the state nobody can clean up from.
+ */
+async function retireThing(thing: string): Promise<boolean> {
+  try {
+    const principals = await iotControl.send(new ListThingPrincipalsCommand({ thingName: thing }));
+    for (const principal of principals.principals ?? []) {
+      await iotControl.send(new DetachThingPrincipalCommand({ thingName: thing, principal }));
+      const attached = await iotControl.send(new ListAttachedPoliciesCommand({ target: principal }));
+      for (const policy of attached.policies ?? []) {
+        await iotControl.send(new DetachPolicyCommand({ policyName: policy.policyName!, target: principal }));
+      }
+      const certificateId = principal.split('/').pop()!;
+      // Deactivate before delete: an active certificate cannot be deleted, and
+      // deactivating is itself what stops the agent reconnecting.
+      await iotControl.send(new UpdateCertificateCommand({ certificateId, newStatus: 'INACTIVE' }));
+      await iotControl.send(new DeleteCertificateCommand({ certificateId, forceDelete: true }));
+    }
+    await iotControl.send(new DeleteThingCommand({ thingName: thing }));
+    return true;
+  } catch (err) {
+    console.warn(`could not fully retire ${thing}: ${err}`);
+    return false;
+  }
+}
+
+/**
+ * Withdraws a stored credential.
+ *
+ * Storing one was possible and withdrawing it was not, so a credential set by
+ * mistake, or for a camera long since removed, was relayed to the agent
+ * forever. For a system whose stated property is that the operator controls
+ * where camera passwords live, "cannot be taken back" is a gap in the claim.
+ */
+async function removeCredential(caller: Caller, thingName: unknown, scope: unknown) {
+  if (!can(caller, 'manageCredentials')) return fail(403, 'Not permitted to manage credentials');
+  const thing = String(thingName ?? '');
+  const target = String(scope ?? '*');
+
+  const outOfScope = refuseOutOfScope(caller, thing);
+  if (outOfScope) return outOfScope;
+  if (target !== '*' && !CAMERA_IDENTITY.test(target)) return fail(400, 'Invalid scope');
+
+  const existing = await getRecord<Record<string, unknown>>(
+    caller.tenantId, key.credential(thing, target));
+  if (!existing) return fail(404, 'No credential stored for that scope');
+
+  await ddb.send(new DeleteCommand({
+    TableName: TABLE, Key: { pk: key.tenant(caller.tenantId), sk: key.credential(thing, target) },
+  }));
+  // The agent replaces its whole relayed set from the config it fetches, so
+  // bumping the version is what actually revokes this on the edge box.
+  await pushConfig(caller.tenantId, thing);
+  return json(200, { removed: target, thingName: thing });
 }
 
 /**

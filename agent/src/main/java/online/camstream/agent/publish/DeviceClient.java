@@ -141,9 +141,11 @@ public final class DeviceClient {
                     envelopes.put(node.path("scope").asText("*"), ciphertext);
                 }
             }
-            if (!envelopes.isEmpty()) {
-                credentialStore.apply(envelope, envelopes);
-            }
+            // Unconditionally, including when the document carries none. This
+            // used to be guarded on the map being non-empty, so withdrawing
+            // the last credential left the agent still holding it — the one
+            // case where revocation most obviously had to work.
+            credentialStore.apply(envelope, envelopes);
 
             List<CameraRegistry.Approved> approved = new java.util.ArrayList<>();
             for (JsonNode node : root.path("approvedCameras")) {
