@@ -120,6 +120,12 @@ cd .. && ./scripts/deploy-web.sh             # 4. the player
 | Set camera credentials | ✓ | ✓ | ✓ | |
 | Watch streams | ✓ | ✓ | ✓ | ✓ |
 
+Every admin endpoint checks two things independently: whether the role permits
+the action at all, and whether the target premises is one the caller may act on.
+Both, on listings as well as mutations — a viewer cannot enumerate the estate,
+and an operator restricted to one site cannot store credentials, trigger scans
+or remove cameras at another.
+
 Roles are Cognito groups rather than token attributes, so revoking one takes
 effect on the next token refresh instead of whenever a token happens to lapse.
 Operators may set camera credentials because whoever installs a camera has its

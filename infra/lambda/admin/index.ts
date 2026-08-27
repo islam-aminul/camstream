@@ -8,7 +8,7 @@ import {
   AdminAddUserToGroupCommand, AdminListGroupsForUserCommand,
 } from '@aws-sdk/client-cognito-identity-provider';
 import type { APIGatewayProxyEventV2WithJWTAuthorizer, APIGatewayProxyStructuredResultV2 } from 'aws-lambda';
-import { isValidId, thingName as buildThingName, THING_NAME_PATTERN } from '../shared/tenant';
+import { isValidId, parseThingName, thingName as buildThingName, THING_NAME_PATTERN } from '../shared/tenant';
 import { identify, can, targetTenant, ROLES, type Caller, type Role } from '../shared/roles';
 import { fail, json } from '../shared/http';
 
@@ -102,9 +102,32 @@ function visible(caller: Caller, premisesId: string | undefined): boolean {
   return premisesId !== undefined && caller.premises.includes(premisesId);
 }
 
+/**
+ * Guard for any request addressed by thing name.
+ *
+ * The premises is encoded in the name itself, so this needs no lookup — and
+ * applying it uniformly is the point: an operator restricted to one site was
+ * able to approve cameras, store credentials and trigger scans at another,
+ * because each endpoint checked the role but not the scope.
+ */
+function refuseOutOfScope(caller: Caller, thing: string): APIGatewayProxyStructuredResultV2 | null {
+  const identity = parseThingName(thing);
+  if (!identity) {
+    return fail(400, 'Invalid agent name');
+  }
+  if (identity.tenantId !== caller.tenantId && !can(caller, 'crossTenant')) {
+    return fail(403, 'Agent belongs to another tenant');
+  }
+  if (!visible(caller, identity.premisesId)) {
+    return fail(403, 'Agent is not within your permitted premises');
+  }
+  return null;
+}
+
 // ---------------------------------------------------------------- premises
 
 async function listPremises(caller: Caller) {
+  if (!can(caller, 'manageEstate')) return fail(403, 'Not permitted to list premises');
   const premises = await queryPrefix<PremisesRecord>(caller.tenantId, 'PREMISES#');
   return json(200, { premises: premises.filter((p) => visible(caller, p.premisesId)) });
 }
@@ -118,6 +141,11 @@ async function createPremises(caller: Caller, rawBody: string | undefined) {
   const premisesId = String(body.premisesId ?? '').trim().toLowerCase();
   if (!isValidId(premisesId)) {
     return fail(400, 'premisesId must be 3-32 chars of [a-z0-9-] and must not contain "--"');
+  }
+  // Someone restricted to particular sites creating a new one would produce a
+  // premises they immediately cannot see or manage.
+  if (caller.premises.length > 0) {
+    return fail(403, 'Restricted accounts cannot create premises');
   }
 
   const record: PremisesRecord = {
@@ -145,6 +173,7 @@ async function createPremises(caller: Caller, rawBody: string | undefined) {
 async function deletePremises(caller: Caller, premisesId: string | undefined) {
   if (!can(caller, 'manageEstate')) return fail(403, 'Not permitted');
   if (!premisesId || !isValidId(premisesId)) return fail(400, 'Invalid premises id');
+  if (!visible(caller, premisesId)) return fail(403, 'Not permitted for that premises');
 
   const agents = await queryPrefix<Record<string, unknown>>(caller.tenantId, 'DEVICE#');
   const attached = agents.filter((a) => a.premisesId === premisesId);
@@ -161,6 +190,7 @@ async function deletePremises(caller: Caller, premisesId: string | undefined) {
 // ------------------------------------------------------------------ agents
 
 async function listAgents(caller: Caller) {
+  if (!can(caller, 'manageEstate')) return fail(403, 'Not permitted to list agents');
   const devices = await queryPrefix<Record<string, unknown>>(caller.tenantId, 'DEVICE#');
   return json(200, {
     agents: devices
@@ -320,6 +350,7 @@ async function agentInstaller(caller: Caller, thing: string | undefined, platfor
 // ----------------------------------------------------------------- cameras
 
 async function listDiscovered(caller: Caller) {
+  if (!can(caller, 'manageEstate')) return fail(403, 'Not permitted to list discovered cameras');
   const [discovered, approved, agents] = await Promise.all([
     queryPrefix<DiscoveredRecord>(caller.tenantId, 'DISCOVERED#'),
     queryPrefix<CameraRecord>(caller.tenantId, 'CAMERA#'),
@@ -363,7 +394,8 @@ async function approveCamera(caller: Caller, rawBody: string | undefined) {
   const assignedTo = String(body.assignedTo ?? '');
 
   if (!/^[A-Za-z0-9._-]{3,64}$/.test(identity)) return fail(400, 'Invalid camera identity');
-  if (!THING_NAME_PATTERN.test(assignedTo)) return fail(400, 'Invalid agent name');
+  const outOfScope = refuseOutOfScope(caller, assignedTo);
+  if (outOfScope) return outOfScope;
 
   const discovered = await queryPrefix<DiscoveredRecord>(caller.tenantId, key.discovered(identity));
   const record = discovered[0];
@@ -393,6 +425,10 @@ async function removeCamera(caller: Caller, identity: string | undefined) {
   if (!identity) return fail(400, 'Camera identity is required');
 
   const existing = await queryPrefix<CameraRecord>(caller.tenantId, key.camera(identity));
+  if (existing[0]?.assignedTo) {
+    const outOfScope = refuseOutOfScope(caller, existing[0].assignedTo);
+    if (outOfScope) return outOfScope;
+  }
   await ddb.send(new DeleteCommand({
     TableName: TABLE, Key: { pk: key.tenant(caller.tenantId), sk: key.camera(identity) },
   }));
@@ -407,7 +443,8 @@ async function storeCredential(caller: Caller, rawBody: string | undefined) {
   const scope = String(body.scope ?? '*');
   const ciphertext = String(body.ciphertext ?? '');
 
-  if (!THING_NAME_PATTERN.test(thing)) return fail(400, 'Invalid agent name');
+  const outOfScope = refuseOutOfScope(caller, thing);
+  if (outOfScope) return outOfScope;
   if (!/^[A-Za-z0-9+/=]{64,2048}$/.test(ciphertext)) return fail(400, 'Ciphertext must be base64 of plausible RSA size');
   if (scope !== '*' && !/^[A-Za-z0-9._-]{3,64}$/.test(scope)) return fail(400, 'Invalid scope');
 
@@ -429,7 +466,8 @@ async function triggerScan(caller: Caller, rawBody: string | undefined) {
   if (!can(caller, 'manageEstate')) return fail(403, 'Not permitted');
   const body = JSON.parse(rawBody ?? '{}') as Record<string, unknown>;
   const thing = String(body.thingName ?? '');
-  if (!THING_NAME_PATTERN.test(thing)) return fail(400, 'Invalid agent name');
+  const outOfScope = refuseOutOfScope(caller, thing);
+  if (outOfScope) return outOfScope;
 
   await iot.send(new PublishCommand({
     topic: `camstream/${thing}/command`, qos: 1,
@@ -506,9 +544,16 @@ async function createUser(caller: Caller, rawBody: string | undefined) {
   const tenantId = targetTenant(caller, body.tenantId);
   if (!tenantId) return fail(403, 'Not permitted to act on that tenant');
 
-  const premises = Array.isArray(body.premises)
-    ? body.premises.filter((p): p is string => typeof p === 'string' && isValidId(p)).join(',')
-    : '';
+  const requested = Array.isArray(body.premises)
+    ? body.premises.filter((p): p is string => typeof p === 'string' && isValidId(p))
+    : [];
+  const beyond = requested.filter((p) => !visible(caller, p));
+  if (beyond.length > 0) {
+    return fail(403, `You cannot grant access to: ${beyond.join(', ')}`);
+  }
+  // A restricted admin creating an unrestricted user would be an escalation by
+  // proxy, so the new account inherits the creator's own bounds by default.
+  const premises = (requested.length > 0 ? requested : caller.premises).join(',');
 
   await cognito.send(new AdminCreateUserCommand({
     UserPoolId: USER_POOL_ID, Username: email,
