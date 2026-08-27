@@ -69,21 +69,54 @@ export function Player({ src, muted = true, onUndecodable, onUnavailable }: Play
       liveMaxLatencyDurationCount: 6,
       lowLatencyMode: false,
       backBufferLength: 10,
-      manifestLoadingMaxRetry: 8,
+      // Nothing exists until the agent is told to publish, and that takes as
+      // long as connecting to the camera, filling one segment and uploading
+      // it — comfortably over ten seconds on a cold start. Too small a budget
+      // reports a healthy camera as absent.
+      manifestLoadingMaxRetry: 20,
       manifestLoadingRetryDelay: 1000,
-      levelLoadingMaxRetry: 8,
+      manifestLoadingMaxRetryTimeout: 4000,
+      levelLoadingMaxRetry: 20,
+      levelLoadingRetryDelay: 1000,
       fragLoadingMaxRetry: 6,
     });
 
     let mediaRecoveries = 0;
     let settled = false;
 
+    /**
+     * Some browsers accept a codec, load the metadata and then simply never
+     * decode a frame — Firefox does exactly that with HEVC, reporting no error
+     * at all. Without a watchdog that is indistinguishable from a slow start,
+     * and the viewer waits forever on a stream that will never appear.
+     */
+    let stallTimer: ReturnType<typeof setTimeout> | undefined;
+    const armStallWatchdog = () => {
+      clearTimeout(stallTimer);
+      stallTimer = setTimeout(() => {
+        if (settled || video.currentTime > 0) {
+          return;
+        }
+        settled = true;
+        setStatus('failed');
+        hls.destroy();
+        onUndecodable?.();
+      }, 12000);
+    };
+
     hls.on(Hls.Events.MANIFEST_PARSED, () => {
+      // Segments exist from here on, so anything after this is decoding.
+      armStallWatchdog();
       video.play().catch(() => {
         /* autoplay refusal is not fatal; the poster stays until the user clicks */
       });
     });
-    hls.on(Hls.Events.FRAG_BUFFERED, () => setStatus('playing'));
+    hls.on(Hls.Events.FRAG_BUFFERED, () => {
+      if (video.currentTime > 0) {
+        clearTimeout(stallTimer);
+        setStatus('playing');
+      }
+    });
 
     hls.on(Hls.Events.ERROR, (_event, data) => {
       // A browser can accept a codec and still fail to decode it, and that
@@ -137,7 +170,10 @@ export function Player({ src, muted = true, onUndecodable, onUnavailable }: Play
 
     hls.loadSource(src);
     hls.attachMedia(video);
-    return () => hls.destroy();
+    return () => {
+      clearTimeout(stallTimer);
+      hls.destroy();
+    };
   }, [src, onUndecodable, onUnavailable]);
 
   return (

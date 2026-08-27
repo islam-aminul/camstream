@@ -97,6 +97,16 @@ public final class AgentConfig {
     public String ffmpegPath = "ffmpeg";
     public String ffprobePath = "ffprobe";
 
+    /**
+     * RTSP transport for cameras approved centrally, which carry no local
+     * configuration of their own.
+     *
+     * TCP by default: UDP packet loss becomes macroblocking baked into every
+     * viewer's stream, and on a NATed or routed network the RTP never arrives
+     * at all.
+     */
+    public String defaultRtspTransport = "tcp";
+
     /** Scan the local network for cameras. */
     public boolean discoveryEnabled = true;
 
@@ -224,6 +234,9 @@ public final class AgentConfig {
         }
         if (idleShutdownSeconds < 10 || idleShutdownSeconds > 600) {
             throw new IllegalArgumentException("idleShutdownSeconds must be between 10 and 600");
+        }
+        if (defaultRtspTransport == null || !defaultRtspTransport.matches("tcp|udp")) {
+            throw new IllegalArgumentException("defaultRtspTransport must be \"tcp\" or \"udp\"");
         }
         if (discoveryIntervalMinutes < 1 || discoveryIntervalMinutes > 1440) {
             throw new IllegalArgumentException("discoveryIntervalMinutes must be between 1 and 1440");

@@ -138,7 +138,12 @@ public final class CameraRegistry {
         // at the same stream rather than leaving the grid blank.
         camera.subStreamUrl = subUrl != null ? subUrl : mainUrl;
         camera.mainStreamUrl = mainUrl != null ? mainUrl : subUrl;
-        camera.rtspTransport = config.cameras.isEmpty() ? "tcp" : config.cameras.get(0).rtspTransport;
+        // TCP, not whatever the first locally-configured camera happens to use.
+        // Inheriting from an unrelated entry meant a real camera was told to
+        // stream over UDP because a test simulator elsewhere in the list needed
+        // it. `defaultRtspTransport` is the knob for sites that genuinely need
+        // otherwise.
+        camera.rtspTransport = config.defaultRtspTransport;
 
         DiscoveredCamera.DiscoveredProfile sub = found.profiles.get(subToken);
         DiscoveredCamera.DiscoveredProfile main = found.profiles.get(mainToken);
