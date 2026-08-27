@@ -330,6 +330,10 @@ export class Api extends Construct {
           'cognito-idp:ListUsers',
           'cognito-idp:AdminCreateUser',
           'cognito-idp:AdminDeleteUser',
+          // Needed to establish which tenant an account belongs to before
+          // acting on it — deleting one used to check the caller's role but
+          // never the target's tenant.
+          'cognito-idp:AdminGetUser',
           'cognito-idp:AdminAddUserToGroup',
           'cognito-idp:AdminRemoveUserFromGroup',
           // Needed to report each user's role, which is group membership.

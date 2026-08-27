@@ -4,7 +4,7 @@ import { DynamoDBDocumentClient, QueryCommand, PutCommand, DeleteCommand, Update
 import { IoTDataPlaneClient, PublishCommand } from '@aws-sdk/client-iot-data-plane';
 import { SSMClient, GetParameterCommand } from '@aws-sdk/client-ssm';
 import {
-  CognitoIdentityProviderClient, ListUsersCommand, AdminCreateUserCommand, AdminDeleteUserCommand,
+  CognitoIdentityProviderClient, ListUsersCommand, AdminCreateUserCommand, AdminDeleteUserCommand, AdminGetUserCommand,
   AdminAddUserToGroupCommand, AdminListGroupsForUserCommand,
 } from '@aws-sdk/client-cognito-identity-provider';
 import type { APIGatewayProxyEventV2WithJWTAuthorizer, APIGatewayProxyStructuredResultV2 } from 'aws-lambda';
@@ -666,6 +666,15 @@ async function createUser(caller: Caller, rawBody: string | undefined) {
   return json(200, { created: email, tenantId, role, premises });
 }
 
+/**
+ * Removes an account, within the caller's own tenant.
+ *
+ * The tenant check is the point. Listing users has always been filtered by
+ * tenant, but deleting one was not — so an administrator who knew or guessed
+ * an address in another tenant could remove that account, up to and including
+ * a superadmin. Usernames are email addresses, so the guess did not even have
+ * to be an informed one.
+ */
 async function deleteUser(caller: Caller, username: string | undefined) {
   if (!can(caller, 'manageUsers')) return fail(403, 'Not permitted to manage users');
   if (!username) return fail(400, 'Username is required');
@@ -673,6 +682,33 @@ async function deleteUser(caller: Caller, username: string | undefined) {
   if (username === caller.email || username === caller.sub) {
     return fail(400, 'You cannot delete your own account');
   }
+
+  const target = await cognito
+    .send(new AdminGetUserCommand({ UserPoolId: USER_POOL_ID, Username: username }))
+    .catch((err) => {
+      if (err?.name === 'UserNotFoundException') return null;
+      throw err;
+    });
+  // Absent and forbidden are the same answer, so this cannot be used to test
+  // whether an address exists in another tenant.
+  if (!target) return fail(404, 'No such user');
+
+  const targetTenant = (target.UserAttributes ?? [])
+    .find((attribute) => attribute.Name === 'custom:tenantId')?.Value;
+  if (!can(caller, 'crossTenant') && targetTenant !== caller.tenantId) {
+    return fail(404, 'No such user');
+  }
+
+  // An admin removing the platform operator from their own tenant would be a
+  // customer evicting the vendor; only another superadmin may do that.
+  const targetGroups = await cognito.send(new AdminListGroupsForUserCommand({
+    UserPoolId: USER_POOL_ID, Username: username,
+  }));
+  const targetIsSuperadmin = (targetGroups.Groups ?? []).some((g) => g.GroupName === 'superadmin');
+  if (targetIsSuperadmin && !can(caller, 'crossTenant')) {
+    return fail(403, 'Only a superadmin may remove a superadmin');
+  }
+
   await cognito.send(new AdminDeleteUserCommand({ UserPoolId: USER_POOL_ID, Username: username }));
   return json(200, { deleted: username });
 }
