@@ -39,23 +39,32 @@ for roughly double the delay.
 
 ### Measured
 
-One real camera — a CP Plus sub-stream at 640×360, h264 — sampled while
-publishing:
+A real CP Plus sub-stream at 640×360, h264, sampled while publishing:
 
-| | |
-|---|---|
-| Segments | 0.31/s (~3.2s each) |
-| S3 PUTs | 0.61/s — media plus the rewritten playlist |
-| Bandwidth | 12.6 KB/s (103 kbps) |
-| **Cost, watched 8h/day** | **$3.85/month** |
-| **Cost, watched 24/7** | **$11.55/month** |
+| `segmentDurationMs` | actual segment | S3 PUTs | bandwidth | cost @ 8h/day |
+|---|---|---|---|---|
+| 2000 | 3.0s | 0.67/s | 9.3 KB/s | **$3.78/camera/month** |
+| 6000 | 5.5s | 0.37/s | 10.0 KB/s | **$2.55/camera/month** |
 
-Nothing while nobody is watching. Two things in those figures are worth noting:
-segments came out at ~3.2s rather than the configured 2s, because the agent
-stream-copies and can only cut on a keyframe — the camera's GOP sets the floor.
-And the measured 103 kbps is a twentieth of the 2048 kbps the same camera
-advertises over ONVIF, which is why the ABR ladder ignores declared bitrates
-that fail to discriminate.
+Nothing at all while nobody is watching.
+
+Requests dominate the bill roughly three to one over bandwidth, which is why
+segment duration is the lever that matters: bandwidth is the same video either
+way. Longer segments buy less than proportionally, though — going from 2s to 6s
+saved a third, not two thirds.
+
+Two caveats show up directly in that table. Actual segments run longer than
+configured, because the agent stream-copies and can only cut on a keyframe: the
+camera's GOP is the floor, whatever the setting says. And the measured ~80 kbps
+is a twentieth of the 2048 kbps this camera advertises over ONVIF, which is why
+the ABR ladder ignores declared bitrates that fail to discriminate.
+
+### Why fMP4 rather than MPEG-TS
+
+Segments are fragmented MP4. MPEG-TS carries 188-byte packet framing that adds
+roughly 3–7% to every byte for identical video, and hls.js transmuxes it back to
+fMP4 in the browser regardless — so TS costs more in bandwidth and in client
+CPU, and buys compatibility only with players this system does not target.
 
 ## Repository layout
 
@@ -353,6 +362,11 @@ A user sees every camera belonging to their tenant, and no others.
   stream-copies, so it can only cut a segment on a keyframe. A camera set to a
   4s GOP will silently produce 4s segments and roughly double the latency,
   whatever the config says.
+- **The playlist is written by the agent, not relayed from ffmpeg.** ffmpeg
+  numbers segments per process, so every restart would reset the media sequence
+  and append `EXT-X-ENDLIST` — telling a viewer the stream had ended. The agent
+  keeps a sequence that only increases and marks a real discontinuity where the
+  encoder actually restarted.
 - **Everything long-running is supervised.** Publishing, heartbeats and
   discovery are registered with `Supervisor` rather than scheduled directly: a
   bare `ScheduledExecutorService` silently cancels a periodic task that throws,

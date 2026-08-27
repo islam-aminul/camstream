@@ -7,6 +7,7 @@ import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.PutObjectRequest;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Arrays;
@@ -31,7 +32,7 @@ public final class HlsPublisher {
 
     private static final String PLAYLIST = "index.m3u8";
 
-    /** Hashed by name: ffmpeg never rewrites a segment once it is closed. */
+    /** By name: ffmpeg never rewrites a segment once it is closed. */
     private final Set<String> uploaded = new HashSet<>();
 
     private final S3Client s3;
@@ -41,13 +42,29 @@ public final class HlsPublisher {
     private final String label;
 
     private byte[] lastPlaylist;
+    private final PlaylistBuilder playlist;
 
-    public HlsPublisher(S3Client s3, String bucket, String keyPrefix, Path directory, String label) {
+    public HlsPublisher(S3Client s3, String bucket, String keyPrefix, Path directory, String label,
+                        int windowSize) {
+        this(s3, bucket, keyPrefix, directory, label, new PlaylistBuilder(windowSize));
+    }
+
+    HlsPublisher(S3Client s3, String bucket, String keyPrefix, Path directory, String label,
+                 PlaylistBuilder playlist) {
+        this.playlist = playlist;
         this.s3 = s3;
         this.bucket = bucket;
         this.keyPrefix = keyPrefix.endsWith("/") ? keyPrefix : keyPrefix + "/";
         this.directory = directory;
         this.label = label;
+    }
+
+    /**
+     * Signals that ffmpeg restarted, so the next segment carries a
+     * discontinuity rather than silently continuing a broken timeline.
+     */
+    public void encoderRestarted() {
+        playlist.encoderRestarted();
     }
 
     /**
@@ -102,37 +119,40 @@ public final class HlsPublisher {
         }
     }
 
+    /**
+     * Publishes our own playlist, built from what ffmpeg reports.
+     *
+     * ffmpeg owns the durations; the sequence, the window and the continuity
+     * markers are ours, so that an encoder restart does not rewind the stream
+     * a viewer is already watching.
+     */
     private void uploadPlaylistIfChanged() throws IOException {
-        Path playlist = directory.resolve(PLAYLIST);
-        if (!Files.isRegularFile(playlist)) {
+        Path source = directory.resolve(PLAYLIST);
+        if (!Files.isRegularFile(source)) {
             return;
         }
-        byte[] content = stripEndList(Files.readAllBytes(playlist));
-        if (content.length == 0 || Arrays.equals(content, lastPlaylist)) {
+        String reported = Files.readString(source);
+        if (reported.isBlank()) {
+            return;
+        }
+
+        String init = PlaylistBuilder.parseInit(reported);
+        if (init != null) {
+            playlist.setInitSegment(init);
+        }
+        playlist.observe(PlaylistBuilder.parse(reported));
+        if (playlist.isEmpty()) {
+            return;
+        }
+
+        byte[] content = playlist.render().getBytes(StandardCharsets.UTF_8);
+        if (Arrays.equals(content, lastPlaylist)) {
             return;
         }
         // no-cache rather than no-store: CloudFront may still collapse
         // simultaneous requests, it just may not serve a stale copy.
         put(PLAYLIST, content, "application/vnd.apple.mpegurl", "no-cache");
         lastPlaylist = content;
-    }
-
-    /**
-     * Removes EXT-X-ENDLIST.
-     *
-     * ffmpeg writes it whenever it exits, including on a camera hiccup that the
-     * agent immediately recovers from. A player that sees it stops for good, so
-     * for a continuously-restarted live feed the tag is never what we mean.
-     */
-    static byte[] stripEndList(byte[] playlist) {
-        String text = new String(playlist, java.nio.charset.StandardCharsets.UTF_8);
-        if (!text.contains("#EXT-X-ENDLIST")) {
-            return playlist;
-        }
-        String cleaned = text.lines()
-                .filter(line -> !line.strip().equals("#EXT-X-ENDLIST"))
-                .collect(java.util.stream.Collectors.joining("\n", "", "\n"));
-        return cleaned.getBytes(java.nio.charset.StandardCharsets.UTF_8);
     }
 
     private void put(String name, byte[] content, String contentType, String cacheControl) {
