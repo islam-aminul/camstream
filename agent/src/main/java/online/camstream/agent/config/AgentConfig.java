@@ -114,6 +114,25 @@ public final class AgentConfig {
     public int discoveryIntervalMinutes = 30;
 
     /**
+     * How often the agent reports its own health over MQTT while it is
+     * streaming, in minutes.
+     *
+     * Presence events already say whether the connection is up, and they are
+     * free. What they cannot say is whether the agent is doing anything useful:
+     * a wedged encoder, a camera refusing every connection or a full disk all
+     * leave the MQTT session perfectly healthy. This is the positive signal
+     * that covers that gap, and it is deliberately slow — the interesting
+     * failures persist, so catching them a minute later costs nothing.
+     */
+    public int heartbeatActiveMinutes = 1;
+
+    /**
+     * The same, while nothing is being watched. Much longer, because an idle
+     * agent has almost nothing to report and every message is billable.
+     */
+    public int heartbeatIdleMinutes = 15;
+
+    /**
      * Ceiling on addresses scanned per sweep. 0 means scan whatever the
      * interface netmask covers, which is the right answer on a normal site
      * network and the default.
@@ -237,6 +256,13 @@ public final class AgentConfig {
         }
         if (defaultRtspTransport == null || !defaultRtspTransport.matches("tcp|udp")) {
             throw new IllegalArgumentException("defaultRtspTransport must be \"tcp\" or \"udp\"");
+        }
+        if (heartbeatActiveMinutes < 1 || heartbeatActiveMinutes > 1440) {
+            throw new IllegalArgumentException("heartbeatActiveMinutes must be between 1 and 1440");
+        }
+        if (heartbeatIdleMinutes < heartbeatActiveMinutes || heartbeatIdleMinutes > 1440) {
+            throw new IllegalArgumentException(
+                    "heartbeatIdleMinutes must be between heartbeatActiveMinutes and 1440");
         }
         if (discoveryIntervalMinutes < 1 || discoveryIntervalMinutes > 1440) {
             throw new IllegalArgumentException("discoveryIntervalMinutes must be between 1 and 1440");

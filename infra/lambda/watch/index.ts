@@ -5,6 +5,7 @@ import type { APIGatewayProxyEventV2WithJWTAuthorizer, APIGatewayProxyStructured
 import { isValidId, parseThingName, premisesScope, withinScope } from '../shared/tenant';
 import { fail, json } from '../shared/http';
 import { readSession, sessionSuperseded } from '../shared/session';
+import { canDecode } from '../shared/playability';
 
 const TABLE = process.env.REGISTRY_TABLE!;
 const IOT_ENDPOINT = process.env.IOT_DATA_ENDPOINT!;
@@ -44,6 +45,8 @@ interface CameraRecord {
   cameraId: string;
   /** What the camera emits natively, reported by the agent. */
   sourceCodec?: string;
+  /** Its profile, which decides playability independently of the codec name. */
+  sourceCodecProfile?: string;
 }
 
 type Variant = 'source' | 'h264';
@@ -55,18 +58,6 @@ interface DesiredState {
 }
 
 /**
- * H.264 is the universal floor: every browser that can play HLS at all can
- * decode it, so a camera already emitting it never needs transcoding.
- */
-function canDecode(sourceCodec: string | undefined, viewerCodecs: string[]): boolean {
-  const codec = (sourceCodec ?? 'h264').toLowerCase();
-  if (codec === 'h264' || codec === 'avc' || codec === 'avc1') {
-    return true;
-  }
-  return viewerCodecs.map((c) => c.toLowerCase()).includes(codec);
-}
-
-/**
  * What this viewer should be served for a camera, or null to publish nothing.
  *
  * A viewer who cannot decode the source and has not asked for a transcode
@@ -75,11 +66,11 @@ function canDecode(sourceCodec: string | undefined, viewerCodecs: string[]): boo
  * their behalf.
  */
 function variantFor(
-  sourceCodec: string | undefined,
+  source: { codec?: string; profile?: string } | undefined,
   viewerCodecs: string[],
   transcodeRequested: boolean,
 ): Variant | null {
-  if (canDecode(sourceCodec, viewerCodecs)) {
+  if (canDecode(source?.codec, source?.profile, viewerCodecs)) {
     return 'source';
   }
   return transcodeRequested ? 'h264' : null;
@@ -213,9 +204,12 @@ export function resolveDesiredState(
 ): DesiredState[] {
   const live = demands.filter((d) => d.expiresAt > now);
 
-  const codecByCamera = new Map<string, string | undefined>();
+  const codecByCamera = new Map<string, { codec?: string; profile?: string }>();
   for (const camera of cameras) {
-    codecByCamera.set(`${camera.thingName}/${camera.cameraId}`, camera.sourceCodec);
+    codecByCamera.set(`${camera.thingName}/${camera.cameraId}`, {
+      codec: camera.sourceCodec,
+      profile: camera.sourceCodecProfile,
+    });
   }
 
   // Keyed by camera+profile+variant: two viewers with different browsers can

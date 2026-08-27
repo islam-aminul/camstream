@@ -31,13 +31,24 @@ echo "FAIL: this build is licensed under GPL/non-free terms."
 printf '  offending flag: %s\n' "${problems[@]}"
 cat <<'EOF'
 
-CamStream stream-copies only and needs no GPL codec. Rebuild or obtain FFmpeg
-configured without --enable-gpl, --enable-nonfree, libx264, libx265 or libfdk-aac,
-for example:
+CamStream stream-copies by default and needs no GPL codec. Rebuild or obtain
+FFmpeg configured without --enable-gpl, --enable-nonfree, libx264, libx265 or
+libfdk-aac, for example:
 
   ./configure --disable-gpl --disable-nonfree \
               --enable-shared --disable-static \
               --disable-encoders --enable-demuxer=rtsp --enable-muxer=hls
+
+To transcode as well — needed for cameras emitting HEVC or H.264 High 10, which
+no browser decodes — add the encoders for the hardware you have, all of which
+are LGPL:
+
+  --enable-vaapi        Intel/AMD integrated graphics on Linux
+  --enable-nvenc        NVIDIA, Linux and Windows
+  --enable-libopenh264  software fallback, BSD-2-Clause, for boxes with no GPU
+
+libopenh264 is the only software H.264 encoder here on purpose: libx264 would
+force --enable-gpl on the whole binary.
 
 This build is fine for local development. Do not ship it.
 EOF

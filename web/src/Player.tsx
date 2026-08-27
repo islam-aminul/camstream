@@ -23,6 +23,34 @@ interface PlayerProps {
    * drop if the connection cannot sustain it.
    */
   preferHighest?: boolean;
+  /**
+   * Show the delay badge and let the viewer open the detail panel.
+   *
+   * Off in the grid, where a dozen tiles each carrying an overlay would be
+   * noise, and on wherever a single stream is being looked at properly.
+   */
+  showStats?: boolean;
+}
+
+/** What the player can say about the stream it is currently decoding. */
+interface Stats {
+  /** Seconds between now and the wall-clock time of the frame on screen. */
+  delaySeconds: number | null;
+  width: number;
+  height: number;
+  codec: string | null;
+  declaredKbps: number | null;
+  estimatedKbps: number | null;
+  bufferSeconds: number;
+  droppedFrames: number;
+  totalFrames: number;
+  levelIndex: number;
+  levelCount: number;
+}
+
+/** Two significant figures is the honest precision for any of these. */
+function round(value: number, places = 1): string {
+  return value.toFixed(places);
 }
 
 /** Codec failures are worth reacting to; a missing segment is not. */
@@ -44,12 +72,16 @@ function isCodecFailure(details: string): boolean {
  * not publishing, which is a different problem from one that is slow to start,
  * and saying "starting" indefinitely hides it.
  */
-export function Player({ src, muted = true, onUndecodable, onUnavailable, preferHighest }: PlayerProps) {
+export function Player({
+  src, muted = true, onUndecodable, onUnavailable, preferHighest, showStats,
+}: PlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [status, setStatus] = useState<'starting' | 'playing' | 'failed'>('starting');
   // Distinguishing "waiting for the agent" from "have data, decoding" tells a
   // viewer which of the two slow things is happening.
   const [buffering, setBuffering] = useState(false);
+  const [stats, setStats] = useState<Stats | null>(null);
+  const [expanded, setExpanded] = useState(false);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -197,13 +229,48 @@ export function Player({ src, muted = true, onUndecodable, onUnavailable, prefer
       }
     });
 
+    /**
+     * Delay is measured against EXT-X-PROGRAM-DATE-TIME, which the agent
+     * stamps as it publishes each segment. So this covers everything from the
+     * segment being closed on the edge through S3, CloudFront and the player's
+     * own buffer — the part CamStream controls. It does not include the
+     * camera's own capture and encode delay, which nothing downstream can see.
+     */
+    const sample = () => {
+      if (!showStats || settled) return;
+      const level = hls.levels[hls.currentLevel];
+      const quality = typeof video.getVideoPlaybackQuality === 'function'
+        ? video.getVideoPlaybackQuality()
+        : null;
+      const playingDate = hls.playingDate;
+      const buffer = video.buffered.length > 0
+        ? video.buffered.end(video.buffered.length - 1) - video.currentTime
+        : 0;
+
+      setStats({
+        delaySeconds: playingDate ? (Date.now() - playingDate.getTime()) / 1000 : null,
+        width: video.videoWidth,
+        height: video.videoHeight,
+        codec: level?.videoCodec ?? null,
+        declaredKbps: level?.bitrate ? Math.round(level.bitrate / 1000) : null,
+        estimatedKbps: hls.bandwidthEstimate ? Math.round(hls.bandwidthEstimate / 1000) : null,
+        bufferSeconds: Math.max(0, buffer),
+        droppedFrames: quality?.droppedVideoFrames ?? 0,
+        totalFrames: quality?.totalVideoFrames ?? 0,
+        levelIndex: hls.currentLevel,
+        levelCount: hls.levels.length,
+      });
+    };
+    const sampler = showStats ? setInterval(sample, 1000) : undefined;
+
     hls.loadSource(src);
     hls.attachMedia(video);
     return () => {
       clearTimeout(stallTimer);
+      clearInterval(sampler);
       hls.destroy();
     };
-  }, [src, onUndecodable, onUnavailable, preferHighest]);
+  }, [src, onUndecodable, onUnavailable, preferHighest, showStats]);
 
   return (
     <div className="player">
@@ -215,6 +282,69 @@ export function Player({ src, muted = true, onUndecodable, onUnavailable, prefer
             : buffering
               ? 'Buffering…'
               : 'Starting stream…'}
+        </div>
+      )}
+      {showStats && status === 'playing' && stats && (
+        <div className="player-stats">
+          <button
+            type="button"
+            className="player-stats-badge"
+            onClick={() => setExpanded((open) => !open)}
+            title="Delay from the edge to this screen. Click for detail."
+          >
+            {stats.delaySeconds == null
+              ? 'live'
+              : `${round(stats.delaySeconds)}s behind`}
+          </button>
+          {expanded && (
+            <dl className="player-stats-detail">
+              <dt>Delay</dt>
+              <dd>
+                {stats.delaySeconds == null
+                  ? 'not reported'
+                  : `${round(stats.delaySeconds)} s`}
+                <span className="player-stats-note">
+                  edge to screen; excludes the camera's own encode delay
+                </span>
+              </dd>
+
+              <dt>Rendition</dt>
+              <dd>
+                {stats.width}×{stats.height}
+                {stats.levelCount > 1 && (
+                  <span className="player-stats-note">
+                    rung {stats.levelIndex + 1} of {stats.levelCount}
+                  </span>
+                )}
+              </dd>
+
+              <dt>Codec</dt>
+              <dd>{stats.codec ?? 'unreported'}</dd>
+
+              <dt>Bitrate</dt>
+              <dd>
+                {stats.declaredKbps == null ? 'unreported' : `${stats.declaredKbps} kbps`}
+                {stats.estimatedKbps != null && (
+                  <span className="player-stats-note">
+                    link estimated at {stats.estimatedKbps} kbps
+                  </span>
+                )}
+              </dd>
+
+              <dt>Buffer</dt>
+              <dd>{round(stats.bufferSeconds)} s ahead</dd>
+
+              <dt>Dropped</dt>
+              <dd>
+                {stats.droppedFrames} of {stats.totalFrames} frames
+                {stats.totalFrames > 0 && stats.droppedFrames > 0 && (
+                  <span className="player-stats-note">
+                    {round((stats.droppedFrames / stats.totalFrames) * 100, 2)}%
+                  </span>
+                )}
+              </dd>
+            </dl>
+          )}
         </div>
       )}
     </div>

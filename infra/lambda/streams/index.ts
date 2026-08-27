@@ -19,6 +19,7 @@ interface CameraRecord {
   height?: number;
   profiles?: string[];
   sourceCodec?: string;
+  sourceCodecProfile?: string;
 }
 
 export async function handler(
@@ -74,6 +75,9 @@ export async function handler(
       // it can decode sourceCodec and `h264` otherwise.
       profiles: record.profiles ?? ['sub'],
       sourceCodec: record.sourceCodec ?? 'h264',
+      // Sent alongside the codec because the client cannot decide playability
+      // without it: High 10 is "h264" that nothing decodes.
+      sourceCodecProfile: record.sourceCodecProfile ?? null,
       manifestUrl: {
         sub: `/live/${record.thingName}/${record.cameraId}/sub/index.m3u8`,
         main: `/live/${record.thingName}/${record.cameraId}/main/index.m3u8`,

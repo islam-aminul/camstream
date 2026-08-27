@@ -72,6 +72,10 @@ public final class DiscoveredCamera {
         public String token;
         public String name;
         public String codec;
+        /** H.264/HEVC profile as ffprobe names it, e.g. "High" or "High 10". */
+        public String codecProfile;
+        /** Level times ten, as ffprobe reports it: 40 means level 4.0. */
+        public Integer codecLevel;
         public Integer width;
         public Integer height;
         public Integer fps;
@@ -109,6 +113,8 @@ public final class DiscoveredCamera {
             safe.token = source.token;
             safe.name = source.name;
             safe.codec = source.codec;
+            safe.codecProfile = source.codecProfile;
+            safe.codecLevel = source.codecLevel;
             safe.width = source.width;
             safe.height = source.height;
             safe.fps = source.fps;

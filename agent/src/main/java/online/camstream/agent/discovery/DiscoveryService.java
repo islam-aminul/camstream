@@ -250,6 +250,8 @@ public final class DiscoveryService implements CameraSource {
                             camera.ipAddress, token, profile.codec, actual.codec());
                     profile.codec = actual.codec();
                 }
+                if (actual.profile() != null) profile.codecProfile = actual.profile();
+                if (actual.level() != null) profile.codecLevel = actual.level();
                 if (actual.width() != null) profile.width = actual.width();
                 if (actual.height() != null) profile.height = actual.height();
                 if (actual.fps() != null) profile.fps = actual.fps();

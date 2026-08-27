@@ -100,4 +100,40 @@ class PlaylistBuilderTest {
         builder.observe(PlaylistBuilder.parse(FFMPEG_PLAYLIST));
         assertEquals(2, builder.render().split("#EXTINF", -1).length - 1);
     }
+
+    @Test
+    void datesTheStreamSoAViewerCanSeeHowFarBehindLiveTheyAre() {
+        // Fixed clock: the assertion is about which instant is derived, not
+        // about how long the test took to run.
+        java.time.Instant now = java.time.Instant.parse("2026-08-27T10:00:06Z");
+        PlaylistBuilder builder = new PlaylistBuilder(
+                3, java.time.Clock.fixed(now, java.time.ZoneOffset.UTC));
+
+        builder.observe(List.of(new PlaylistBuilder.Segment("a.m4s", 2.0, false)));
+        // The first segment ended about now, so it started two seconds ago.
+        assertTrue(builder.render().contains("#EXT-X-PROGRAM-DATE-TIME:2026-08-27T10:00:04.000Z"),
+                builder.render());
+
+        // The second follows from the first's duration rather than being
+        // re-anchored, so a slow sweep cannot make the timeline jitter.
+        builder.observe(List.of(new PlaylistBuilder.Segment("b.m4s", 2.0, false)));
+        String playlist = builder.render();
+        assertEquals(1, playlist.lines().filter(l -> l.startsWith("#EXT-X-PROGRAM-DATE-TIME")).count(),
+                "one date anchors the run; the rest derive from it");
+    }
+
+    @Test
+    void restatesTheClockAfterADiscontinuity() {
+        PlaylistBuilder builder = new PlaylistBuilder(5);
+        builder.observe(List.of(new PlaylistBuilder.Segment("a.m4s", 2.0, false)));
+        builder.encoderRestarted();
+        builder.observe(List.of(new PlaylistBuilder.Segment("b.m4s", 2.0, false)));
+
+        String playlist = builder.render();
+        assertEquals(2, playlist.lines().filter(l -> l.startsWith("#EXT-X-PROGRAM-DATE-TIME")).count(),
+                "a restart breaks the derivation, so the clock has to be restated");
+        assertTrue(playlist.indexOf("#EXT-X-DISCONTINUITY")
+                < playlist.indexOf("#EXT-X-PROGRAM-DATE-TIME:", playlist.indexOf("a.m4s")),
+                "the new date belongs after the discontinuity it follows");
+    }
 }

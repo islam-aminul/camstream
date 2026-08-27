@@ -79,6 +79,19 @@ public final class WatchListener implements AutoCloseable {
         }
     }
 
+    /**
+     * Publishes on this device's own topic tree.
+     *
+     * QoS 0: this carries health, and health that arrives late is worth less
+     * than the retry costs. A dropped heartbeat is answered by the next one.
+     */
+    public void publish(String suffix, String payload) {
+        connection.publish(new software.amazon.awssdk.crt.mqtt.MqttMessage(
+                prefix + "/" + suffix,
+                payload.getBytes(StandardCharsets.UTF_8),
+                QualityOfService.AT_MOST_ONCE));
+    }
+
     /** A malformed message must never take down the connection. */
     private void subscribe(String topic, PayloadHandler handler)
             throws InterruptedException, ExecutionException {
