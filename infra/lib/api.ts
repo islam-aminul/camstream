@@ -315,6 +315,24 @@ export class Api extends Construct {
       actions: ['iot:Publish'],
       resources: [stack.formatArn({ service: 'iot', resource: 'topic', resourceName: 'camstream/*' })],
     }));
+    // Retiring an agent: detach and delete its certificate, then the thing.
+    // Without this an enrolled device could never be decommissioned, and a
+    // premises that had ever held one could never be deleted either.
+    adminFn.addToRolePolicy(new iam.PolicyStatement({
+      actions: [
+        'iot:ListThingPrincipals',
+        'iot:DetachThingPrincipal',
+        'iot:ListAttachedPolicies',
+        'iot:DetachPolicy',
+        'iot:UpdateCertificate',
+        'iot:DeleteCertificate',
+        'iot:DeleteThing',
+      ],
+      resources: [
+        stack.formatArn({ service: 'iot', resource: 'thing', resourceName: '*' }),
+        stack.formatArn({ service: 'iot', resource: 'cert', resourceName: '*' }),
+      ],
+    }));
     // Presigning a download link needs read on the downloads prefix only.
     props.liveBucket.grantRead(adminFn, 'downloads/*');
     adminFn.addToRolePolicy(new iam.PolicyStatement({
@@ -354,6 +372,7 @@ export class Api extends Construct {
       [apigwv2.HttpMethod.GET, '/api/admin/agents'],
       [apigwv2.HttpMethod.POST, '/api/admin/agents'],
       [apigwv2.HttpMethod.PATCH, '/api/admin/agents/{thingName}'],
+      [apigwv2.HttpMethod.DELETE, '/api/admin/agents/{thingName}'],
       [apigwv2.HttpMethod.GET, '/api/admin/agents/{thingName}/identity'],
       [apigwv2.HttpMethod.GET, '/api/admin/agents/{thingName}/installer'],
       [apigwv2.HttpMethod.POST, '/api/admin/scan'],
@@ -361,6 +380,7 @@ export class Api extends Construct {
       [apigwv2.HttpMethod.POST, '/api/admin/cameras'],
       [apigwv2.HttpMethod.DELETE, '/api/admin/cameras/{identity}'],
       [apigwv2.HttpMethod.POST, '/api/admin/credentials'],
+      [apigwv2.HttpMethod.DELETE, '/api/admin/credentials'],
       [apigwv2.HttpMethod.GET, '/api/admin/users'],
       [apigwv2.HttpMethod.POST, '/api/admin/users'],
       [apigwv2.HttpMethod.DELETE, '/api/admin/users/{username}'],
