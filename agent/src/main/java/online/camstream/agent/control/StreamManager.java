@@ -106,28 +106,50 @@ public final class StreamManager implements AutoCloseable {
             }
             (needsEncoder(rendition) ? transcodes : copies).add(rendition);
         }
-        // Stable order, so which transcode gets the slot does not change from
-        // one instruction to the next and flap between two cameras.
-        transcodes.sort(java.util.Comparator.comparing(Rendition::toString));
-
         for (Rendition rendition : copies) {
             start(rendition);
         }
 
-        int budget = config.maxConcurrentTranscodes - runningTranscodes();
-        for (Rendition rendition : transcodes) {
-            if (budget <= 0) {
-                if (declined.add(rendition)) {
-                    log.warn("[{}] not transcoding: this agent allows {} at a time and they are all in use",
-                            rendition, config.maxConcurrentTranscodes);
-                }
-                continue;
-            }
-            budget--;
+        Split split = withinCap(transcodes, runningTranscodes(), config.maxConcurrentTranscodes);
+        for (Rendition rendition : split.start()) {
             declined.remove(rendition);
             start(rendition);
         }
+        for (Rendition rendition : split.refuse()) {
+            if (declined.add(rendition)) {
+                log.warn("[{}] not transcoding: this agent allows {} at a time and they are all in use",
+                        rendition, config.maxConcurrentTranscodes);
+            }
+        }
         declined.retainAll(desired);
+    }
+
+    /** New transcodes split into those that fit the cap and those that do not. */
+    record Split(List<Rendition> start, List<Rendition> refuse) {}
+
+    /**
+     * Decides which of the transcodes not yet running can be afforded.
+     *
+     * The control plane already declines what it will not grant, so in normal
+     * operation everything here fits. This is the copy that does not depend on
+     * the control plane being reachable, correct, or honest — it owns the CPU,
+     * and a bug or a stale instruction upstream must not be able to take the
+     * box down through it.
+     *
+     * Renditions already running are counted, never re-evaluated: taking a
+     * slot back from a stream somebody is watching is worse than being one
+     * over the limit until it stops on its own.
+     */
+    static Split withinCap(List<Rendition> transcodes, int alreadyRunning, int cap) {
+        // Stable order, so which transcode gets the slot does not change from
+        // one instruction to the next and flap between two cameras.
+        List<Rendition> ordered = new java.util.ArrayList<>(transcodes);
+        ordered.sort(java.util.Comparator.comparing(Rendition::toString));
+
+        int budget = Math.max(0, cap - alreadyRunning);
+        int take = Math.min(budget, ordered.size());
+        return new Split(List.copyOf(ordered.subList(0, take)),
+                List.copyOf(ordered.subList(take, ordered.size())));
     }
 
     /** Whether this rendition would spend CPU rather than copy bytes. */

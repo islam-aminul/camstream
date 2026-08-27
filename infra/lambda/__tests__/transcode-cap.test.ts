@@ -107,3 +107,72 @@ describe('holding an agent to its transcode limit', () => {
     expect(run()).toBe(run());
   });
 });
+
+describe('who gets the slot when more than one wants it', () => {
+  const withTimes = (
+    sessionId: string,
+    transcode: string[],
+    transcodeSince: Record<string, number>,
+  ) => ({
+    sk: `DEMAND#${sessionId}`,
+    sessionId,
+    grid: true,
+    codecs: ['h264'],
+    transcode,
+    transcodeSince,
+    scope: [],
+    expiresAt: LATER,
+  });
+
+  it('keeps the transcode that was asked for first', () => {
+    // The bug this guards: slots were handed out by name, so requesting
+    // "aaa" would evict "zzz" mid-playback even though somebody was watching
+    // it. Observed live — a camera started, then stopped seconds later.
+    const [state] = resolveDesiredState(
+      NOW,
+      [withTimes('s1', ['zzz', 'aaa'], { zzz: 100, aaa: 200 })],
+      [{ thingName: 'demo--site--box' }],
+      [
+        { thingName: 'demo--site--box', cameraId: 'aaa', sourceCodec: 'hevc' },
+        { thingName: 'demo--site--box', cameraId: 'zzz', sourceCodec: 'hevc' },
+      ],
+    );
+
+    expect(state.renditions.filter((r) => r.variant === 'h264').map((r) => r.cameraId))
+      .toEqual(['zzz']);
+    expect(state.declined?.map((d) => d.cameraId)).toEqual(['aaa']);
+  });
+
+  it('does not let a second viewer take the first one’s stream', () => {
+    const [state] = resolveDesiredState(
+      NOW,
+      [
+        withTimes('early', ['zzz'], { zzz: 100 }),
+        withTimes('late', ['aaa'], { aaa: 500 }),
+      ],
+      [{ thingName: 'demo--site--box' }],
+      [
+        { thingName: 'demo--site--box', cameraId: 'aaa', sourceCodec: 'hevc' },
+        { thingName: 'demo--site--box', cameraId: 'zzz', sourceCodec: 'hevc' },
+      ],
+    );
+
+    expect(state.renditions.filter((r) => r.variant === 'h264').map((r) => r.cameraId))
+      .toEqual(['zzz']);
+  });
+
+  it('falls back to the name when nothing distinguishes them', () => {
+    const [state] = resolveDesiredState(
+      NOW,
+      [withTimes('s1', ['zzz', 'aaa'], { zzz: 100, aaa: 100 })],
+      [{ thingName: 'demo--site--box' }],
+      [
+        { thingName: 'demo--site--box', cameraId: 'aaa', sourceCodec: 'hevc' },
+        { thingName: 'demo--site--box', cameraId: 'zzz', sourceCodec: 'hevc' },
+      ],
+    );
+
+    expect(state.renditions.filter((r) => r.variant === 'h264').map((r) => r.cameraId))
+      .toEqual(['aaa']);
+  });
+});

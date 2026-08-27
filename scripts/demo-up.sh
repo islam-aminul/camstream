@@ -63,6 +63,31 @@ if ! ss -ltn 2>/dev/null | grep -q ':8657'; then
 fi
 ss -ltn 2>/dev/null | grep -qE ':865[67]' && echo "  H.264 High 10 simulator listening on 8656/8657"
 
+# A second 10-bit camera, so two transcodes genuinely compete for a slot.
+# One is not enough to exercise the concurrency cap: Firefox reports HEVC as
+# supported, so the H.265 camera is served its own bytes and never queues.
+if ! ss -ltn 2>/dev/null | grep -q ':8659'; then
+  WORK="${CAMSTREAM_SIM_DIR:-/tmp/camstream-sim}"
+  mkdir -p "$WORK"
+  if [ ! -f "$WORK/high10b-sub.mp4" ]; then
+    echo "  generating a second H.264 High 10 camera (once)..."
+    # smptebars rather than testsrc: VLC 3 serves RTP over UDP only, and the
+    # busier pattern lost enough packets that ffmpeg gave up decoding it.
+    for spec in "sub:640x360:250k" "main:1280x720:600k"; do
+      name="${spec%%:*}"; rest="${spec#*:}"; size="${rest%%:*}"; rate="${rest##*:}"
+      ffmpeg -nostdin -hide_banner -loglevel error -f lavfi -i "smptebars=size=$size:rate=15" -t 120 \
+        -an -c:v libx264 -profile:v high10 -pix_fmt yuv420p10le -preset veryfast \
+        -g 30 -keyint_min 30 -sc_threshold 0 -b:v "$rate" "$WORK/high10b-$name.mp4"
+    done
+  fi
+  nohup cvlc -q --repeat --no-audio "$WORK/high10b-sub.mp4" \
+    --sout '#rtp{sdp=rtsp://0.0.0.0:8659/sub}' --sout-keep >/dev/null 2>&1 &
+  nohup cvlc -q --repeat --no-audio "$WORK/high10b-main.mp4" \
+    --sout '#rtp{sdp=rtsp://0.0.0.0:8658/main}' --sout-keep >/dev/null 2>&1 &
+  sleep 5
+fi
+ss -ltn 2>/dev/null | grep -qE ':865[89]' && echo "  second High 10 simulator listening on 8658/8659"
+
 echo "Starting the agent for ${MINUTES} minutes..."
 nohup timeout "$((MINUTES * 60))" java -jar "$ROOT/agent/target/camstream-agent.jar" \
   "$DEVICE/agent.yaml" > "$LOG" 2>&1 &
