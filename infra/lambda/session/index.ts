@@ -98,7 +98,10 @@ export async function handler(
   }
 
   const now = Math.floor(Date.now() / 1000);
-  await writeSession(ddb, TABLE, userSub, { sessionId, tenantId, issuedAt: now });
+  // Recording the sign-in identity is what lets every other route detect that
+  // this session has since been displaced.
+  const originJti = typeof claims.origin_jti === 'string' ? claims.origin_jti : undefined;
+  await writeSession(ddb, TABLE, userSub, { sessionId, tenantId, issuedAt: now, originJti });
 
   const expiresAt = now + SESSION_TTL_SECONDS;
 

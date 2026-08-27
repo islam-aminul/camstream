@@ -1,5 +1,6 @@
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, QueryCommand } from '@aws-sdk/lib-dynamodb';
+import { sessionSuperseded } from '../shared/session';
 import type { APIGatewayProxyEventV2WithJWTAuthorizer, APIGatewayProxyStructuredResultV2 } from 'aws-lambda';
 import { isValidId, premisesScope, withinScope } from '../shared/tenant';
 import { fail, json } from '../shared/http';
@@ -29,6 +30,10 @@ export async function handler(
     return fail(403, 'Account is not associated with a valid tenant');
   }
   const scope = premisesScope(claims as Record<string, unknown> | undefined);
+
+  if (await sessionSuperseded(ddb, TABLE, String(claims?.sub ?? ''), claims as Record<string, unknown>)) {
+    return fail(409, 'Session superseded by a newer sign-in');
+  }
 
   const result = await ddb.send(
     new QueryCommand({

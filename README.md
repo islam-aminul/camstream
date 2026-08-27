@@ -383,8 +383,13 @@ A user sees every camera belonging to their tenant, and no others.
 - **Latency is ~5s**, not sub-second. Sub-second needs blocking playlist
   reloads, which S3 cannot do. Genuine sub-second would mean WebRTC.
 - **One session per account.** Signing in anywhere invalidates the previous
-  session. Because CloudFront has no cookie revocation list, the displaced
-  session keeps working until its cookies lapse — hence the 5-minute TTL.
+  one, and every authenticated route enforces it — not only those that carry a
+  session id. The check compares Cognito's `origin_jti`, which survives a token
+  refresh but changes on a fresh sign-in, so a displaced device loses API access
+  immediately despite holding a valid unexpired token. Media playback is the one
+  exception: CloudFront has no cookie revocation list, so a displaced viewer can
+  still fetch segments until its cookies lapse, which is why that TTL is five
+  minutes rather than hours.
 - **One main stream per viewer.** Grid view uses camera sub-streams; opening a
   camera switches that one to its main stream.
 - **FFmpeg must be an LGPL build.** Run `scripts/check-ffmpeg-license.sh`.
