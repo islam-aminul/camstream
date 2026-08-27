@@ -532,3 +532,31 @@ code { font-family: var(--mono); font-size: 12px; }
   .scope-field { flex: 1; }
   .scope-field select { min-width: 0; width: 100%; }
 }
+
+/* A camera's two addresses, shown together because the identity comes from one
+   of them and the other is how you reach the camera's own web interface. */
+.addresses {
+  display: flex; align-items: center; gap: var(--sp-4); flex-wrap: wrap;
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+}
+.addresses > span { display: flex; align-items: center; gap: 6px; }
+.addr-label {
+  font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--text-faint);
+}
+.addresses code { color: var(--text); font-size: 12px; }
+
+/* Administration reuses the shell chrome; only the density differs, because a
+   table of agents wants tighter rows than a wall of video wants. */
+.admin .stack { max-width: 1180px; width: 100%; margin: 0 auto; }
+.admin .card-head {
+  display: flex; align-items: baseline; justify-content: space-between;
+  gap: var(--sp-3); flex-wrap: wrap;
+}
+.admin .card-head strong { font-size: 14px; }
+.admin .card-head code { font-size: 11px; }
+.notice.error { background: rgba(224, 106, 106, 0.12); border-color: rgba(224, 106, 106, 0.45); }

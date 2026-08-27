@@ -457,6 +457,10 @@ async function listDiscovered(caller: Caller) {
         identity: record.identity,
         identityStable: record.identityStable,
         macAddress: record.macAddress,
+        // The identity is derived from the MAC where one was readable, so
+        // showing both makes the derivation visible rather than magic.
+        identifiedBy: record.identity?.startsWith('mac-') ? 'mac'
+          : record.identity?.startsWith('sn-') ? 'serial' : 'address',
         manufacturer: record.manufacturer,
         model: record.model,
         lastSeen: record.lastSeen,

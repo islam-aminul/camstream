@@ -43,6 +43,15 @@ public final class DiscoveredCamera {
 
     public String ipAddress;
     public String macAddress;
+
+    /**
+     * Other identities this same camera would have been given.
+     *
+     * An approval recorded before the MAC could be read names one of these.
+     * Matching on them means a camera keeps publishing across a change of
+     * identity scheme rather than going dark until somebody notices.
+     */
+    public List<String> alternateIds = List.of();
     public String manufacturer;
     public String model;
     public String firmware;
@@ -97,6 +106,7 @@ public final class DiscoveredCamera {
         copy.identityStable = identityStable;
         copy.ipAddress = ipAddress;
         copy.macAddress = macAddress;
+        copy.alternateIds = List.copyOf(alternateIds);
         copy.manufacturer = manufacturer;
         copy.model = model;
         copy.firmware = firmware;

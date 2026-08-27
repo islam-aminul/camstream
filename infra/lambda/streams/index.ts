@@ -21,6 +21,8 @@ interface CameraRecord {
   profiles?: string[];
   sourceCodec?: string;
   sourceCodecProfile?: string;
+  ipAddress?: string;
+  macAddress?: string;
 }
 
 export async function handler(
@@ -78,6 +80,8 @@ export async function handler(
       // Grouping and filtering keys. The thing name already encodes premises,
       // but parsing it in the client would tie the UI to that format.
       premisesId: parseThingName(String(record.thingName ?? ''))?.premisesId ?? null,
+      ipAddress: record.ipAddress ?? null,
+      macAddress: record.macAddress ?? null,
       siteName: siteOf.get(String(record.thingName ?? '')) ?? null,
       // Every URL is returned, but a rendition only exists in S3 while some
       // viewer has asked for it via /api/watch. The player picks `source` when

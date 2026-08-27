@@ -242,6 +242,14 @@ public final class DeviceClient {
             if (camera.sourceCodecProfile != null && !camera.sourceCodecProfile.isBlank()) {
                 node.put("sourceCodecProfile", camera.sourceCodecProfile);
             }
+            // Where it is and what it is, so the console can show both beside
+            // the identity without the operator opening the discovery list.
+            if (camera.ipAddress != null && !camera.ipAddress.isBlank()) {
+                node.put("ipAddress", camera.ipAddress);
+            }
+            if (camera.macAddress != null && !camera.macAddress.isBlank()) {
+                node.put("macAddress", camera.macAddress);
+            }
             ArrayNode profiles = node.putArray("profiles");
             for (StreamProfile profile : StreamProfile.values()) {
                 if (camera.supports(profile)) {

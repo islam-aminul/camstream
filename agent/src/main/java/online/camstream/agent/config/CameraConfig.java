@@ -67,6 +67,17 @@ public final class CameraConfig {
     public String sourceCodec;
 
     /**
+     * Where this camera is on the local network, for the console to show.
+     *
+     * Reported rather than derived from the stream URL, which embeds
+     * credentials and must never leave the agent.
+     */
+    public String ipAddress;
+
+    /** Its hardware address, which is also its identity where one was readable. */
+    public String macAddress;
+
+    /**
      * The codec profile the camera produces, e.g. "Main" or "High 10".
      *
      * Carried separately from the codec name because it decides playability on
