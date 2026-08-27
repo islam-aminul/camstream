@@ -32,8 +32,26 @@ public final class HlsPublisher {
 
     private static final String PLAYLIST = "index.m3u8";
 
-    /** By name: ffmpeg never rewrites a segment once it is closed. */
-    private final Set<String> uploaded = new HashSet<>();
+    /**
+     * By name: ffmpeg never rewrites a segment once it is closed.
+     *
+     * Bounded, because this used to be a plain HashSet that was only ever
+     * added to. At two-second segments a stable camera adds some forty
+     * thousand names a day, and stable is the normal case — a pipeline only
+     * restarts when its camera drops. ffmpeg has already deleted anything
+     * older than the playlist window, so remembering a few multiples of it is
+     * ample to avoid re-uploading.
+     */
+    private final Set<String> uploaded = java.util.Collections.newSetFromMap(
+            new java.util.LinkedHashMap<>() {
+                @Override
+                protected boolean removeEldestEntry(java.util.Map.Entry<String, Boolean> eldest) {
+                    return size() > uploadedMemory;
+                }
+            });
+
+    /** How many segment names to remember. Set from the playlist window. */
+    private int uploadedMemory = 64;
 
     private final S3Client s3;
     private final String bucket;
@@ -47,6 +65,9 @@ public final class HlsPublisher {
     public HlsPublisher(S3Client s3, String bucket, String keyPrefix, Path directory, String label,
                         int windowSize) {
         this(s3, bucket, keyPrefix, directory, label, new PlaylistBuilder(windowSize));
+        // Several windows' worth: ffmpeg has already deleted anything older,
+        // so this only has to be long enough not to re-upload.
+        this.uploadedMemory = Math.max(32, windowSize * 8);
     }
 
     HlsPublisher(S3Client s3, String bucket, String keyPrefix, Path directory, String label,
@@ -58,6 +79,7 @@ public final class HlsPublisher {
         this.directory = directory;
         this.label = label;
     }
+
 
     /**
      * Signals that ffmpeg restarted, so the next segment carries a
