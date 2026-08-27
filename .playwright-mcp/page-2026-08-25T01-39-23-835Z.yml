@@ -1,9 +1,0 @@
-- generic [ref=e4]:
-  - heading "CamStream" [level=1] [ref=e5]
-  - generic [ref=e6]:
-    - text: Email
-    - textbox "Email" [ref=e7]: aminulislam@outlook.com
-  - generic [ref=e8]:
-    - text: Password
-    - textbox "Password" [ref=e9]: CamStream-Demo-2026!
-  - button "Working…" [disabled] [ref=e11]

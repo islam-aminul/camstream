@@ -1,0 +1,19 @@
+# Line endings are normalised in the repository and checked out as-is.
+#
+# Without this, editing on Windows commits CRLF into files the rest of the
+# tree stores as LF, and the difference shows up as a whole-file diff the next
+# time anyone touches them on another platform. The shell scripts matter most:
+# a .sh with CRLF fails at the shebang with "bad interpreter", which is an
+# obscure way to discover a line-ending problem.
+* text=auto eol=lf
+
+# Genuinely binary, so never touched.
+*.png binary
+*.jpg binary
+*.mp4 binary
+*.jar binary
+*.pem -text
+
+# Windows scripts are run by Windows tools, which want CRLF.
+*.ps1 text eol=crlf
+*.xml text eol=crlf
