@@ -55,6 +55,7 @@ public final class DeviceClient {
     private final String base;
     private final String agentVersion;
 
+
     private final Supplier<String> publicKey;
     private final Supplier<List<DiscoveredCamera>> discovered;
     private final Supplier<List<?>> taskHealth;
@@ -86,8 +87,13 @@ public final class DeviceClient {
         this.base = config.apiInvokeUrl.endsWith("/")
                 ? config.apiInvokeUrl.substring(0, config.apiInvokeUrl.length() - 1)
                 : config.apiInvokeUrl;
+        this.agentVersion = version();
+    }
+
+    /** The version stamped into the jar's manifest, or "dev" from a checkout. */
+    public static String version() {
         String implVersion = DeviceClient.class.getPackage().getImplementationVersion();
-        this.agentVersion = implVersion == null ? "dev" : implVersion;
+        return implVersion == null ? "dev" : implVersion;
     }
 
     /**
@@ -218,6 +224,12 @@ public final class DeviceClient {
             node.put("displayName", camera.name);
             if (camera.sourceCodec != null && !camera.sourceCodec.isBlank()) {
                 node.put("sourceCodec", camera.sourceCodec);
+            }
+            // The profile travels with the codec because it decides playability
+            // on its own: H.264 High 10 carries codec name "h264" and no
+            // browser will decode it.
+            if (camera.sourceCodecProfile != null && !camera.sourceCodecProfile.isBlank()) {
+                node.put("sourceCodecProfile", camera.sourceCodecProfile);
             }
             ArrayNode profiles = node.putArray("profiles");
             for (StreamProfile profile : StreamProfile.values()) {

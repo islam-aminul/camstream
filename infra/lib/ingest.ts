@@ -142,6 +142,24 @@ export class Ingest extends Construct {
               }),
             ],
           },
+          {
+            // The agent's only outbound topic, and it may publish under its own
+            // thing name and nowhere else. That restriction is what makes the
+            // heartbeat rule's SQL safe: it derives the tenant and device from
+            // the topic, which IoT has authenticated against the certificate,
+            // rather than from the payload, which the agent could say anything
+            // in. A compromised agent can therefore lie about its own health
+            // and nothing else — it cannot write a health record over another
+            // tenant's.
+            Sid: 'PublishOwnHealth',
+            Effect: 'Allow',
+            Action: 'iot:Publish',
+            Resource: stack.formatArn({
+              service: 'iot',
+              resource: 'topic',
+              resourceName: 'camstream/${iot:Connection.Thing.ThingName}/heartbeat',
+            }),
+          },
         ],
       },
     });

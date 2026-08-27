@@ -199,7 +199,13 @@ async function deletePremises(caller: Caller, premisesId: string | undefined) {
 
 async function listAgents(caller: Caller) {
   if (!can(caller, 'manageEstate')) return fail(403, 'Not permitted to list agents');
-  const devices = await queryPrefix<Record<string, unknown>>(caller.tenantId, 'DEVICE#');
+  // Health arrives on its own item, written directly by an IoT rule, so it is
+  // read alongside the registration rather than being part of it.
+  const [devices, health] = await Promise.all([
+    queryPrefix<Record<string, unknown>>(caller.tenantId, 'DEVICE#'),
+    queryPrefix<Record<string, unknown>>(caller.tenantId, 'HEALTH#'),
+  ]);
+  const healthOf = new Map(health.map((h) => [String(h.thingName), h]));
   return json(200, {
     agents: devices
       .filter((d) => visible(caller, d.premisesId as string | undefined))
@@ -217,8 +223,34 @@ async function listAgents(caller: Caller) {
         taskHealth: device.taskHealth ?? [],
         credentialPublicKey: device.credentialPublicKey ?? null,
         enrolled: device.credentialPublicKey != null,
+        // A connected agent whose heartbeat has stopped is the case presence
+        // events cannot see: the socket is up and the agent is stuck.
+        health: heartbeat(healthOf.get(String(device.thingName))),
       })),
   });
+}
+
+/**
+ * Shapes one agent's last heartbeat for the console.
+ *
+ * Deliberately reports the raw timestamp and lets the caller judge staleness:
+ * what counts as overdue depends on whether the agent is streaming, and the
+ * console knows that from the same response.
+ */
+function heartbeat(record: Record<string, unknown> | undefined) {
+  if (!record) return null;
+  return {
+    at: record.heartbeatAt ?? null,
+    healthy: record.healthy !== false,
+    failingTasks:
+      typeof record.failingTasks === 'string' && record.failingTasks.length > 0
+        ? record.failingTasks.split(',')
+        : [],
+    publishing: record.publishing ?? 0,
+    uptimeSeconds: record.uptimeSeconds ?? null,
+    camerasConfigured: record.camerasConfigured ?? null,
+    agentVersion: record.agentVersion ?? null,
+  };
 }
 
 /**

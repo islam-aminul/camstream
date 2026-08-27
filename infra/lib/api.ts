@@ -153,6 +153,65 @@ export class Api extends Construct {
       },
     });
 
+    // Health, as opposed to liveness. Presence says the socket is up; it
+    // cannot say whether the agent is doing anything useful, and the failures
+    // that strand a site — a wedged encoder, a camera refusing every
+    // connection, a full disk — leave the socket perfectly healthy.
+    //
+    // This writes straight to DynamoDB with no Lambda in the path, so a
+    // heartbeat costs one MQTT message and one 100-byte write. That is what
+    // makes the cadence affordable to keep at all: at the idle rate an agent
+    // costs a few cents a year to monitor.
+    const heartbeatRole = new iam.Role(this, 'HeartbeatRuleRole', {
+      assumedBy: new iam.ServicePrincipal('iot.amazonaws.com'),
+      description: 'Lets the heartbeat topic rule write agent health',
+    });
+    heartbeatRole.addToPolicy(
+      new iam.PolicyStatement({
+        // PutItem only: a rule that could read the table would be able to
+        // exfiltrate every tenant's registry through a crafted payload.
+        actions: ['dynamodb:PutItem'],
+        resources: [registryTable.tableArn],
+      }),
+    );
+
+    new iot.CfnTopicRule(this, 'HeartbeatRule', {
+      ruleName: 'camstream_agent_heartbeat',
+      topicRulePayload: {
+        description: 'Agent health heartbeats to the registry',
+        // The thing name is taken from the topic, never from the payload: a
+        // certificate is only allowed to publish under its own thing name, so
+        // the topic is authenticated and the payload is not.
+        sql: [
+          // The tenant is the thing name up to its first separator. IoT SQL
+          // has no split, so this indexes to the separator directly.
+          "SELECT concat('TENANT#', substring(topic(2), 0, indexof(topic(2), '--'))) AS pk,",
+          "concat('HEALTH#', topic(2)) AS sk,",
+          'topic(2) AS thingName,',
+          'agentVersion, uptimeSeconds, publishing, camerasConfigured,',
+          'healthy, failingTasks,',
+          'floor(timestamp() / 1000) AS heartbeatAt,',
+          // Health is only ever read as "the latest"; a record nobody replaced
+          // in three days describes an agent that is long gone.
+          'floor(timestamp() / 1000) + 259200 AS expiresAt',
+          "FROM 'camstream/+/heartbeat'",
+        ].join(' '),
+        awsIotSqlVersion: '2016-03-23',
+        ruleDisabled: false,
+        actions: [
+          {
+            // A separate item from the device record, because this action puts
+            // rather than updates: writing it onto DEVICE# would replace
+            // everything else the agent's registration holds.
+            dynamoDBv2: {
+              putItem: { tableName: registryTable.tableName },
+              roleArn: heartbeatRole.roleArn,
+            },
+          },
+        ],
+      },
+    });
+
     // The MQTT data endpoint is account-specific and has no CloudFormation
     // attribute, so it is resolved once at deploy time.
     const iotEndpoint = new cr.AwsCustomResource(this, 'IotDataEndpoint', {

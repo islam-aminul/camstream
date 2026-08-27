@@ -26,7 +26,15 @@ final class RtspProbe {
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final int TIMEOUT_SECONDS = 15;
 
-    record Result(String codec, Integer width, Integer height, Integer fps) {}
+    /**
+     * What the stream actually carries.
+     *
+     * Profile and level matter as much as the codec name: a browser rejects
+     * H.264 High 10 as firmly as it rejects HEVC, and a player told only
+     * "h264" will accept the stream and then fail to decode it silently.
+     */
+    record Result(String codec, Integer width, Integer height, Integer fps,
+                  String profile, Integer level) {}
 
     private final String ffprobePath;
 
@@ -43,7 +51,7 @@ final class RtspProbe {
                 // Bound the wait: an unreachable camera must not stall a scan.
                 "-timeout", String.valueOf(TIMEOUT_SECONDS * 1_000_000L),
                 "-select_streams", "v:0",
-                "-show_entries", "stream=codec_name,width,height,avg_frame_rate",
+                "-show_entries", "stream=codec_name,width,height,avg_frame_rate,profile,level",
                 "-of", "json",
                 rtspUrl);
         try {
@@ -66,7 +74,11 @@ final class RtspProbe {
                     stream.path("codec_name").asText(null),
                     stream.hasNonNull("width") ? stream.get("width").asInt() : null,
                     stream.hasNonNull("height") ? stream.get("height").asInt() : null,
-                    parseFrameRate(stream.path("avg_frame_rate").asText(null)));
+                    parseFrameRate(stream.path("avg_frame_rate").asText(null)),
+                    stream.hasNonNull("profile") ? stream.get("profile").asText() : null,
+                    // ffprobe reports -99 when the level is unknown.
+                    stream.hasNonNull("level") && stream.get("level").asInt() > 0
+                            ? stream.get("level").asInt() : null);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             return null;

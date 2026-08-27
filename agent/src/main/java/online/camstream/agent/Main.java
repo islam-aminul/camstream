@@ -13,6 +13,7 @@ import online.camstream.agent.iot.IotCredentialsProvider;
 import online.camstream.agent.provisioning.FleetProvisioner;
 import online.camstream.agent.provisioning.IdentityFile;
 import online.camstream.agent.publish.DeviceClient;
+import online.camstream.agent.publish.Heartbeat;
 import online.camstream.agent.supervise.Supervisor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -44,6 +45,15 @@ public final class Main {
 
     /** How often ffmpeg output is swept into S3. Well under one segment. */
     private static final Duration SYNC_INTERVAL = Duration.ofMillis(250);
+
+    /**
+     * How often the heartbeat is *considered*, not how often it is sent.
+     *
+     * The interval that matters is chosen inside {@link Heartbeat} from whether
+     * anything is being watched, so this only has to be fine-grained enough not
+     * to blunt it. It costs a wakeup and nothing else.
+     */
+    private static final Duration HEARTBEAT_TICK = Duration.ofSeconds(20);
 
     public static void main(String[] args) throws Exception {
         if (args.length != 1) {
@@ -98,9 +108,46 @@ public final class Main {
              StreamManager manager = new StreamManager(config, s3, registry);
              Supervisor supervisor = new Supervisor(3)) {
 
+            // The listener does not exist until its handlers do, and its
+            // handlers need to reach it; this closes that loop.
+            java.util.concurrent.atomic.AtomicReference<WatchListener> watch =
+                    new java.util.concurrent.atomic.AtomicReference<>();
+
             DeviceClient device = new DeviceClient(
                     config, awsCredentials, keypair::publicKeyBase64, discovery::redactedResults,
                     () -> List.copyOf(supervisor.health()), envelope, credentialStore, registry);
+
+            Heartbeat heartbeat = new Heartbeat(
+                    (suffix, payload) -> {
+                        WatchListener listener = watch.get();
+                        if (listener == null) {
+                            // onConnected fires from inside the listener's own
+                            // constructor, before the reference is published.
+                            // Failing here leaves lastSent unset, so the next
+                            // tick sends it twenty seconds later.
+                            throw new IllegalStateException("MQTT listener not ready");
+                        }
+                        listener.publish(suffix, payload);
+                    },
+                    new Heartbeat.Vitals() {
+                        @Override
+                        public int publishing() {
+                            return manager.publishing();
+                        }
+
+                        @Override
+                        public int camerasConfigured() {
+                            return registry.all().size();
+                        }
+
+                        @Override
+                        public List<Supervisor.TaskHealth> taskHealth() {
+                            return supervisor.health();
+                        }
+                    },
+                    DeviceClient.version(),
+                    Duration.ofMinutes(config.heartbeatActiveMinutes),
+                    Duration.ofMinutes(config.heartbeatIdleMinutes));
 
             WatchListener.Handlers handlers = new WatchListener.Handlers() {
                 @Override
@@ -131,11 +178,16 @@ public final class Main {
                     // a network outage, when a config push may have been missed.
                     device.report(true);
                     device.fetchConfig(-1);
+                    // First thing after a reconnect: say what state the agent
+                    // came back in, rather than waiting out the interval.
+                    heartbeat.sendNow();
                 }
             };
 
-            try (WatchListener ignored = new WatchListener(config, handlers)) {
+            try (WatchListener listener = new WatchListener(config, handlers)) {
+                watch.set(listener);
                 supervisor.supervise(new Supervisor.Task("publish", SYNC_INTERVAL, manager::tick));
+                supervisor.supervise(new Supervisor.Task("heartbeat", HEARTBEAT_TICK, heartbeat::tick));
 
                 if (config.discoveryEnabled) {
                     supervisor.supervise(new Supervisor.Task(

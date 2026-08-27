@@ -207,6 +207,14 @@ async function writeCameras(pk: string, thingName: string, cameras: unknown[], n
             typeof camera.sourceCodec === 'string' && /^[a-z0-9]{1,12}$/i.test(camera.sourceCodec)
               ? camera.sourceCodec.toLowerCase()
               : undefined,
+          // ffprobe's profile names carry spaces, digits and colons — "High
+          // 4:2:2" — so this is bounded and character-classed rather than
+          // matched against a fixed list the next codec would break.
+          sourceCodecProfile:
+            typeof camera.sourceCodecProfile === 'string'
+            && /^[a-z0-9 :.+-]{1,32}$/i.test(camera.sourceCodecProfile)
+              ? camera.sourceCodecProfile.toLowerCase()
+              : undefined,
           profiles: Array.isArray(camera.profiles)
             ? camera.profiles.filter((p): p is string => p === 'sub' || p === 'main')
             : ['sub'],

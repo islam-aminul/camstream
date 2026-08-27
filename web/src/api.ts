@@ -10,29 +10,75 @@ export interface Camera {
   profiles: string[];
   /** Codec the camera emits natively. */
   sourceCodec: string;
+  /**
+   * The codec profile, where the agent could determine it.
+   *
+   * Carried separately because it decides playability on its own: H.264 High
+   * 10 reports the same codec name as the H.264 every browser decodes.
+   */
+  sourceCodecProfile?: string | null;
   manifestUrl: { sub: string; main: string; subH264: string; mainH264: string; master: string };
+}
+
+/**
+ * H.264 profiles that carry the codec name but no browser support.
+ *
+ * The 10-bit and higher-chroma variants. A camera emitting one of these calls
+ * itself H.264 in its own web UI, reports h264 over ONVIF, and is decoded by
+ * nothing — which is precisely why the codec name cannot be the whole test.
+ *
+ * Mirrors `lambda/shared/playability.ts`; the two are separate builds, and a
+ * divergence shows up as a viewer being offered a rendition the control plane
+ * declines to publish.
+ */
+const UNPLAYABLE_H264_PROFILES = new Set([
+  'high 10',
+  'high 10 intra',
+  'high 4:2:2',
+  'high 4:2:2 intra',
+  'high 4:4:4 predictive',
+  'high 4:4:4 intra',
+  'cavlc 4:4:4',
+]);
+
+function isH264(codec: string | undefined): boolean {
+  const value = (codec ?? 'h264').toLowerCase();
+  return value === 'h264' || value === 'avc' || value === 'avc1';
+}
+
+/**
+ * An unrecognised profile counts as playable: guessing the other way would
+ * transcode streams that never needed it, spending the customer's edge CPU.
+ */
+function isUnplayableH264(camera: Camera): boolean {
+  return (
+    isH264(camera.sourceCodec)
+    && UNPLAYABLE_H264_PROFILES.has((camera.sourceCodecProfile ?? '').toLowerCase().trim())
+  );
+}
+
+/** Whether this browser can decode what the camera actually emits. */
+export function playsNatively(camera: Camera): boolean {
+  if (isH264(camera.sourceCodec)) {
+    // Ordinary H.264 is the universal floor; the exotic profiles are in
+    // nobody's supported list, whatever their codec name suggests.
+    return !isUnplayableH264(camera);
+  }
+  return supports(camera.sourceCodec ?? 'h264');
 }
 
 /**
  * Whether a transcoded rendition would actually help.
  *
- * Mirrors the control plane's rule exactly. H.264 is the universal floor, so a
- * camera already emitting it has no better variant to offer — asking for one
- * yields a path the agent is never told to publish, and the player waits on a
- * 403 forever. A browser that cannot decode H.264 cannot be helped by
- * transcoding to H.264.
+ * The agent transcodes to 8-bit H.264, so it helps exactly when this browser
+ * can decode that and cannot decode the source. A browser that cannot decode
+ * H.264 at all cannot be helped by transcoding to H.264.
  */
 export function transcodeWouldHelp(camera: Camera): boolean {
-  const codec = (camera.sourceCodec ?? 'h264').toLowerCase();
-  if (codec === 'h264' || codec === 'avc' || codec === 'avc1') {
+  if (playsNatively(camera)) {
     return false;
   }
   return supports('h264');
-}
-
-/** Whether this browser can decode what the camera actually emits. */
-export function playsNatively(camera: Camera): boolean {
-  return supports(camera.sourceCodec ?? 'h264');
 }
 
 /**

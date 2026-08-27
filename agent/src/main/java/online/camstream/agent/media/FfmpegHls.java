@@ -118,9 +118,11 @@ public final class FfmpegHls implements AutoCloseable {
         if (rendition.variant() == Variant.SOURCE) {
             return EncoderProfile.COPY;
         }
-        boolean alreadyH264 = camera.sourceCodec != null
-                && camera.sourceCodec.toLowerCase(java.util.Locale.ROOT).matches("h264|avc1?");
-        if (alreadyH264) {
+        // Deliberately not "is it already H.264": High 10 is H.264 and no
+        // browser decodes it, so a camera emitting it needs the transcode just
+        // as much as an HEVC one. Copying because the codec name matched left
+        // the viewer with the same unplayable stream they asked us to fix.
+        if (camera.browserPlayable()) {
             return EncoderProfile.COPY;
         }
         EncoderProfile configured = EncoderProfile.fromKey(camera.encoder);

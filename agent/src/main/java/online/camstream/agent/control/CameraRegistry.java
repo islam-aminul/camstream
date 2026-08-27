@@ -157,8 +157,12 @@ public final class CameraRegistry {
             camera.mainHeight = main.height;
             camera.mainBitrateKbps = main.bitrateKbps;
             camera.sourceCodec = main.codec;
+            camera.sourceCodecProfile = main.codecProfile;
+            camera.sourceCodecLevel = main.codecLevel;
         } else if (sub != null) {
             camera.sourceCodec = sub.codec;
+            camera.sourceCodecProfile = sub.codecProfile;
+            camera.sourceCodecLevel = sub.codecLevel;
         }
 
         camera.validate();

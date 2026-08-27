@@ -28,7 +28,8 @@ public final class MasterPlaylist {
 
     private static final Logger log = LoggerFactory.getLogger(MasterPlaylist.class);
 
-    public record Rung(StreamProfile profile, String path, int width, int height, int bandwidthBps, String codec) {}
+    public record Rung(StreamProfile profile, String path, int width, int height, int bandwidthBps,
+                       String codec, String codecProfile, Integer codecLevel) {}
 
     private MasterPlaylist() {
     }
@@ -56,7 +57,7 @@ public final class MasterPlaylist {
         for (Rung rung : usable) {
             playlist.append("#EXT-X-STREAM-INF:BANDWIDTH=").append(rung.bandwidthBps())
                     .append(",RESOLUTION=").append(rung.width()).append('x').append(rung.height());
-            String codecs = rfc6381(rung.codec());
+            String codecs = rfc6381(rung.codec(), rung.codecProfile(), rung.codecLevel());
             if (codecs != null) {
                 playlist.append(",CODECS=\"").append(codecs).append('"');
             }
@@ -108,28 +109,84 @@ public final class MasterPlaylist {
         List<Rung> estimated = new ArrayList<>(rungs.size());
         for (Rung rung : rungs) {
             estimated.add(new Rung(rung.profile(), rung.path(), rung.width(), rung.height(),
-                    estimateBandwidth(rung.width(), rung.height(), null), rung.codec()));
+                    estimateBandwidth(rung.width(), rung.height(), null),
+                    rung.codec(), rung.codecProfile(), rung.codecLevel()));
         }
         return estimated;
     }
 
     /**
-     * CODECS is advisory but players use it to decide whether they can play a
-     * rung before fetching it — a wrong value is worse than none, so only the
-     * two codecs actually produced here are described, and conservatively.
+     * The RFC 6381 codec string for a rung, derived from what the stream
+     * actually carries.
+     *
+     * This used to answer "avc1.42E01E" for anything H.264, on the reasoning
+     * that understating the profile is safe. It is not. A browser reads CODECS
+     * to decide whether to even attempt a rung, and every browser refuses
+     * H.264 High 10 — a 10-bit profile some cameras emit by default. Described
+     * as Baseline, that stream is accepted, fetched, and then silently fails to
+     * decode, which looks to a viewer exactly like a broken camera. Described
+     * honestly, the player rejects it up front and CamStream can offer the
+     * transcode that actually fixes it.
      */
-    static String rfc6381(String codec) {
+    static String rfc6381(String codec, String profile, Integer level) {
         if (codec == null) {
             return null;
         }
         return switch (codec.toLowerCase()) {
-            // Baseline 3.0: understates the profile deliberately. Claiming a
-            // higher one than the camera emits would have players reject a
-            // stream they could in fact decode.
-            case "h264", "avc", "avc1" -> "avc1.42E01E";
-            case "hevc", "h265" -> "hvc1.1.6.L93.B0";
+            case "h264", "avc", "avc1" -> avc1(profile, level);
+            case "hevc", "h265" -> hvc1(profile, level);
             default -> null;
         };
+    }
+
+    /**
+     * avc1.PPCCLL — profile_idc, constraint flags, level_idc, each two hex
+     * digits. The constraint byte is part of the profile's identity here:
+     * Constrained Baseline and Main both set flags that a decoder matches on.
+     */
+    private static String avc1(String profile, Integer level) {
+        String name = profile == null ? "" : profile.toLowerCase();
+        String profileAndConstraints = switch (name) {
+            case "baseline", "constrained baseline" -> "42E0";
+            case "main" -> "4D40";
+            case "extended" -> "5800";
+            case "high" -> "6400";
+            case "high 10", "high 10 intra" -> "6E00";
+            case "high 4:2:2", "high 4:2:2 intra" -> "7A00";
+            case "high 4:4:4 predictive", "high 4:4:4 intra" -> "F400";
+            // An unrecognised profile is not a licence to guess: without a
+            // CODECS attribute the player probes the stream itself, which is
+            // slower but cannot be wrong.
+            default -> null;
+        };
+        if (profileAndConstraints == null) {
+            return null;
+        }
+        // ffprobe reports level scaled by ten, so 40 means level 4.0 and
+        // level_idc is that same number, written in hex.
+        int levelIdc = level == null || level <= 0 ? 30 : level;
+        return "avc1." + profileAndConstraints + String.format("%02X", Math.min(levelIdc, 255));
+    }
+
+    /**
+     * hvc1.P.C.LTT.B — profile, compatibility flags, tier and level, then
+     * constraint bytes. Only the Main family is described; anything else gets
+     * no CODECS attribute rather than a wrong one.
+     */
+    private static String hvc1(String profile, Integer level) {
+        String name = profile == null ? "main" : profile.toLowerCase();
+        int profileIdc = switch (name) {
+            case "main" -> 1;
+            case "main 10" -> 2;
+            case "main still picture" -> 3;
+            default -> 0;
+        };
+        if (profileIdc == 0) {
+            return null;
+        }
+        // HEVC level_idc is the level times thirty: 93 is level 3.1, 120 is 4.0.
+        int levelIdc = level == null || level <= 0 ? 93 : level;
+        return "hvc1." + profileIdc + ".6.L" + levelIdc + ".B0";
     }
 
     /** Bandwidth hint from resolution when the camera reports no bitrate. */

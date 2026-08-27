@@ -138,3 +138,23 @@ button.link {
 .player-overlay.unplayable small { color: var(--muted); font-size: 11px; max-width: 30ch; }
 .player-overlay.unplayable button { font-size: 13px; padding: 6px 12px; }
 .tile-label .badge { margin-left: 8px; }
+
+/* Stream telemetry, shown only where a single camera is being looked at. */
+.player-stats { position: absolute; left: 8px; bottom: 8px; z-index: 2; }
+.player-stats-badge {
+  font: inherit; font-size: 11px; font-variant-numeric: tabular-nums;
+  color: var(--text); background: rgba(0, 0, 0, 0.62); border: 1px solid var(--line);
+  border-radius: 999px; padding: 3px 10px; cursor: pointer;
+}
+.player-stats-badge:hover { background: rgba(0, 0, 0, 0.8); }
+.player-stats-detail {
+  margin: 6px 0 0; padding: 10px 12px; display: grid; gap: 4px 14px;
+  grid-template-columns: auto 1fr; align-items: baseline;
+  font-size: 11px; font-variant-numeric: tabular-nums;
+  background: rgba(0, 0, 0, 0.82); border: 1px solid var(--line); border-radius: 8px;
+  /* Wide enough for the notes, capped so it never covers the picture. */
+  min-width: 240px; max-width: min(320px, calc(100% - 16px));
+}
+.player-stats-detail dt { color: var(--muted); }
+.player-stats-detail dd { margin: 0; color: var(--text); }
+.player-stats-note { display: block; color: var(--muted); font-size: 10px; }

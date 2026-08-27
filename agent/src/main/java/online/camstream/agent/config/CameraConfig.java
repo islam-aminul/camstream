@@ -67,6 +67,40 @@ public final class CameraConfig {
     public String sourceCodec;
 
     /**
+     * The codec profile the camera produces, e.g. "Main" or "High 10".
+     *
+     * Carried separately from the codec name because it decides playability on
+     * its own: High 10 is H.264 that no browser will decode.
+     */
+    public String sourceCodecProfile;
+
+    /** Codec level times ten, as ffprobe reports it. */
+    public Integer sourceCodecLevel;
+
+    /**
+     * Whether a browser can be expected to decode this camera's own stream.
+     *
+     * H.264 up to High profile is decoded everywhere. The 10-bit and
+     * higher-chroma profiles are not decoded anywhere, despite carrying the
+     * same codec name, and HEVC only on Safari and some Windows builds. An
+     * unknown profile is assumed playable: guessing otherwise would transcode
+     * streams that never needed it, on hardware that may not have an encoder.
+     */
+    public boolean browserPlayable() {
+        if (sourceCodec == null || !sourceCodec.toLowerCase(java.util.Locale.ROOT).matches("h264|avc1?")) {
+            return false;
+        }
+        if (sourceCodecProfile == null || sourceCodecProfile.isBlank()) {
+            return true;
+        }
+        return switch (sourceCodecProfile.toLowerCase(java.util.Locale.ROOT)) {
+            case "high 10", "high 10 intra", "high 4:2:2", "high 4:2:2 intra",
+                 "high 4:4:4 predictive", "high 4:4:4 intra", "cavlc 4:4:4" -> false;
+            default -> true;
+        };
+    }
+
+    /**
      * RTSP lower transport: "tcp" or "udp".
      *
      * TCP by default — on a congested site network UDP packet loss produces

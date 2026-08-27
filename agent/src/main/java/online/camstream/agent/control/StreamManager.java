@@ -73,6 +73,11 @@ public final class StreamManager implements AutoCloseable {
         this.workRoot = Files.createTempDirectory("camstream-");
     }
 
+    /** How many renditions are being published right now. */
+    public int publishing() {
+        return active.size();
+    }
+
     /** Applies a desired state received from the control plane. */
     public synchronized void apply(Set<Rendition> desired) {
         lastInstruction = Instant.now();
@@ -178,14 +183,19 @@ public final class StreamManager implements AutoCloseable {
                 // transcoded rendition is H.264 whatever the camera emits, and
                 // labelling it with the source codec makes a player that cannot
                 // decode that codec reject the very rung produced for it.
-                String rungCodec = rendition.variant() == Variant.H264 ? "h264" : camera.sourceCodec;
+                boolean transcoded = rendition.variant() == Variant.H264 && !camera.browserPlayable();
+                String rungCodec = transcoded ? "h264" : camera.sourceCodec;
+                // A transcoded rung is whatever the encoder was told to emit —
+                // 8-bit Main — not whatever the camera happened to send in.
+                String rungProfile = transcoded ? "Main" : camera.sourceCodecProfile;
+                Integer rungLevel = transcoded ? null : camera.sourceCodecLevel;
                 rungs.add(new MasterPlaylist.Rung(
                         rendition.profile(),
                         // Relative to the camera prefix, where master.m3u8 sits.
                         rendition.keySuffix().substring(cameraId.length() + 1) + "index.m3u8",
                         width, height,
                         MasterPlaylist.estimateBandwidth(width, height, camera.bitrateFor(rendition.profile())),
-                        rungCodec));
+                        rungCodec, rungProfile, rungLevel));
             }
 
             if (MasterPlaylist.publish(s3, config.bucket, config.keyPrefix() + cameraId + "/", rungs)) {

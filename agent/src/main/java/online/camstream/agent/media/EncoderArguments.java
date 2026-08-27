@@ -51,7 +51,19 @@ final class EncoderArguments {
             if (customArgs == null || customArgs.isEmpty()) {
                 throw new IllegalArgumentException("encoder \"custom\" requires encoderArgs");
             }
-            return List.copyOf(customArgs);
+            List<String> custom = new ArrayList<>(customArgs);
+            // Keyframe placement is not a preference, it is what makes the
+            // requested segment duration achievable: the HLS muxer can only cut
+            // on an IDR frame. Left to itself libx264 emits one every 250
+            // frames, which turned a 2-second segment request into 17-second
+            // segments — long enough that viewers gave up before the first one
+            // was published. So it is supplied here unless the operator has
+            // expressed an opinion, which keeps the escape hatch an escape
+            // hatch rather than a way to silently break segmentation.
+            if (!declaresKeyframes(custom)) {
+                custom.addAll(forceKeyFrames(segmentSeconds));
+            }
+            return List.copyOf(custom);
         }
 
         List<String> args = new ArrayList<>();
@@ -74,8 +86,7 @@ final class EncoderArguments {
 
         // Every segment must open on a keyframe or the HLS muxer cannot cut
         // where it was asked to.
-        args.add("-force_key_frames");
-        args.add("expr:gte(t,n_forced*" + segmentSeconds + ")");
+        args.addAll(forceKeyFrames(segmentSeconds));
 
         switch (profile) {
             case NVENC -> {
@@ -90,10 +101,35 @@ final class EncoderArguments {
             case QSV -> args.addAll(List.of("-preset", "veryfast", "-low_power", "1"));
             case AMF -> args.addAll(List.of("-usage", "lowlatency", "-quality", "speed"));
             case VIDEOTOOLBOX -> args.addAll(List.of("-realtime", "1"));
+            case OPENH264 -> args.addAll(List.of("-profile:v", "main"));
             default -> {
             }
         }
         return args;
+    }
+
+    /** Cut a keyframe on every segment boundary, whatever the encoder. */
+    private static List<String> forceKeyFrames(double segmentSeconds) {
+        return List.of("-force_key_frames", "expr:gte(t,n_forced*" + segmentSeconds + ")");
+    }
+
+    /**
+     * Whether custom arguments already control keyframe placement.
+     *
+     * Covers the encoder-agnostic options and the private option strings the
+     * software encoders use, since an operator who has set {@code keyint} in
+     * {@code -x264-params} has plainly decided this for themselves.
+     */
+    private static boolean declaresKeyframes(List<String> args) {
+        for (String arg : args) {
+            String value = arg.toLowerCase(java.util.Locale.ROOT);
+            if (value.equals("-force_key_frames") || value.equals("-g")
+                    || value.equals("-keyint_min") || value.equals("-sc_threshold")
+                    || value.contains("keyint")) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -109,7 +145,10 @@ final class EncoderArguments {
             case QSV -> scaling
                     ? "format=nv12,hwupload=extra_hw_frames=64,scale_qsv=w=-2:h=" + maxHeight
                     : "format=nv12,hwupload=extra_hw_frames=64";
-            default -> scaling ? "scale=-2:" + maxHeight : null;
+            // Eight-bit explicitly: the whole point of this rendition is that
+            // a browser can decode it, and a 10-bit source carried through to a
+            // 10-bit output would be just as unplayable as what it replaced.
+            default -> scaling ? "scale=-2:" + maxHeight + ",format=yuv420p" : "format=yuv420p";
         };
     }
 }

@@ -198,6 +198,7 @@ export default function App() {
             <Player
               src={manifestFor(selected, 'main', transcoding.includes(selected.cameraId))}
               preferHighest
+              showStats
               onUndecodable={() => setUndecodable((ids) =>
                 ids.includes(selected.cameraId) ? ids : [...ids, selected.cameraId])}
               onUnavailable={() => setUnavailable((ids) =>
@@ -272,10 +273,17 @@ export default function App() {
  */
 function Unplayable({ camera, onTranscode }: { camera: Camera; onTranscode: () => void }) {
   const possible = transcodeWouldHelp(camera);
+  // Naming the profile matters when it is the profile that is unplayable:
+  // "cannot play H264" reads as nonsense to someone whose browser plays H.264
+  // perfectly well, and hides that the camera is set to a 10-bit mode.
+  const format = [
+    (camera.sourceCodec ?? '').toUpperCase(),
+    camera.sourceCodecProfile ? `(${camera.sourceCodecProfile})` : '',
+  ].filter(Boolean).join(' ');
   return (
     <div className="player">
       <div className="player-overlay unplayable">
-        <span>This browser cannot play {(camera.sourceCodec ?? '').toUpperCase()}</span>
+        <span>This browser cannot play {format}</span>
         {possible ? (
           <>
             <button onClick={(e) => { e.stopPropagation(); onTranscode(); }}>
