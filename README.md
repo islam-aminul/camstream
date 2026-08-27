@@ -242,6 +242,20 @@ Identifiers are `[a-z0-9-]`, 3–32 chars, and may not contain `--` — that
 sequence separates tenant from device inside the IoT thing name, and the
 CloudFront cookie policy relies on the boundary being unambiguous.
 
+## Running a demo
+
+`scripts/demo-up.sh` starts the H.265 simulator and an agent, so both a real
+camera and a simulated one appear in the browser:
+
+```bash
+./scripts/demo-up.sh 60      # minutes; default 60
+./scripts/demo-down.sh
+```
+
+Cameras begin publishing when a viewer opens the grid and stop about thirty
+seconds after the last one leaves — so an idle demo costs nothing, and the first
+frames take a few seconds to appear.
+
 ## Testing without hardware
 
 `scripts/simulate-camera.sh` stands up a fake camera: ffmpeg generates clips with
