@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Player } from './Player';
-import { SessionSuperseded, listCameras, manifestFor, playable, startSession, watch, type Camera, type SessionInfo } from './api';
+import {
+  SessionSuperseded, listCameras, manifestFor, playsNatively, startSession,
+  transcodeWouldHelp, watch, type Camera, type SessionInfo,
+} from './api';
 import { NewPasswordRequired, completeNewPassword, currentSession, signIn, signOut } from './auth';
 import { Admin } from './Admin';
 import { canAdminister } from './admin';
@@ -14,6 +17,11 @@ export default function App() {
   const [cameras, setCameras] = useState<Camera[]>([]);
   const [selected, setSelected] = useState<Camera | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  /**
+   * Cameras the viewer has asked the agent to transcode. Held here rather than
+   * inferred, because the cost lands on the customer's own hardware.
+   */
+  const [transcoding, setTranscoding] = useState<string[]>([]);
   const [pendingUser, setPendingUser] = useState<CognitoUser | null>(null);
   const [admin, setAdmin] = useState(false);
   const [showAdmin, setShowAdmin] = useState(false);
@@ -22,6 +30,8 @@ export default function App() {
   // selection changes.
   const selectedRef = useRef<Camera | null>(null);
   selectedRef.current = selected;
+  const transcodingRef = useRef<string[]>([]);
+  transcodingRef.current = transcoding;
 
   const endSession = useCallback(async (message: string | null) => {
     await signOut();
@@ -30,6 +40,7 @@ export default function App() {
     setSelected(null);
     setAdmin(false);
     setShowAdmin(false);
+    setTranscoding([]);
     setNotice(message);
     setScreen('login');
   }, []);
@@ -78,6 +89,7 @@ export default function App() {
           session.sessionId,
           true,
           pinned ? { thingName: pinned.thingName, cameraId: pinned.cameraId } : undefined,
+          transcodingRef.current,
         );
         if (!cancelled) {
           const { cameras: list } = await listCameras();
@@ -108,8 +120,9 @@ export default function App() {
       session.sessionId,
       true,
       selected ? { thingName: selected.thingName, cameraId: selected.cameraId } : undefined,
+      transcoding,
     ).catch(() => undefined);
-  }, [selected, session]);
+  }, [selected, session, transcoding]);
 
   if (screen === 'loading') return <div className="centre">Loading…</div>;
 
@@ -166,9 +179,18 @@ export default function App() {
           <div className="detail-bar">
             <button onClick={() => setSelected(null)}>← All cameras</button>
             <strong>{selected.displayName}</strong>
-            <span className="badge">main stream</span>
+            <span className="badge">
+              {transcoding.includes(selected.cameraId) ? 'main · transcoded' : 'main stream'}
+            </span>
           </div>
-          <Player src={manifestFor(selected, 'main')} />
+          {playsNatively(selected) || transcoding.includes(selected.cameraId) ? (
+            <Player src={manifestFor(selected, 'main', transcoding.includes(selected.cameraId))} />
+          ) : (
+            <Unplayable
+              camera={selected}
+              onTranscode={() => setTranscoding((ids) => [...ids, selected.cameraId])}
+            />
+          )}
         </section>
       ) : (
         <section className="grid">
@@ -177,24 +199,59 @@ export default function App() {
             <button
               key={`${camera.thingName}/${camera.cameraId}`}
               className="tile"
-              onClick={() => camera.online && setSelected(camera)}
+              onClick={() => {
+                if (camera.online && (playsNatively(camera) || transcoding.includes(camera.cameraId))) {
+                  setSelected(camera);
+                }
+              }}
               disabled={!camera.online}
             >
-              {!playable(camera) ? (
-                // Saying so beats a spinner that never resolves.
-                <div className="player">
-                  <div className="player-overlay">This browser cannot decode {camera.sourceCodec}</div>
-                </div>
-              ) : camera.online ? (
-                <Player src={manifestFor(camera, 'sub')} />
-              ) : (
+              {!camera.online ? (
                 <div className="player"><div className="player-overlay">Offline</div></div>
+              ) : playsNatively(camera) || transcoding.includes(camera.cameraId) ? (
+                <Player src={manifestFor(camera, 'sub', transcoding.includes(camera.cameraId))} />
+              ) : (
+                <Unplayable
+                  camera={camera}
+                  onTranscode={() => setTranscoding((ids) => [...ids, camera.cameraId])}
+                />
               )}
-              <span className="tile-label">{camera.displayName}</span>
+              <span className="tile-label">
+                {camera.displayName}
+                {transcoding.includes(camera.cameraId) && <span className="badge">transcoded</span>}
+              </span>
             </button>
           ))}
         </section>
       )}
+    </div>
+  );
+}
+
+/**
+ * Offered rather than applied.
+ *
+ * Transcoding runs on the customer's own hardware and costs CPU there, so a
+ * browser's limitations are surfaced as a choice with its price stated, not
+ * silently turned into work at the edge.
+ */
+function Unplayable({ camera, onTranscode }: { camera: Camera; onTranscode: () => void }) {
+  const possible = transcodeWouldHelp(camera);
+  return (
+    <div className="player">
+      <div className="player-overlay unplayable">
+        <span>This browser cannot play {(camera.sourceCodec ?? '').toUpperCase()}</span>
+        {possible ? (
+          <>
+            <button onClick={(e) => { e.stopPropagation(); onTranscode(); }}>
+              Transcode on the agent
+            </button>
+            <small>Converts to H.264 on the recorder. Uses CPU at the site.</small>
+          </>
+        ) : (
+          <small>No other rendition would help — try Safari or Chrome.</small>
+        )}
+      </div>
     </div>
   );
 }

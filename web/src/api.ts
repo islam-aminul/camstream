@@ -22,25 +22,33 @@ export interface Camera {
  * 403 forever. A browser that cannot decode H.264 cannot be helped by
  * transcoding to H.264.
  */
-function transcodeWouldHelp(sourceCodec: string | undefined): boolean {
-  const codec = (sourceCodec ?? 'h264').toLowerCase();
-  return codec !== 'h264' && codec !== 'avc' && codec !== 'avc1';
+export function transcodeWouldHelp(camera: Camera): boolean {
+  const codec = (camera.sourceCodec ?? 'h264').toLowerCase();
+  if (codec === 'h264' || codec === 'avc' || codec === 'avc1') {
+    return false;
+  }
+  return supports('h264');
+}
+
+/** Whether this browser can decode what the camera actually emits. */
+export function playsNatively(camera: Camera): boolean {
+  return supports(camera.sourceCodec ?? 'h264');
 }
 
 /**
- * The URL this browser should actually load: the camera's own stream when it
- * can decode it, the transcoded one only when that would help.
+ * The URL to load.
+ *
+ * `transcoded` is the viewer's own decision, not an inference: transcoding
+ * spends CPU at the customer's edge, so it is offered rather than applied.
  */
-export function manifestFor(camera: Camera, profile: 'sub' | 'main'): string {
-  const native = supports(camera.sourceCodec ?? 'h264') || !transcodeWouldHelp(camera.sourceCodec);
-  if (profile === 'main') {
-    // The master playlist exists only while both rungs are publishing, which
-    // is exactly what opening the camera causes — so the detail view can take
-    // the ladder and drop to the sub stream on a poor connection.
-    // Transcoded viewers have no ladder: only one rendition is encoded for them.
-    return native ? camera.manifestUrl.master : camera.manifestUrl.mainH264;
+export function manifestFor(camera: Camera, profile: 'sub' | 'main', transcoded: boolean): string {
+  if (transcoded) {
+    return profile === 'main' ? camera.manifestUrl.mainH264 : camera.manifestUrl.subH264;
   }
-  return native ? camera.manifestUrl.sub : camera.manifestUrl.subH264;
+  // The master playlist exists only while both rungs are publishing, which is
+  // exactly what opening the camera causes — so the detail view can take the
+  // ladder and drop to the sub stream on a poor connection.
+  return profile === 'main' ? camera.manifestUrl.master : camera.manifestUrl.sub;
 }
 
 export interface SessionInfo {
@@ -53,11 +61,6 @@ export interface SessionInfo {
 
 export interface WatchResult {
   keepaliveInSeconds: number;
-}
-
-/** True when no rendition of this camera can play here. */
-export function playable(camera: Camera): boolean {
-  return supports(camera.sourceCodec ?? 'h264') || supports('h264');
 }
 
 /** Thrown when this browser's session has been displaced by a newer sign-in. */
@@ -117,11 +120,13 @@ export function watch(
   sessionId: string,
   grid: boolean,
   main?: { thingName: string; cameraId: string },
+  transcode: string[] = [],
 ): Promise<WatchResult> {
   return call<WatchResult>('/api/watch', {
     method: 'POST',
-    // Declaring capabilities here is what lets the agent skip encoding for
-    // viewers who do not need it.
-    body: JSON.stringify({ sessionId, grid, main, codecs: supportedCodecs() }),
+    // Capabilities let the agent skip encoding for viewers who do not need it;
+    // `transcode` names the cameras a viewer has explicitly asked it to encode
+    // anyway, so nothing is spent on inference.
+    body: JSON.stringify({ sessionId, grid, main, codecs: supportedCodecs(), transcode }),
   });
 }

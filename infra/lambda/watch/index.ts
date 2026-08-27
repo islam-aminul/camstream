@@ -26,6 +26,14 @@ interface DemandRecord {
   mainCameraId?: string;
   /** Codecs this viewer's browser can actually decode. */
   codecs?: string[];
+  /**
+   * Cameras this viewer has explicitly asked the agent to transcode.
+   *
+   * Transcoding costs CPU at the edge and money, so it is never inferred from
+   * a browser's limitations — a viewer who cannot decode a camera is shown the
+   * choice and makes it.
+   */
+  transcode?: string[];
   /** Premises this viewer may drive. Empty means the whole tenant. */
   scope?: string[];
   expiresAt: number;
@@ -50,12 +58,31 @@ interface DesiredState {
  * H.264 is the universal floor: every browser that can play HLS at all can
  * decode it, so a camera already emitting it never needs transcoding.
  */
-function needsTranscode(sourceCodec: string | undefined, viewerCodecs: string[]): boolean {
+function canDecode(sourceCodec: string | undefined, viewerCodecs: string[]): boolean {
   const codec = (sourceCodec ?? 'h264').toLowerCase();
   if (codec === 'h264' || codec === 'avc' || codec === 'avc1') {
-    return false;
+    return true;
   }
-  return !viewerCodecs.map((c) => c.toLowerCase()).includes(codec);
+  return viewerCodecs.map((c) => c.toLowerCase()).includes(codec);
+}
+
+/**
+ * What this viewer should be served for a camera, or null to publish nothing.
+ *
+ * A viewer who cannot decode the source and has not asked for a transcode
+ * contributes no demand: publishing the source would produce bytes they cannot
+ * play, and transcoding without being asked would spend edge CPU and money on
+ * their behalf.
+ */
+function variantFor(
+  sourceCodec: string | undefined,
+  viewerCodecs: string[],
+  transcodeRequested: boolean,
+): Variant | null {
+  if (canDecode(sourceCodec, viewerCodecs)) {
+    return 'source';
+  }
+  return transcodeRequested ? 'h264' : null;
 }
 
 export async function handler(
@@ -97,6 +124,9 @@ export async function handler(
   const codecs = Array.isArray(body.codecs)
     ? body.codecs.filter((c): c is string => typeof c === 'string' && /^[a-z0-9]{1,12}$/i.test(c)).slice(0, 8)
     : [];
+  const transcode = Array.isArray(body.transcode)
+    ? body.transcode.filter((c): c is string => isValidId(c)).slice(0, 32)
+    : [];
 
   // At most one full-resolution stream per viewer — this is the cap that keeps
   // main-stream bandwidth predictable.
@@ -133,6 +163,7 @@ export async function handler(
         mainThingName,
         mainCameraId,
         codecs,
+        transcode,
         scope,
         expiresAt: now + DEMAND_TTL_SECONDS,
       },
@@ -194,16 +225,29 @@ export function resolveDesiredState(
     byThing.set(device.thingName, new Map());
   }
 
-  const want = (thingName: string, cameraId: string, profile: 'sub' | 'main', viewerCodecs: string[]) => {
+  const want = (
+    thingName: string,
+    cameraId: string,
+    profile: 'sub' | 'main',
+    viewerCodecs: string[],
+    transcodeRequested: string[],
+  ) => {
     const bucket = byThing.get(thingName);
     if (!bucket) return;
-    const variant: Variant =
-      needsTranscode(codecByCamera.get(`${thingName}/${cameraId}`), viewerCodecs) ? 'h264' : 'source';
+    const variant = variantFor(
+      codecByCamera.get(`${thingName}/${cameraId}`),
+      viewerCodecs,
+      transcodeRequested.includes(cameraId),
+    );
+    if (variant === null) {
+      return;
+    }
     bucket.set(`${cameraId}/${profile}/${variant}`, { cameraId, profile, variant });
   };
 
   for (const demand of live) {
     const viewerCodecs = demand.codecs ?? [];
+    const transcodeRequested = demand.transcode ?? [];
     const pinned = demand.mainThingName && demand.mainCameraId
       ? `${demand.mainThingName}/${demand.mainCameraId}`
       : null;
@@ -213,15 +257,15 @@ export function resolveDesiredState(
         if (!withinScope(camera.thingName, demand.scope ?? [])) {
           continue;
         }
-        want(camera.thingName, camera.cameraId, 'sub', viewerCodecs);
+        want(camera.thingName, camera.cameraId, 'sub', viewerCodecs, transcodeRequested);
       }
     }
     if (demand.mainThingName && demand.mainCameraId) {
       // The pinned camera gets both rungs: the sub it already had, plus main.
       // That pair is the ABR ladder, and the detail view is the only place a
       // stream is large enough to outrun a viewer's connection.
-      want(demand.mainThingName, demand.mainCameraId, 'main', viewerCodecs);
-      want(demand.mainThingName, demand.mainCameraId, 'sub', viewerCodecs);
+      want(demand.mainThingName, demand.mainCameraId, 'main', viewerCodecs, transcodeRequested);
+      want(demand.mainThingName, demand.mainCameraId, 'sub', viewerCodecs, transcodeRequested);
     }
   }
 

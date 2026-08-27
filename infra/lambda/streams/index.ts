@@ -35,15 +35,27 @@ export async function handler(
     return fail(409, 'Session superseded by a newer sign-in');
   }
 
-  const result = await ddb.send(
-    new QueryCommand({
+  const [result, devices] = await Promise.all([
+    ddb.send(new QueryCommand({
       TableName: TABLE,
       KeyConditionExpression: 'pk = :pk AND begins_with(sk, :prefix)',
       ExpressionAttributeValues: { ':pk': `TENANT#${tenantId}`, ':prefix': 'LIVECAMERA#' },
-    }),
+    })),
+    ddb.send(new QueryCommand({
+      TableName: TABLE,
+      KeyConditionExpression: 'pk = :pk AND begins_with(sk, :prefix)',
+      ExpressionAttributeValues: { ':pk': `TENANT#${tenantId}`, ':prefix': 'DEVICE#' },
+    })),
+  ]);
+
+  // A camera is reachable exactly when the agent that publishes it is
+  // connected. Reports are event-driven, so their timestamps go stale within
+  // minutes of a quiet estate — judging liveness by them marked every camera
+  // offline while its agent sat happily connected.
+  const connected = new Map<string, boolean>(
+    (devices.Items ?? []).map((device) => [String(device.thingName ?? ''), device.connected === true]),
   );
 
-  const now = Math.floor(Date.now() / 1000);
   const cameras = (result.Items ?? [])
     // A restricted viewer must not learn which other sites exist, what their
     // agents are called, or what is watched there.
@@ -56,9 +68,7 @@ export async function handler(
       displayName: record.displayName ?? record.cameraId,
       resolution: record.width && record.height ? `${record.width}x${record.height}` : undefined,
       lastSeen: record.lastSeen,
-      // A camera is live only if its agent has checked in recently; the TTL
-      // sweep is too coarse to drive the UI on its own.
-      online: typeof record.lastSeen === 'number' && now - record.lastSeen < 90,
+      online: connected.get(record.thingName) === true,
       // Every URL is returned, but a rendition only exists in S3 while some
       // viewer has asked for it via /api/watch. The player picks `source` when
       // it can decode sourceCodec and `h264` otherwise.

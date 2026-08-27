@@ -130,3 +130,11 @@ button.link {
 .row.tight { gap: 6px; }
 .row.tight select, .row.tight button { min-width: auto; padding: 6px 10px; font-size: 13px; }
 .row select[multiple] { padding: 4px; }
+
+.player-overlay.unplayable {
+  flex-direction: column; gap: 10px; padding: 12px; text-align: center;
+  background: rgba(0, 0, 0, 0.72); color: var(--text);
+}
+.player-overlay.unplayable small { color: var(--muted); font-size: 11px; max-width: 30ch; }
+.player-overlay.unplayable button { font-size: 13px; padding: 6px 12px; }
+.tile-label .badge { margin-left: 8px; }

@@ -64,13 +64,17 @@ the ABR ladder ignores declared bitrates that fail to discriminate.
 A simulated H.265 camera served over RTSP, watched simultaneously by two
 accounts declaring different codec support:
 
-| Viewer declares | Control plane asks agent for | Published |
+| Viewer declares | Asked to transcode | Control plane asks agent for |
 |---|---|---|
-| `h264, hevc` | `variant: source` | `sub/` — hevc/Main, stream copy |
-| `h264` only | `variant: h264` | `sub-h264/` — h264/High, transcoded |
+| `h264, hevc` | — | `variant: source` — hevc, stream copy |
+| `h264` only | no | nothing at all |
+| `h264` only | yes | `variant: h264` — transcoded |
 
-Both renditions run at once off the same camera, and neither viewer pays for the
-other's. A site whose viewers all support HEVC never starts an encoder.
+Transcoding is never inferred from a browser's limitations. It runs on the
+customer's own hardware and costs CPU there, so a viewer who cannot decode a
+camera is shown the choice with its price stated, and the agent encodes only
+once someone has taken it. Both renditions can run at once off one camera when
+different viewers make different choices, and neither pays for the other's.
 
 The master playlist labels each rung with the codec it actually carries, so a
 browser without HEVC selects the H.264 rung rather than rejecting both — rungs
@@ -403,6 +407,10 @@ A user sees every camera belonging to their tenant, and no others.
 
 - **Latency is ~5s**, not sub-second. Sub-second needs blocking playlist
   reloads, which S3 cannot do. Genuine sub-second would mean WebRTC.
+- **A camera is live when its agent is connected**, not when it last reported.
+  Reports are event-driven, so their timestamps go stale within minutes on a
+  quiet estate — judging liveness by them marked every camera offline while its
+  agent sat happily connected.
 - **One session per account.** Signing in anywhere invalidates the previous
   one, and every authenticated route enforces it — not only those that carry a
   session id. The check compares Cognito's `origin_jti`, which survives a token
