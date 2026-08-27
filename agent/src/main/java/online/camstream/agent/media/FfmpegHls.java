@@ -35,6 +35,16 @@ public final class FfmpegHls implements AutoCloseable {
     private final String label;
 
     /**
+     * Set when the camera refused us rather than failed to answer.
+     *
+     * A 401 or 403 from RTSP is not a transient fault: the credentials are
+     * wrong, or the camera has run out of session slots. Retrying every few
+     * seconds cannot fix either, and against a camera that leaks sessions on an
+     * abrupt disconnect it is what prevents recovery.
+     */
+    private volatile boolean refused;
+
+    /**
      * Distinguishes the output of one ffmpeg run from the next.
      *
      * Segment files are served with immutable cache headers, so a restart that
@@ -88,6 +98,9 @@ public final class FfmpegHls implements AutoCloseable {
             try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
                 String line;
                 while ((line = reader.readLine()) != null) {
+                    if (line.contains("401 Unauthorized") || line.contains("403 Forbidden")) {
+                        refused = true;
+                    }
                     log.warn("[{}] ffmpeg: {}", label, line);
                 }
             } catch (IOException e) {
@@ -120,6 +133,11 @@ public final class FfmpegHls implements AutoCloseable {
 
     public boolean isAlive() {
         return process.isAlive();
+    }
+
+    /** Whether the camera actively refused the connection. */
+    public boolean wasRefused() {
+        return refused;
     }
 
     @Override

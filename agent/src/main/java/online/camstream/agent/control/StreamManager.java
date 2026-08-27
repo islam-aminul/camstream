@@ -43,6 +43,14 @@ public final class StreamManager implements AutoCloseable {
     private static final Duration MAX_BACKOFF = Duration.ofSeconds(30);
     /** A pipeline alive this long is considered to have recovered. */
     private static final Duration HEALTHY_AFTER = Duration.ofSeconds(60);
+    /**
+     * Retry interval when the camera refuses us outright.
+     *
+     * Bad credentials will not become good in thirty seconds, and a camera that
+     * has run out of RTSP sessions needs the pressure taken off before it can
+     * release them — so this waits rather than hammering.
+     */
+    private static final Duration REFUSED_BACKOFF = Duration.ofMinutes(5);
 
     private final AgentConfig config;
     private final S3Client s3;
@@ -111,8 +119,14 @@ public final class StreamManager implements AutoCloseable {
                 Backoff backoff = backoffs.computeIfAbsent(
                         rendition, r -> new Backoff(MIN_BACKOFF, MAX_BACKOFF, HEALTHY_AFTER));
                 Duration wait = backoff.failed();
-                log.warn("[{}] ffmpeg exited (attempt {}) — retrying in {}s",
-                        rendition, backoff.consecutiveFailures(), wait.toSeconds());
+                if (pipeline.ffmpeg().wasRefused()) {
+                    wait = REFUSED_BACKOFF;
+                    log.warn("[{}] the camera refused the connection — check the credentials, or it may "
+                            + "have run out of RTSP sessions. Retrying in {}s.", rendition, wait.toSeconds());
+                } else {
+                    log.warn("[{}] ffmpeg exited (attempt {}) — retrying in {}s",
+                            rendition, backoff.consecutiveFailures(), wait.toSeconds());
+                }
                 // Carried into the next pipeline so the playlist marks where
                 // the timeline actually broke.
                 restartedRenditions.add(rendition);
