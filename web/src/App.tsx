@@ -22,6 +22,14 @@ export default function App() {
    * inferred, because the cost lands on the customer's own hardware.
    */
   const [transcoding, setTranscoding] = useState<string[]>([]);
+  /**
+   * Cameras this browser accepted the codec for and then failed to decode.
+   * Firefox on Windows does exactly that with HEVC, so what actually happened
+   * during playback overrides what the probe claimed.
+   */
+  const [undecodable, setUndecodable] = useState<string[]>([]);
+  /** Cameras whose manifest never appeared — the agent is not publishing. */
+  const [unavailable, setUnavailable] = useState<string[]>([]);
   const [pendingUser, setPendingUser] = useState<CognitoUser | null>(null);
   const [admin, setAdmin] = useState(false);
   const [showAdmin, setShowAdmin] = useState(false);
@@ -41,6 +49,8 @@ export default function App() {
     setAdmin(false);
     setShowAdmin(false);
     setTranscoding([]);
+    setUndecodable([]);
+    setUnavailable([]);
     setNotice(message);
     setScreen('login');
   }, []);
@@ -183,12 +193,22 @@ export default function App() {
               {transcoding.includes(selected.cameraId) ? 'main · transcoded' : 'main stream'}
             </span>
           </div>
-          {playsNatively(selected) || transcoding.includes(selected.cameraId) ? (
-            <Player src={manifestFor(selected, 'main', transcoding.includes(selected.cameraId))} />
+          {(playsNatively(selected) && !undecodable.includes(selected.cameraId))
+            || transcoding.includes(selected.cameraId) ? (
+            <Player
+              src={manifestFor(selected, 'main', transcoding.includes(selected.cameraId))}
+              onUndecodable={() => setUndecodable((ids) =>
+                ids.includes(selected.cameraId) ? ids : [...ids, selected.cameraId])}
+              onUnavailable={() => setUnavailable((ids) =>
+                ids.includes(selected.cameraId) ? ids : [...ids, selected.cameraId])}
+            />
           ) : (
             <Unplayable
               camera={selected}
-              onTranscode={() => setTranscoding((ids) => [...ids, selected.cameraId])}
+              onTranscode={() => {
+                setUndecodable((ids) => ids.filter((id) => id !== selected.cameraId));
+                setTranscoding((ids) => [...ids, selected.cameraId]);
+              }}
             />
           )}
         </section>
@@ -200,7 +220,9 @@ export default function App() {
               key={`${camera.thingName}/${camera.cameraId}`}
               className="tile"
               onClick={() => {
-                if (camera.online && (playsNatively(camera) || transcoding.includes(camera.cameraId))) {
+                const usable = (playsNatively(camera) && !undecodable.includes(camera.cameraId))
+                  || transcoding.includes(camera.cameraId);
+                if (camera.online && usable) {
                   setSelected(camera);
                 }
               }}
@@ -208,12 +230,24 @@ export default function App() {
             >
               {!camera.online ? (
                 <div className="player"><div className="player-overlay">Offline</div></div>
-              ) : playsNatively(camera) || transcoding.includes(camera.cameraId) ? (
-                <Player src={manifestFor(camera, 'sub', transcoding.includes(camera.cameraId))} />
+              ) : unavailable.includes(camera.cameraId) ? (
+                <NotPublishing name={camera.displayName} />
+              ) : (playsNatively(camera) && !undecodable.includes(camera.cameraId))
+                  || transcoding.includes(camera.cameraId) ? (
+                <Player
+                  src={manifestFor(camera, 'sub', transcoding.includes(camera.cameraId))}
+                  onUndecodable={() => setUndecodable((ids) =>
+                    ids.includes(camera.cameraId) ? ids : [...ids, camera.cameraId])}
+                  onUnavailable={() => setUnavailable((ids) =>
+                    ids.includes(camera.cameraId) ? ids : [...ids, camera.cameraId])}
+                />
               ) : (
                 <Unplayable
                   camera={camera}
-                  onTranscode={() => setTranscoding((ids) => [...ids, camera.cameraId])}
+                  onTranscode={() => {
+                    setUndecodable((ids) => ids.filter((id) => id !== camera.cameraId));
+                    setTranscoding((ids) => [...ids, camera.cameraId]);
+                  }}
                 />
               )}
               <span className="tile-label">
@@ -251,6 +285,19 @@ function Unplayable({ camera, onTranscode }: { camera: Camera; onTranscode: () =
         ) : (
           <small>No other rendition would help — try Safari or Chrome.</small>
         )}
+      </div>
+    </div>
+  );
+}
+
+/** The agent is not publishing this camera, which is not a playback problem. */
+function NotPublishing({ name }: { name: string }) {
+  return (
+    <div className="player">
+      <div className="player-overlay unplayable">
+        <span>{name} is not being published</span>
+        <small>The agent is connected but this camera is not streaming — it may be
+          unreachable or refusing connections.</small>
       </div>
     </div>
   );
