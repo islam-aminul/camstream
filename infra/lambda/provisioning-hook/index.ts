@@ -1,6 +1,6 @@
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, UpdateCommand } from '@aws-sdk/lib-dynamodb';
-import { THING_NAME_PATTERN, isValidId } from '../shared/tenant';
+import { parseThingName } from '../shared/tenant';
 
 const TABLE = process.env.REGISTRY_TABLE!;
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
@@ -36,15 +36,15 @@ export async function handler(event: HookEvent): Promise<HookResult> {
     console.warn('provisioning refused: malformed enrollment token');
     return { allowProvisioning: false };
   }
-  if (!thingName || !THING_NAME_PATTERN.test(thingName)) {
+  // The same validator the rest of the system uses. The loose regex here
+  // would have registered a four-part thing name that the device lambda then
+  // refuses forever, leaving an agent that can connect and never be served.
+  const identity = thingName ? parseThingName(thingName) : null;
+  if (!identity) {
     console.warn(`provisioning refused: bad thing name ${thingName}`);
     return { allowProvisioning: false };
   }
-
-  const [tenantId, premisesId] = thingName.split('--');
-  if (!isValidId(tenantId) || !isValidId(premisesId)) {
-    return { allowProvisioning: false };
-  }
+  const { tenantId, premisesId } = identity;
 
   const now = Math.floor(Date.now() / 1000);
   try {

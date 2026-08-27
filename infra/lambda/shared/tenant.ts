@@ -46,8 +46,19 @@ export function parseThingName(name: string): DeviceIdentity | null {
   return { tenantId, premisesId, deviceId };
 }
 
-/** Regex a thing name must satisfy, for validating request bodies. */
-export const THING_NAME_PATTERN = /^[a-z0-9-]{3,32}--[a-z0-9-]{3,32}--[a-z0-9-]{3,32}$/;
+/**
+ * Whether a string is a well-formed thing name.
+ *
+ * This replaces a regex that disagreed with `parseThingName`. Because `-` sat
+ * inside the character class, the first group swallowed an embedded separator,
+ * so `acme--hq--gate-01--evil` matched as three parts and `-ab--cde--fgh`
+ * passed with a leading hyphen — names `parseThingName` rejects and the device
+ * lambda would therefore refuse forever. Two validators for one format is one
+ * too many.
+ */
+export function isThingName(value: unknown): value is string {
+  return typeof value === 'string' && parseThingName(value) !== null;
+}
 
 /**
  * Premises a caller may see, from the `custom:premises` claim.

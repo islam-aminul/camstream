@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
-  isValidId, thingName, parseThingName, cookieResource, THING_NAME_PATTERN,
+  isValidId, thingName, parseThingName, cookieResource, isThingName,
   premisesScope, withinScope,
 } from '../shared/tenant';
 import { slugFor } from '../shared/registry';
@@ -21,6 +21,26 @@ describe('identifiers', () => {
   });
 });
 
+describe('the thing-name validator agrees with the parser', () => {
+  it('rejects the names the old regex let through', () => {
+    // '-' inside the character class let the first group swallow a separator,
+    // so a four-part name matched as three and a leading hyphen passed —
+    // names parseThingName rejects, and the device lambda therefore refuses
+    // forever once one has been registered.
+    for (const bad of ['acme--hq--gate-01--evil', '-ab--cde--fgh', 'ab--cde--fgh-', 'ac--me--gate--01']) {
+      expect(isThingName(bad), bad).toBe(false);
+      expect(parseThingName(bad), bad).toBeNull();
+    }
+  });
+
+  it('agrees with the parser on well-formed names', () => {
+    for (const good of ['acme--acme-hq--gate-01', 'demo--hq-north--edge-01']) {
+      expect(isThingName(good), good).toBe(true);
+      expect(parseThingName(good), good).not.toBeNull();
+    }
+  });
+});
+
 describe('thing names', () => {
   const identity = { tenantId: 'acme', premisesId: 'acme-hq', deviceId: 'gate-01' };
 
@@ -28,7 +48,7 @@ describe('thing names', () => {
     const name = thingName(identity);
     expect(name).toBe('acme--acme-hq--gate-01');
     expect(parseThingName(name)).toEqual(identity);
-    expect(THING_NAME_PATTERN.test(name)).toBe(true);
+    expect(isThingName(name)).toBe(true);
   });
 
   it('refuses names that are not exactly three parts', () => {
