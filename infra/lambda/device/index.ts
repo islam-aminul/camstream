@@ -4,6 +4,7 @@ import { IoTClient, ListPrincipalThingsCommand } from '@aws-sdk/client-iot';
 import type { APIGatewayProxyEventV2WithIAMAuthorizer, APIGatewayProxyStructuredResultV2 } from 'aws-lambda';
 import { parseThingName, isValidId } from '../shared/tenant';
 import { key, type CameraRecord } from '../shared/registry';
+import { base64Key, bounded, ipAddress, label, macAddress, oneOf } from '../shared/sanitise';
 import { fail, json } from '../shared/http';
 
 const TABLE = process.env.REGISTRY_TABLE!;
@@ -160,24 +161,27 @@ async function acceptReport(
       ExpressionAttributeValues: {
         ':thing': thingName,
         ':premises': premisesId,
-        ':site': typeof body.siteName === 'string' ? body.siteName.slice(0, 128) : null,
-        ':version': typeof body.agentVersion === 'string' ? body.agentVersion.slice(0, 32) : null,
+        ':site': label(body.siteName) ?? null,
+        ':version': label(body.agentVersion, 32) ?? null,
         ':count': cameras.length,
-        ':health': Array.isArray(body.taskHealth) ? body.taskHealth.slice(0, 16).map(String) : [],
+        ':health': Array.isArray(body.taskHealth)
+          ? body.taskHealth.slice(0, 16).map((entry) => label(entry, 200) ?? '').filter(Boolean)
+          : [],
         ':now': now,
-        ':key': typeof body.credentialPublicKey === 'string' ? body.credentialPublicKey : null,
+        ':key': base64Key(body.credentialPublicKey, 64, 2048) ?? null,
       },
     }),
   );
 
   // A re-provisioned agent publishes a new key; overwrite rather than keep the
   // stale one, or every credential sealed afterwards would be undecryptable.
-  if (typeof body.credentialPublicKey === 'string' && body.credentialPublicKey.length >= 64) {
+  const publishedKey = base64Key(body.credentialPublicKey, 64, 2048);
+  if (publishedKey) {
     await ddb.send(new UpdateCommand({
       TableName: TABLE,
       Key: { pk, sk: key.device(thingName) },
       UpdateExpression: 'SET credentialPublicKey = :key',
-      ExpressionAttributeValues: { ':key': body.credentialPublicKey },
+      ExpressionAttributeValues: { ':key': publishedKey },
     }));
   }
 
@@ -198,7 +202,7 @@ async function writeCameras(pk: string, thingName: string, cameras: unknown[], n
           sk: `LIVECAMERA#${thingName}#${camera.cameraId as string}`,
           thingName,
           cameraId: camera.cameraId as string,
-          displayName: typeof camera.displayName === 'string' ? camera.displayName.slice(0, 128) : camera.cameraId,
+          displayName: label(camera.displayName) ?? camera.cameraId,
           sourceCodec:
             typeof camera.sourceCodec === 'string' && /^[a-z0-9]{1,12}$/i.test(camera.sourceCodec)
               ? camera.sourceCodec.toLowerCase()
@@ -233,11 +237,27 @@ async function recordDiscoveries(pk: string, thingName: string, reported: unknow
       const identity = typeof camera.id === 'string' ? camera.id : null;
       if (!identity || !/^[A-Za-z0-9._-]{3,64}$/.test(identity)) return;
 
+      // Everything below originates in an ONVIF response, which is
+      // attacker-controlled input on the customer's network. The agent relays
+      // it verbatim; bounding it is this end's job.
       const sighting = {
-        ipAddress: String(camera.ipAddress ?? ''),
-        authState: String(camera.authState ?? 'UNKNOWN'),
+        ipAddress: ipAddress(camera.ipAddress) ?? '',
+        authState: oneOf(camera.authState,
+          ['UNKNOWN', 'NEEDS_CREDENTIALS', 'AUTHENTICATED', 'UNSUPPORTED'] as const, 'UNKNOWN'),
         lastSeen: now,
-        profiles: Array.isArray(camera.profiles) ? camera.profiles.slice(0, 8) : [],
+        profiles: Array.isArray(camera.profiles)
+          ? camera.profiles.slice(0, 8).map((raw) => {
+              const profile = raw as Record<string, unknown>;
+              return {
+                token: label(profile.token, 64) ?? '',
+                name: label(profile.name, 64) ?? null,
+                codec: label(profile.codec, 12) ?? null,
+                width: bounded(profile.width, 1, 16384) ?? null,
+                height: bounded(profile.height, 1, 16384) ?? null,
+                fps: bounded(profile.fps, 1, 1000) ?? null,
+              };
+            }).filter((profile) => profile.token.length > 0)
+          : [],
       };
       const values = {
         ':identity': identity,
@@ -245,9 +265,9 @@ async function recordDiscoveries(pk: string, thingName: string, reported: unknow
         ':sighting': sighting,
         ':now': now,
         ':expiresAt': expiresAt,
-        ':mac': camera.macAddress ?? null,
-        ':make': camera.manufacturer ?? null,
-        ':model': camera.model ?? null,
+        ':mac': macAddress(camera.macAddress) ?? null,
+        ':make': label(camera.manufacturer, 64) ?? null,
+        ':model': label(camera.model, 64) ?? null,
       };
       try {
         // reachableBy is a map keyed by thing name, so concurrent reports from
