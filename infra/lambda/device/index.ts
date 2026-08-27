@@ -3,7 +3,7 @@ import { DynamoDBDocumentClient, QueryCommand, UpdateCommand, BatchWriteCommand 
 import { IoTClient, ListPrincipalThingsCommand } from '@aws-sdk/client-iot';
 import type { APIGatewayProxyEventV2WithIAMAuthorizer, APIGatewayProxyStructuredResultV2 } from 'aws-lambda';
 import { parseThingName, isValidId } from '../shared/tenant';
-import { key, type CameraRecord, DEFAULT_MAX_TRANSCODES } from '../shared/registry';
+import { key, queryAllPages, type CameraRecord, DEFAULT_MAX_TRANSCODES } from '../shared/registry';
 import { base64Key, bounded, ipAddress, label, macAddress, oneOf } from '../shared/sanitise';
 import { fail, json } from '../shared/http';
 
@@ -234,8 +234,49 @@ async function writeCameras(pk: string, thingName: string, cameras: unknown[], n
     };
   });
   for (let i = 0; i < items.length; i += 25) {
-    await ddb.send(new BatchWriteCommand({ RequestItems: { [TABLE]: items.slice(i, i + 25) } }));
+    await writeBatch(items.slice(i, i + 25));
   }
+}
+
+/**
+ * Writes one batch, following up whatever DynamoDB declined to take.
+ *
+ * BatchWriteItem reports throttled writes in UnprocessedItems rather than
+ * failing, and nothing read it — so under load a camera simply did not appear
+ * in the registry, and the agent would not rewrite it, because its report had
+ * not changed. The camera stayed missing from /api/streams until something
+ * else happened to move.
+ */
+async function writeBatch(batch: Record<string, unknown>[]): Promise<void> {
+  let pending = batch;
+  for (let attempt = 0; pending.length > 0 && attempt < 5; attempt++) {
+    if (attempt > 0) {
+      // Exponential, because the reason for a retry here is always capacity.
+      await new Promise((resolve) => setTimeout(resolve, 50 * 2 ** attempt));
+    }
+    const result = await ddb.send(new BatchWriteCommand({ RequestItems: { [TABLE]: pending } }));
+    pending = (result.UnprocessedItems?.[TABLE] ?? []) as Record<string, unknown>[];
+  }
+  if (pending.length > 0) {
+    // Louder than dropping them: the next report will try again, and a log
+    // line is the only way anyone learns this site is being throttled.
+    console.warn(`${pending.length} camera record(s) still unwritten after retries`);
+  }
+}
+
+/**
+ * Whether a failed conditional update means the record does not exist yet.
+ *
+ * The distinction is load-bearing. The update below is guarded on
+ * `reachableBy` already existing, and its fallback rewrites the record whole
+ * with only this agent's sighting. That fallback used to run on *any* error,
+ * so a throttle or a transient fault erased every other agent's sighting of
+ * the camera — destroying exactly the merge the identity-keyed design exists
+ * to produce, and doing it most readily on a busy estate, which is the kind
+ * with several agents in the first place.
+ */
+export function isFirstSighting(err: unknown): boolean {
+  return (err as { name?: string })?.name === 'ConditionalCheckFailedException';
 }
 
 /**
@@ -299,7 +340,10 @@ async function recordDiscoveries(pk: string, thingName: string, reported: unknow
           ExpressionAttributeValues: values,
           ConditionExpression: 'attribute_exists(reachableBy)',
         }));
-      } catch {
+      } catch (err) {
+        if (!isFirstSighting(err)) {
+          throw err;
+        }
         // First sighting: the map does not exist yet, so create the record
         // whole. :sighting is deliberately dropped — DynamoDB rejects an
         // ExpressionAttributeValues entry that the expression never uses.
@@ -318,11 +362,15 @@ async function recordDiscoveries(pk: string, thingName: string, reported: unknow
   );
 }
 
-async function queryPrefix(pk: string, prefix: string): Promise<Record<string, unknown>[]> {
-  const result = await ddb.send(new QueryCommand({
-    TableName: TABLE,
-    KeyConditionExpression: 'pk = :pk AND begins_with(sk, :prefix)',
-    ExpressionAttributeValues: { ':pk': pk, ':prefix': prefix },
-  }));
-  return (result.Items ?? []) as Record<string, unknown>[];
+/**
+ * Every item under a prefix, following the cursor.
+ *
+ * This used to be a single Query, which is the bug queryAllPages was written
+ * to prevent — and the one place it mattered most, since an agent that reads a
+ * short list of credentials or approved cameras does not fail, it just quietly
+ * stops publishing part of the site.
+ */
+function queryPrefix(pk: string, prefix: string): Promise<Record<string, unknown>[]> {
+  return queryAllPages<Record<string, unknown>>(
+    (input) => ddb.send(new QueryCommand(input)), TABLE, pk, prefix);
 }

@@ -43,11 +43,12 @@ export async function handler(
     queryAllPages<Record<string, unknown>>(
       (input) => ddb.send(new QueryCommand(input)),
       TABLE, `TENANT#${tenantId}`, 'LIVECAMERA#'),
-    ddb.send(new QueryCommand({
-      TableName: TABLE,
-      KeyConditionExpression: 'pk = :pk AND begins_with(sk, :prefix)',
-      ExpressionAttributeValues: { ':pk': `TENANT#${tenantId}`, ':prefix': 'DEVICE#' },
-    })),
+    // Paginated like the cameras beside it. A single Query stops at 1MB, and
+    // a short device list does not error — it just leaves every camera whose
+    // agent fell off the end reported as offline.
+    queryAllPages<Record<string, unknown>>(
+      (input) => ddb.send(new QueryCommand(input)),
+      TABLE, `TENANT#${tenantId}`, 'DEVICE#'),
   ]);
 
   // A camera is reachable exactly when the agent that publishes it is
@@ -55,10 +56,10 @@ export async function handler(
   // minutes of a quiet estate — judging liveness by them marked every camera
   // offline while its agent sat happily connected.
   const connected = new Map<string, boolean>(
-    (devices.Items ?? []).map((device) => [String(device.thingName ?? ''), device.connected === true]),
+    devices.map((device) => [String(device.thingName ?? ''), device.connected === true]),
   );
   const siteOf = new Map<string, string>(
-    (devices.Items ?? [])
+    devices
       .filter((device) => typeof device.siteName === 'string')
       .map((device) => [String(device.thingName ?? ''), String(device.siteName)]),
   );
