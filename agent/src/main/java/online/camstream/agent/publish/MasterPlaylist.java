@@ -41,13 +41,16 @@ public final class MasterPlaylist {
         List<Rung> usable = rungs.stream()
                 .filter(Objects::nonNull)
                 .filter(rung -> rung.width() > 0 && rung.height() > 0)
-                // Lowest first: hls.js starts on the first variant, and starting
-                // small then climbing beats stalling on the way down.
-                .sorted(Comparator.comparingInt(Rung::bandwidthBps))
                 .toList();
         if (usable.size() < 2) {
             return false;
         }
+
+        usable = discriminate(usable).stream()
+                // Lowest first: hls.js starts on the first variant, and starting
+                // small then climbing beats stalling on the way down.
+                .sorted(Comparator.comparingInt(Rung::bandwidthBps))
+                .toList();
 
         StringBuilder playlist = new StringBuilder("#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-INDEPENDENT-SEGMENTS\n");
         for (Rung rung : usable) {
@@ -76,6 +79,31 @@ public final class MasterPlaylist {
             log.warn("could not publish master playlist for {}: {}", cameraPrefix, e.toString());
             return false;
         }
+    }
+
+    /**
+     * Ensures the rungs are actually distinguishable.
+     *
+     * A real camera reported the same BitrateLimit — 2048 kbps — for both its
+     * 1080p and its 640x360 profile, which is plainly untrue of the smaller
+     * one. Equal BANDWIDTH values make a ladder useless: the player cannot tell
+     * the rungs apart and may pick the largest on a poor connection. Where the
+     * declared figures fail to discriminate, they are discarded in favour of
+     * estimates derived from resolution, which at least order correctly.
+     */
+    static List<Rung> discriminate(List<Rung> rungs) {
+        long distinct = rungs.stream().map(Rung::bandwidthBps).distinct().count();
+        if (distinct == rungs.size()) {
+            return rungs;
+        }
+        log.info("camera reported indistinguishable bitrates for {} renditions; "
+                + "estimating from resolution instead", rungs.size());
+        List<Rung> estimated = new ArrayList<>(rungs.size());
+        for (Rung rung : rungs) {
+            estimated.add(new Rung(rung.profile(), rung.path(), rung.width(), rung.height(),
+                    estimateBandwidth(rung.width(), rung.height(), null), rung.codec()));
+        }
+        return estimated;
     }
 
     /**
