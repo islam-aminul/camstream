@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Player } from './Player';
 import {
   SessionSuperseded, declinedTranscodes, listCameras, manifestFor, playsNatively,
@@ -8,7 +8,7 @@ import { NewPasswordRequired, completeNewPassword, currentSession, signIn, signO
 import { Admin } from './Admin';
 import { canAdminister } from './admin';
 import { CameraGrid, TranscodeQueued, Unplayable } from './CameraGrid';
-import { Sidebar, WHOLE_ESTATE, scopeMatches, type Scope } from './Sidebar';
+import { ScopePicker, inScope, placesOf, useResolvedScope, type Scope } from './ScopePicker';
 import type { CognitoUser } from 'amazon-cognito-identity-js';
 
 type Screen = 'loading' | 'login' | 'newPassword' | 'live';
@@ -18,7 +18,7 @@ export default function App() {
   const [session, setSession] = useState<SessionInfo | null>(null);
   const [cameras, setCameras] = useState<Camera[]>([]);
   const [selected, setSelected] = useState<Camera | null>(null);
-  const [scope, setScope] = useState<Scope>(WHOLE_ESTATE);
+  const [scope, setScope] = useState<Scope | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   /**
    * Cameras the viewer has asked the agent to transcode. Held here rather than
@@ -60,7 +60,7 @@ export default function App() {
     setSession(null);
     setCameras([]);
     setSelected(null);
-    setScope(WHOLE_ESTATE);
+    setScope(null);
     setAdmin(false);
     setShowAdmin(false);
     setTranscoding([]);
@@ -151,6 +151,9 @@ export default function App() {
     ).then((result) => setQueued(declinedTranscodes(result))).catch(() => undefined);
   }, [selected, session, transcoding, visible]);
 
+  const places = useMemo(() => placesOf(cameras), [cameras]);
+  useResolvedScope(places, scope, setScope);
+
   const onVisible = useCallback((keys: string[]) => {
     // Compared before setting: the grid recomputes this on every render, and a
     // new array with the same contents would re-announce demand needlessly.
@@ -195,10 +198,7 @@ export default function App() {
     );
   }
 
-  const inScope = cameras.filter((camera) => scopeMatches(scope, camera));
-  const scopeTitle = scope.thingName
-    ? (inScope[0]?.siteName || scope.thingName.split('--').pop() || 'Agent')
-    : scope.premisesId ?? 'All cameras';
+  const shown = cameras.filter((camera) => inScope(scope, camera));
 
   const markUndecodable = (camera: Camera) =>
     setUndecodable((ids) => ids.includes(camera.cameraId) ? ids : [...ids, camera.cameraId]);
@@ -212,7 +212,7 @@ export default function App() {
   const queuedFor = (camera: Camera) => queued.find((q) => q.cameraId === camera.cameraId);
 
   return (
-    <div className={`shell${selected ? ' no-sidebar' : ''}`}>
+    <div className="shell">
       <header className="topbar">
         <span className="brand"><span className="brand-mark">C</span>CamStream</span>
         <span className="topbar-spacer" />
@@ -225,10 +225,15 @@ export default function App() {
         </div>
       </header>
 
-      {!selected && <Sidebar cameras={cameras} scope={scope} onScope={setScope} />}
-
       <main className="main">
-        {notice && <div className="notice">{notice}</div>}
+        {notice && (
+          <div className="notice">
+            <span>{notice}</span>
+            {/* Dismissible: it reports something that already happened, and a
+                band across the top of every page until reload is a nag. */}
+            <button className="btn ghost small" onClick={() => setNotice(null)} aria-label="Dismiss">✕</button>
+          </div>
+        )}
 
         {selected ? (
           <section className="detail">
@@ -261,8 +266,8 @@ export default function App() {
           </section>
         ) : (
           <CameraGrid
-            title={scopeTitle}
-            cameras={inScope}
+            cameras={shown}
+            picker={<ScopePicker cameras={cameras} scope={scope} onScope={setScope} />}
             transcoding={transcoding}
             undecodable={undecodable}
             unavailable={unavailable}

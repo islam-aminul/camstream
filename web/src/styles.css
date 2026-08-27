@@ -2,35 +2,47 @@
  * CamStream — surveillance console.
  *
  * Built for an operator watching a wall of cameras for hours, which drives
- * nearly every decision here: a near-black ground so the video is the brightest
- * thing on screen, one accent colour reserved for interaction, and status
- * carried by hue only where hue means something. Chrome recedes; the pictures
- * do not compete with it.
+ * nearly every decision here: a deep navy ground so the video is the brightest
+ * thing on screen, and chrome that recedes rather than competing with the
+ * pictures.
+ *
+ * Two accents, each with a job. Gold marks what the operator is doing — the
+ * current selection, the control under the cursor — and appears sparingly
+ * enough that finding it takes no searching. Sage carries "this is working",
+ * because normality should register without drawing the eye; anything genuinely
+ * wrong is left to amber and red, which then stand out against a palette that
+ * has no other warm-red in it.
  */
 
 :root {
-  /* Surfaces, darkest first. Four steps is enough to build depth without the
-     interface turning into a stack of grey boxes. */
-  --bg: #0a0c10;
-  --surface: #12151c;
-  --surface-2: #171b24;
-  --surface-3: #1e2430;
-  --line: #262c38;
-  --line-strong: #38404f;
+  /* Navy, darkest first. Four steps build depth without the interface becoming
+     a stack of flat panels. */
+  --bg: #070d18;
+  --surface: #0d1526;
+  --surface-2: #141e33;
+  --surface-3: #1c2942;
+  --line: #223052;
+  --line-strong: #33456e;
 
-  --text: #e8eaf0;
-  --text-dim: #a4adbd;
-  --text-faint: #6b7484;
+  --text: #e7ecf5;
+  --text-dim: #9aa8c0;
+  --text-faint: #64748f;
 
-  --accent: #4c8dff;
-  --accent-dim: #2f5fb3;
-  --accent-wash: rgba(76, 141, 255, 0.12);
+  /* Gold: interaction and selection. */
+  --accent: #e0b44c;
+  --accent-dim: #8a6c22;
+  --accent-wash: rgba(224, 180, 76, 0.13);
+  --accent-ink: #2a1f06;
 
-  /* Status. Green is deliberately quiet — "normal" should not draw the eye. */
-  --ok: #3ecf8e;
-  --warn: #f0b429;
-  --danger: #ff5d5d;
-  --live: #ff4757;
+  /* Sage: healthy, live, normal. Deliberately quiet. */
+  --sage: #8fb996;
+  --sage-dim: #4d6b54;
+  --sage-wash: rgba(143, 185, 150, 0.13);
+
+  --ok: var(--sage);
+  --warn: #e0a03c;
+  --danger: #e06a6a;
+  --live: var(--accent);
 
   --radius: 10px;
   --radius-sm: 6px;
@@ -44,14 +56,13 @@
   --sp-5: 24px;
   --sp-6: 32px;
 
-  --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 4px 16px rgba(0, 0, 0, 0.3);
-  --shadow-lg: 0 8px 40px rgba(0, 0, 0, 0.55);
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.45), 0 4px 16px rgba(0, 0, 0, 0.35);
+  --shadow-lg: 0 8px 40px rgba(0, 0, 0, 0.6);
 
   --font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
   --mono: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
 
   --topbar-h: 56px;
-  --sidebar-w: 264px;
 
   color-scheme: dark;
 }
@@ -84,14 +95,9 @@ button, input, select, textarea { font: inherit; color: inherit; }
 
 .shell {
   display: grid;
-  grid-template-columns: var(--sidebar-w) 1fr;
   grid-template-rows: var(--topbar-h) 1fr;
-  grid-template-areas: "topbar topbar" "sidebar main";
-  height: 100vh;
-}
-.shell.no-sidebar {
-  grid-template-columns: 1fr;
   grid-template-areas: "topbar" "main";
+  height: 100vh;
 }
 
 .topbar {
@@ -115,9 +121,9 @@ button, input, select, textarea { font: inherit; color: inherit; }
 }
 .brand-mark {
   width: 22px; height: 22px; border-radius: var(--radius-sm);
-  background: linear-gradient(135deg, var(--accent), #7b5cff);
+  background: linear-gradient(135deg, var(--accent), var(--sage));
   display: grid; place-items: center;
-  font-size: 11px; font-weight: 700; color: #fff;
+  font-size: 11px; font-weight: 700; color: var(--accent-ink);
 }
 
 .topbar-spacer { flex: 1; }
@@ -143,12 +149,16 @@ button, input, select, textarea { font: inherit; color: inherit; }
 }
 .btn:hover { background: var(--surface-3); border-color: var(--line-strong); }
 .btn:disabled { opacity: 0.45; cursor: not-allowed; }
-.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 500; }
-.btn.primary:hover { background: #5f9aff; }
+.btn.primary {
+  background: var(--accent); border-color: var(--accent);
+  /* Dark ink on gold: white on this hue fails contrast badly. */
+  color: var(--accent-ink); font-weight: 600;
+}
+.btn.primary:hover { background: #edc463; }
 .btn.ghost { background: transparent; border-color: transparent; color: var(--text-dim); }
 .btn.ghost:hover { background: var(--surface-2); color: var(--text); }
 .btn.danger { color: var(--danger); border-color: transparent; background: transparent; }
-.btn.danger:hover { background: rgba(255, 93, 93, 0.12); }
+.btn.danger:hover { background: rgba(224, 106, 106, 0.13); }
 .btn.small { padding: 3px 9px; font-size: 12px; }
 
 .field {
@@ -180,56 +190,11 @@ button, input, select, textarea { font: inherit; color: inherit; }
   color: var(--text);
 }
 .search input::placeholder { color: var(--text-faint); }
-.search input:focus { border-color: var(--accent-dim); background: #070a0e; }
+.search input:focus { border-color: var(--accent-dim); background: #050a14; }
 .search-icon {
   position: absolute; left: 10px; top: 50%; transform: translateY(-50%);
   color: var(--text-faint); pointer-events: none; font-size: 13px;
 }
-
-/* --------------------------------------------------------------- sidebar */
-
-.sidebar {
-  grid-area: sidebar;
-  background: var(--surface);
-  border-right: 1px solid var(--line);
-  overflow-y: auto;
-  padding: var(--sp-3) 0;
-}
-.sidebar-section {
-  padding: var(--sp-2) var(--sp-4) var(--sp-1);
-  font-size: 11px; font-weight: 600; letter-spacing: 0.06em;
-  text-transform: uppercase; color: var(--text-faint);
-}
-
-.tree-row {
-  display: flex; align-items: center; gap: 6px;
-  width: 100%;
-  padding: 6px var(--sp-4);
-  background: none; border: none;
-  color: var(--text-dim);
-  cursor: pointer;
-  text-align: left;
-  border-left: 2px solid transparent;
-}
-.tree-row:hover { background: var(--surface-2); color: var(--text); }
-.tree-row.active {
-  background: var(--accent-wash);
-  color: var(--text);
-  border-left-color: var(--accent);
-  font-weight: 500;
-}
-.tree-row.child { padding-left: 34px; font-size: 13px; }
-.tree-label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.tree-count {
-  font-size: 11px; color: var(--text-faint);
-  font-variant-numeric: tabular-nums;
-}
-.tree-caret {
-  width: 12px; display: inline-block; text-align: center;
-  color: var(--text-faint); font-size: 9px;
-  transition: transform 0.12s ease;
-}
-.tree-caret.open { transform: rotate(90deg); }
 
 /* ------------------------------------------------------------------ main */
 
@@ -248,7 +213,19 @@ button, input, select, textarea { font: inherit; color: inherit; }
   position: sticky; top: 0; z-index: 5;
   flex-wrap: wrap;
 }
-.toolbar-title { font-size: 15px; font-weight: 600; margin-right: var(--sp-2); }
+/* Where you are looking, first thing in the toolbar and first thing read. */
+.scope { display: flex; align-items: center; gap: var(--sp-3); }
+.scope-field { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+.scope-field > span { color: var(--text-faint); }
+.scope-field select {
+  padding: 6px 9px; min-width: 130px;
+  background: var(--surface-2); border: 1px solid var(--line);
+  border-radius: var(--radius-sm); color: var(--text);
+}
+.scope-field select:hover:not(:disabled) { border-color: var(--line-strong); }
+/* A disabled select still has to be legible: it is showing the answer, not
+   refusing to. Browsers grey it into near-invisibility by default. */
+.scope-field select:disabled { opacity: 1; color: var(--text); border-color: transparent; background: none; font-weight: 500; }
 .toolbar-count { font-size: 12px; color: var(--text-faint); font-variant-numeric: tabular-nums; }
 
 /* Filter chips. A pressed chip is a filter that is on — the state has to read
@@ -343,6 +320,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
   font-size: 10px; font-weight: 600; letter-spacing: 0.05em;
   text-transform: uppercase;
 }
+.live-badge { color: var(--accent); }
 .live-badge .dot { background: var(--live); animation: pulse 2s ease-in-out infinite; }
 @keyframes pulse { 50% { opacity: 0.35; } }
 
@@ -359,8 +337,8 @@ button, input, select, textarea { font: inherit; color: inherit; }
   white-space: nowrap;
 }
 .badge.accent { background: var(--accent-wash); border-color: var(--accent-dim); color: var(--accent); }
-.badge.ok { background: rgba(62, 207, 142, 0.12); border-color: rgba(62, 207, 142, 0.35); color: var(--ok); }
-.badge.warn { background: rgba(240, 180, 41, 0.12); border-color: rgba(240, 180, 41, 0.35); color: var(--warn); }
+.badge.ok { background: var(--sage-wash); border-color: var(--sage-dim); color: var(--sage); }
+.badge.warn { background: rgba(224, 160, 60, 0.13); border-color: rgba(224, 160, 60, 0.4); color: var(--warn); }
 
 /* ---------------------------------------------------------------- player */
 
@@ -445,13 +423,15 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .empty strong { display: block; color: var(--text-dim); margin-bottom: 6px; font-weight: 500; }
 
 .notice {
+  display: flex; align-items: center; gap: var(--sp-2);
   margin: var(--sp-3) var(--sp-4) 0;
-  padding: 9px var(--sp-3);
+  padding: 8px var(--sp-2) 8px var(--sp-3);
   background: var(--accent-wash);
   border: 1px solid var(--accent-dim);
   border-radius: var(--radius-sm);
   font-size: 13px;
 }
+.notice > span { flex: 1; }
 
 .muted { color: var(--text-dim); }
 .small { font-size: 12px; }
@@ -528,3 +508,27 @@ code { font-family: var(--mono); font-size: 12px; }
   gap: var(--sp-2); color: var(--text-faint);
 }
 .player-overlay.offline-tile svg { opacity: 0.45; }
+
+/* How far behind live a tile is. Present on every playing tile, because a
+   camera drifting quietly out of date looks identical to a healthy one. */
+.delay-chip {
+  position: absolute; right: 8px; bottom: 8px; z-index: 3;
+  padding: 2px 7px;
+  font-size: 10px; font-variant-numeric: tabular-nums;
+  background: rgba(0, 0, 0, 0.6);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--text-dim);
+}
+/* Half a minute behind is no longer latency, it is a fault. */
+.delay-chip.stale {
+  color: var(--warn);
+  border-color: rgba(224, 160, 60, 0.5);
+  background: rgba(224, 160, 60, 0.16);
+}
+
+@media (max-width: 900px) {
+  .scope { width: 100%; }
+  .scope-field { flex: 1; }
+  .scope-field select { min-width: 0; width: 100%; }
+}
