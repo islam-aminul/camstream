@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, QueryCommand, PutCommand, DeleteCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { DynamoDBDocumentClient, QueryCommand, PutCommand, DeleteCommand, UpdateCommand, GetCommand } from '@aws-sdk/lib-dynamodb';
 import { IoTDataPlaneClient, PublishCommand } from '@aws-sdk/client-iot-data-plane';
 import { SSMClient, GetParameterCommand } from '@aws-sdk/client-ssm';
 import {
@@ -11,6 +11,7 @@ import type { APIGatewayProxyEventV2WithJWTAuthorizer, APIGatewayProxyStructured
 import { isValidId, parseThingName, thingName as buildThingName, THING_NAME_PATTERN } from '../shared/tenant';
 import { identify, can, targetTenant, ROLES, type Caller, type Role } from '../shared/roles';
 import { fail, json } from '../shared/http';
+import { label } from '../shared/sanitise';
 import { sessionSuperseded } from '../shared/session';
 
 /** A refusal the caller can act on, as distinct from an unexpected failure. */
@@ -20,7 +21,7 @@ class Refused extends Error {
     this.name = 'Refused';
   }
 }
-import { key, slugFor, type CameraRecord, type DiscoveredRecord, type PremisesRecord } from '../shared/registry';
+import { key, slugFor, DEFAULT_MAX_TRANSCODES, type CameraRecord, type DiscoveredRecord, type PremisesRecord } from '../shared/registry';
 import { buildInstaller, isPlatform, PLATFORMS } from './installer';
 
 const TABLE = process.env.REGISTRY_TABLE!;
@@ -66,6 +67,8 @@ export async function handler(
         return await deletePremises(caller, event.pathParameters?.premisesId);
       case 'GET /api/admin/agents':      return await listAgents(caller);
       case 'POST /api/admin/agents':     return await createAgent(caller, event.body);
+      case 'PATCH /api/admin/agents/{thingName}':
+        return await updateAgent(caller, event.pathParameters?.thingName, event.body);
       case 'GET /api/admin/agents/{thingName}/identity':
         return await agentIdentity(caller, event.pathParameters?.thingName);
       case 'GET /api/admin/agents/{thingName}/installer':
@@ -226,8 +229,56 @@ async function listAgents(caller: Caller) {
         // A connected agent whose heartbeat has stopped is the case presence
         // events cannot see: the socket is up and the agent is stuck.
         health: heartbeat(healthOf.get(String(device.thingName))),
+        maxConcurrentTranscodes: Number(device.maxConcurrentTranscodes ?? DEFAULT_MAX_TRANSCODES),
       })),
   });
+}
+
+/**
+ * Sets how many renditions an agent will transcode at once.
+ *
+ * This is a property of the hardware, which only the operator knows: a rack
+ * server and a Raspberry Pi both run this agent. The cap is enforced in two
+ * places on purpose — here, so a viewer is told immediately that no slot is
+ * free, and on the agent, which owns the CPU and cannot rely on the control
+ * plane being reachable or truthful.
+ */
+async function updateAgent(caller: Caller, thingName: string | undefined, rawBody: string | undefined) {
+  if (!can(caller, 'manageEstate')) return fail(403, 'Not permitted to change agents');
+  const thing = label(thingName, 128);
+  if (!thing) return fail(400, 'Invalid thingName');
+
+  let body: { maxConcurrentTranscodes?: unknown };
+  try {
+    body = JSON.parse(rawBody ?? '{}');
+  } catch {
+    return fail(400, 'Body must be JSON');
+  }
+
+  const cap = body.maxConcurrentTranscodes;
+  if (!Number.isInteger(cap) || (cap as number) < 0 || (cap as number) > 64) {
+    return fail(400, 'maxConcurrentTranscodes must be a whole number between 0 and 64');
+  }
+
+  const existing = await ddb.send(new GetCommand({
+    TableName: TABLE,
+    Key: { pk: key.tenant(caller.tenantId), sk: key.device(thing) },
+  }));
+  if (!existing.Item) return fail(404, 'No such agent');
+
+  // Takes the thing name, which encodes tenant and premises both.
+  const outOfScope = refuseOutOfScope(caller, thing);
+  if (outOfScope) return outOfScope;
+
+  await ddb.send(new UpdateCommand({
+    TableName: TABLE,
+    Key: { pk: key.tenant(caller.tenantId), sk: key.device(thing) },
+    UpdateExpression: 'SET maxConcurrentTranscodes = :cap',
+    ExpressionAttributeValues: { ':cap': cap },
+  }));
+  await pushConfig(caller.tenantId, thing);
+
+  return json(200, { thingName: thing, maxConcurrentTranscodes: cap });
 }
 
 /**

@@ -1,0 +1,12 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    // The lambdas are bundled as ESM for Node 22, unlike the CDK app.
+    "module": "ES2022",
+    "moduleResolution": "Bundler",
+    "noEmit": true,
+    "types": ["node"]
+  },
+  "include": ["lambda/**/*.ts"],
+  "exclude": ["node_modules", "cdk.out"]
+}

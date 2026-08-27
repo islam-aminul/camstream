@@ -6,6 +6,7 @@ import { isValidId, parseThingName, premisesScope, withinScope } from '../shared
 import { fail, json } from '../shared/http';
 import { readSession, sessionSuperseded } from '../shared/session';
 import { canDecode } from '../shared/playability';
+import { DEFAULT_MAX_TRANSCODES } from '../shared/registry';
 
 const TABLE = process.env.REGISTRY_TABLE!;
 const IOT_ENDPOINT = process.env.IOT_DATA_ENDPOINT!;
@@ -55,6 +56,17 @@ type Variant = 'source' | 'h264';
 interface DesiredState {
   thingName: string;
   renditions: { cameraId: string; profile: 'sub' | 'main'; variant: Variant }[];
+  /**
+   * Transcodes this agent was asked for and has no slot to run.
+   *
+   * Returned to the viewer so the reason is visible. Without it a capped
+   * transcode is indistinguishable from a broken one: the rendition simply
+   * never appears, and the player waits out its retries and reports the camera
+   * as not being published.
+   */
+  declined?: { cameraId: string; profile: 'sub' | 'main' }[];
+  /** The cap that did the declining, so the message can say what it is. */
+  maxConcurrentTranscodes?: number;
 }
 
 /**
@@ -87,7 +99,13 @@ export async function handler(
     return fail(403, 'Account is not associated with a valid tenant');
   }
 
-  let body: { sessionId?: unknown; grid?: unknown; main?: unknown };
+  let body: {
+    sessionId?: unknown;
+    grid?: unknown;
+    main?: unknown;
+    codecs?: unknown;
+    transcode?: unknown;
+  };
   try {
     body = JSON.parse(event.body ?? '{}');
   } catch {
@@ -113,10 +131,10 @@ export async function handler(
   // Declared by the player from MediaSource.isTypeSupported. Absent means we
   // assume the conservative floor and transcode anything exotic.
   const codecs = Array.isArray(body.codecs)
-    ? body.codecs.filter((c): c is string => typeof c === 'string' && /^[a-z0-9]{1,12}$/i.test(c)).slice(0, 8)
+    ? body.codecs.filter((c: unknown): c is string => typeof c === 'string' && /^[a-z0-9]{1,12}$/i.test(c)).slice(0, 8)
     : [];
   const transcode = Array.isArray(body.transcode)
-    ? body.transcode.filter((c): c is string => isValidId(c)).slice(0, 32)
+    ? body.transcode.filter((c: unknown): c is string => isValidId(c)).slice(0, 32)
     : [];
 
   // At most one full-resolution stream per viewer — this is the cap that keeps
@@ -163,7 +181,7 @@ export async function handler(
 
   const [demands, devices, cameras] = await Promise.all([
     queryPrefix<DemandRecord>(tenantId, 'DEMAND#'),
-    queryPrefix<{ thingName: string }>(tenantId, 'DEVICE#'),
+    queryPrefix<{ thingName: string; maxConcurrentTranscodes?: number }>(tenantId, 'DEVICE#'),
     queryPrefix<CameraRecord>(tenantId, 'LIVECAMERA#'),
   ]);
 
@@ -199,7 +217,7 @@ export async function handler(
 export function resolveDesiredState(
   now: number,
   demands: DemandRecord[],
-  devices: { thingName: string }[],
+  devices: { thingName: string; maxConcurrentTranscodes?: number }[],
   cameras: CameraRecord[],
 ): DesiredState[] {
   const live = demands.filter((d) => d.expiresAt > now);
@@ -242,10 +260,6 @@ export function resolveDesiredState(
   for (const demand of live) {
     const viewerCodecs = demand.codecs ?? [];
     const transcodeRequested = demand.transcode ?? [];
-    const pinned = demand.mainThingName && demand.mainCameraId
-      ? `${demand.mainThingName}/${demand.mainCameraId}`
-      : null;
-
     if (demand.grid) {
       for (const camera of cameras) {
         if (!withinScope(camera.thingName, demand.scope ?? [])) {
@@ -263,12 +277,56 @@ export function resolveDesiredState(
     }
   }
 
-  return [...byThing.entries()].map(([thingName, renditions]) => ({
-    thingName,
-    renditions: [...renditions.values()].sort(
+  const capOf = new Map(devices.map((d) => [
+    d.thingName,
+    typeof d.maxConcurrentTranscodes === 'number' ? d.maxConcurrentTranscodes : DEFAULT_MAX_TRANSCODES,
+  ]));
+
+  return [...byThing.entries()].map(([thingName, renditions]) => {
+    const sorted = [...renditions.values()].sort(
       (a, b) => a.cameraId.localeCompare(b.cameraId) || a.profile.localeCompare(b.profile) || a.variant.localeCompare(b.variant),
-    ),
-  }));
+    );
+    return applyTranscodeCap(thingName, sorted, capOf.get(thingName) ?? DEFAULT_MAX_TRANSCODES);
+  });
+}
+
+/**
+ * Holds an agent to the number of transcodes it is allowed to run.
+ *
+ * Enforced here as well as on the agent so a viewer learns immediately that no
+ * slot is free. The agent enforces it too, since it owns the CPU and cannot
+ * assume the control plane is reachable or truthful — this is the copy that
+ * exists to produce a good message, not the one that protects the hardware.
+ *
+ * Stream copies are never capped and are kept whole: they cost almost nothing,
+ * and letting an encode crowd one out would take down cameras that were
+ * working to serve one that was not.
+ */
+function applyTranscodeCap(
+  thingName: string,
+  renditions: { cameraId: string; profile: 'sub' | 'main'; variant: Variant }[],
+  cap: number,
+): DesiredState {
+  const kept: typeof renditions = [];
+  const declined: { cameraId: string; profile: 'sub' | 'main' }[] = [];
+  let slots = cap;
+
+  for (const rendition of renditions) {
+    if (rendition.variant !== 'h264') {
+      kept.push(rendition);
+      continue;
+    }
+    if (slots > 0) {
+      slots -= 1;
+      kept.push(rendition);
+    } else {
+      declined.push({ cameraId: rendition.cameraId, profile: rendition.profile });
+    }
+  }
+
+  return declined.length > 0
+    ? { thingName, renditions: kept, declined, maxConcurrentTranscodes: cap }
+    : { thingName, renditions: kept };
 }
 
 async function queryPrefix<T>(tenantId: string, prefix: string): Promise<T[]> {

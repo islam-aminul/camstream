@@ -87,13 +87,18 @@ public final class CameraConfig {
      * streams that never needed it, on hardware that may not have an encoder.
      */
     public boolean browserPlayable() {
-        if (sourceCodec == null || !sourceCodec.toLowerCase(java.util.Locale.ROOT).matches("h264|avc1?")) {
+        return playableInBrowser(sourceCodec, sourceCodecProfile);
+    }
+
+    /** The same question asked of values not yet attached to a camera. */
+    public static boolean playableInBrowser(String codec, String profile) {
+        if (codec == null || !codec.toLowerCase(java.util.Locale.ROOT).matches("h264|avc1?")) {
             return false;
         }
-        if (sourceCodecProfile == null || sourceCodecProfile.isBlank()) {
+        if (profile == null || profile.isBlank()) {
             return true;
         }
-        return switch (sourceCodecProfile.toLowerCase(java.util.Locale.ROOT)) {
+        return switch (profile.toLowerCase(java.util.Locale.ROOT).trim()) {
             case "high 10", "high 10 intra", "high 4:2:2", "high 4:2:2 intra",
                  "high 4:4:4 predictive", "high 4:4:4 intra", "cavlc 4:4:4" -> false;
             default -> true;
@@ -108,6 +113,16 @@ public final class CameraConfig {
      * software servers only offer UDP, hence the switch.
      */
     public String rtspTransport = "tcp";
+
+    /**
+     * True for a camera written into agent.yaml rather than resolved from a
+     * discovery sweep.
+     *
+     * Only these need their stream verified: a discovered camera was already
+     * probed when it was found, and re-probing would double the cost for no
+     * new information.
+     */
+    public transient boolean locallyConfigured;
 
     public String urlFor(StreamProfile profile) {
         return profile == StreamProfile.MAIN ? mainStreamUrl : subStreamUrl;

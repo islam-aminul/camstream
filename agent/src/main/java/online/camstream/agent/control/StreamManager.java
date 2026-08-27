@@ -63,6 +63,8 @@ public final class StreamManager implements AutoCloseable {
     private final Map<String, String> publishedLadders = new ConcurrentHashMap<>();
     /** Renditions whose next pipeline follows an encoder restart. */
     private final java.util.Set<Rendition> restartedRenditions = ConcurrentHashMap.newKeySet();
+    /** Transcodes refused because the agent is already at its concurrency cap. */
+    private final java.util.Set<Rendition> declined = ConcurrentHashMap.newKeySet();
 
     private volatile Instant lastInstruction = Instant.now();
 
@@ -92,11 +94,64 @@ public final class StreamManager implements AutoCloseable {
         retryAfter.keySet().removeIf(rendition -> !desired.contains(rendition));
         backoffs.keySet().removeIf(rendition -> !desired.contains(rendition));
 
+        // Copies first, then transcodes up to the cap. Ordering matters: a
+        // copy costs almost nothing and must never be crowded out by an encode
+        // that arrived earlier in the set, or one viewer opening an HEVC
+        // camera would stop cameras that were working perfectly well.
+        List<Rendition> copies = new java.util.ArrayList<>();
+        List<Rendition> transcodes = new java.util.ArrayList<>();
         for (Rendition rendition : desired) {
-            if (!active.containsKey(rendition) && !retryAfter.containsKey(rendition)) {
-                start(rendition);
+            if (active.containsKey(rendition) || retryAfter.containsKey(rendition)) {
+                continue;
             }
+            (needsEncoder(rendition) ? transcodes : copies).add(rendition);
         }
+        // Stable order, so which transcode gets the slot does not change from
+        // one instruction to the next and flap between two cameras.
+        transcodes.sort(java.util.Comparator.comparing(Rendition::toString));
+
+        for (Rendition rendition : copies) {
+            start(rendition);
+        }
+
+        int budget = config.maxConcurrentTranscodes - runningTranscodes();
+        for (Rendition rendition : transcodes) {
+            if (budget <= 0) {
+                if (declined.add(rendition)) {
+                    log.warn("[{}] not transcoding: this agent allows {} at a time and they are all in use",
+                            rendition, config.maxConcurrentTranscodes);
+                }
+                continue;
+            }
+            budget--;
+            declined.remove(rendition);
+            start(rendition);
+        }
+        declined.retainAll(desired);
+    }
+
+    /** Whether this rendition would spend CPU rather than copy bytes. */
+    private boolean needsEncoder(Rendition rendition) {
+        if (rendition.variant() != Variant.H264) {
+            return false;
+        }
+        CameraConfig camera = registry.get(rendition.cameraId());
+        // An unknown camera is not started at all, so it costs no slot.
+        return camera != null && !camera.browserPlayable();
+    }
+
+    private int runningTranscodes() {
+        return (int) active.keySet().stream().filter(this::needsEncoder).count();
+    }
+
+    /**
+     * Renditions the cap turned away.
+     *
+     * Reported upward so a viewer can be told their transcode is waiting for a
+     * slot, rather than being shown a stream that silently never starts.
+     */
+    public Set<Rendition> declined() {
+        return Set.copyOf(declined);
     }
 
     /**

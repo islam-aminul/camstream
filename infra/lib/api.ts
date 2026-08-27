@@ -349,6 +349,7 @@ export class Api extends Construct {
       [apigwv2.HttpMethod.DELETE, '/api/admin/premises/{premisesId}'],
       [apigwv2.HttpMethod.GET, '/api/admin/agents'],
       [apigwv2.HttpMethod.POST, '/api/admin/agents'],
+      [apigwv2.HttpMethod.PATCH, '/api/admin/agents/{thingName}'],
       [apigwv2.HttpMethod.GET, '/api/admin/agents/{thingName}/identity'],
       [apigwv2.HttpMethod.GET, '/api/admin/agents/{thingName}/installer'],
       [apigwv2.HttpMethod.POST, '/api/admin/scan'],

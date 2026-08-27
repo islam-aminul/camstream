@@ -2,8 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Player } from './Player';
 import {
   SessionSuperseded, listCameras, manifestFor, playsNatively, startSession,
-  transcodeWouldHelp, watch, type Camera, type SessionInfo,
-} from './api';
+  transcodeWouldHelp, watch, type Camera, type SessionInfo, declinedTranscodes, type DeclinedTranscode } from './api';
 import { NewPasswordRequired, completeNewPassword, currentSession, signIn, signOut } from './auth';
 import { Admin } from './Admin';
 import { canAdminister } from './admin';
@@ -22,6 +21,9 @@ export default function App() {
    * inferred, because the cost lands on the customer's own hardware.
    */
   const [transcoding, setTranscoding] = useState<string[]>([]);
+  // Transcodes the site has no free slot for. Held separately from failures:
+  // nothing is broken, the answer is "not right now".
+  const [queued, setQueued] = useState<DeclinedTranscode[]>([]);
   /**
    * Cameras this browser accepted the codec for and then failed to decode.
    * Firefox on Windows does exactly that with HEVC, so what actually happened
@@ -102,6 +104,7 @@ export default function App() {
           transcodingRef.current,
         );
         if (!cancelled) {
+          setQueued(declinedTranscodes(result));
           const { cameras: list } = await listCameras();
           if (!cancelled) setCameras(list);
         }
@@ -131,7 +134,7 @@ export default function App() {
       true,
       selected ? { thingName: selected.thingName, cameraId: selected.cameraId } : undefined,
       transcoding,
-    ).catch(() => undefined);
+    ).then((result) => setQueued(declinedTranscodes(result))).catch(() => undefined);
   }, [selected, session, transcoding]);
 
   if (screen === 'loading') return <div className="centre">Loading…</div>;
@@ -193,7 +196,9 @@ export default function App() {
               {transcoding.includes(selected.cameraId) ? 'main · transcoded' : 'main stream'}
             </span>
           </div>
-          {(playsNatively(selected) && !undecodable.includes(selected.cameraId))
+          {queuedFor(queued, selected) ? (
+            <TranscodeQueued limit={queuedFor(queued, selected)!.limit} />
+          ) : (playsNatively(selected) && !undecodable.includes(selected.cameraId))
             || transcoding.includes(selected.cameraId) ? (
             <Player
               src={manifestFor(selected, 'main', transcoding.includes(selected.cameraId))}
@@ -222,8 +227,9 @@ export default function App() {
               key={`${camera.thingName}/${camera.cameraId}`}
               className="tile"
               onClick={() => {
-                const usable = (playsNatively(camera) && !undecodable.includes(camera.cameraId))
-                  || transcoding.includes(camera.cameraId);
+                const usable = ((playsNatively(camera) && !undecodable.includes(camera.cameraId))
+                  || transcoding.includes(camera.cameraId))
+                  && !queuedFor(queued, camera);
                 if (camera.online && usable) {
                   setSelected(camera);
                 }
@@ -232,6 +238,10 @@ export default function App() {
             >
               {!camera.online ? (
                 <div className="player"><div className="player-overlay">Offline</div></div>
+              ) : queuedFor(queued, camera) ? (
+                // Checked before the player, so a capped transcode never
+                // becomes a stream that mysteriously fails to arrive.
+                <TranscodeQueued limit={queuedFor(queued, camera)!.limit} />
               ) : unavailable.includes(camera.cameraId) ? (
                 <NotPublishing name={camera.displayName} />
               ) : (playsNatively(camera) && !undecodable.includes(camera.cameraId))
@@ -294,6 +304,35 @@ function Unplayable({ camera, onTranscode }: { camera: Camera; onTranscode: () =
         ) : (
           <small>No other rendition would help — try Safari or Chrome.</small>
         )}
+      </div>
+    </div>
+  );
+}
+
+/** Whether this camera's transcode is waiting for a free slot. */
+function queuedFor(queued: DeclinedTranscode[], camera: Camera): DeclinedTranscode | undefined {
+  return queued.find((entry) => entry.cameraId === camera.cameraId);
+}
+
+/**
+ * The site is already transcoding as much as it is allowed to.
+ *
+ * Said plainly, with the limit and where it is changed, because the viewer
+ * cannot act on this themselves and the alternative — a stream that never
+ * arrives — sends them looking for a fault that is not there.
+ */
+function TranscodeQueued({ limit }: { limit: number }) {
+  return (
+    <div className="player">
+      <div className="player-overlay unplayable">
+        <span>Waiting for a transcoding slot</span>
+        <small>
+          {limit === 0
+            ? 'This site is set not to transcode. An administrator can allow it.'
+            : `This site transcodes ${limit} camera${limit === 1 ? '' : 's'} at a time, and `
+              + `${limit === 1 ? 'that slot is' : 'those slots are'} in use. Close another `
+              + 'transcoded camera, or ask an administrator to raise the limit.'}
+        </small>
       </div>
     </div>
   );

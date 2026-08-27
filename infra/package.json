@@ -12,7 +12,8 @@
     "deploy": "cdk deploy --all",
     "diff": "cdk diff",
     "destroy": "cdk destroy --all",
-    "test": "vitest run"
+    "test": "tsc --noEmit -p tsconfig.lambda.json && vitest run",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.lambda.json"
   },
   "devDependencies": {
     "@aws-sdk/client-cognito-identity-provider": "^3.1116.0",

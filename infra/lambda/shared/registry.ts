@@ -118,3 +118,14 @@ export function slugFor(identity: string): string {
   const collapsed = slug.replace(/-{2,}/g, '-');
   return collapsed.slice(0, 32).padEnd(3, '0');
 }
+
+/**
+ * Transcodes one agent will run at once, until an administrator says
+ * otherwise.
+ *
+ * One, because that is the safe assumption for hardware nobody has measured:
+ * an encode costs roughly a core per 1080p stream, and an edge box is usually
+ * a small one with other work to do. Raising it is a decision about a specific
+ * machine, so it belongs to whoever knows that machine.
+ */
+export const DEFAULT_MAX_TRANSCODES = 1;

@@ -158,6 +158,17 @@ public final class DeviceClient {
                         node.path("mainProfileToken").asText(null)));
             }
             registry.setApproved(approved);
+
+            // Set from the console, because how much CPU this box can spare is
+            // something the operator knows and the agent cannot measure.
+            JsonNode cap = root.path("maxConcurrentTranscodes");
+            if (cap.isInt() && cap.asInt() >= 0 && cap.asInt() <= 64
+                    && cap.asInt() != config.maxConcurrentTranscodes) {
+                log.info("concurrent transcode limit set to {} (was {})",
+                        cap.asInt(), config.maxConcurrentTranscodes);
+                config.maxConcurrentTranscodes = cap.asInt();
+            }
+
             log.info("configuration v{} applied: {} credential(s), {} assigned camera(s)",
                     configVersion, envelopes.size(), approved.size());
 
