@@ -115,8 +115,16 @@ public final class CameraRegistry {
             return null;
         }
 
-        String subUrl = discovery.streamUrl(assignment.identity(), assignment.subProfileToken());
-        String mainUrl = discovery.streamUrl(assignment.identity(), assignment.mainProfileToken());
+        // ONVIF profile tokens are not stable. This camera regenerates them on
+        // every power cycle, so an approval made against yesterday's token
+        // resolves to nothing today. Fall back to picking by resolution, which
+        // is what the tokens stood for anyway: smallest is the grid stream,
+        // largest is the detail stream.
+        String subToken = resolveToken(found, assignment.subProfileToken(), false);
+        String mainToken = resolveToken(found, assignment.mainProfileToken(), true);
+
+        String subUrl = discovery.streamUrl(assignment.identity(), subToken);
+        String mainUrl = discovery.streamUrl(assignment.identity(), mainToken);
         if (subUrl == null && mainUrl == null) {
             log.warn("approved camera {} has no usable stream URL — credentials may be missing",
                     assignment.identity());
@@ -132,8 +140,8 @@ public final class CameraRegistry {
         camera.mainStreamUrl = mainUrl != null ? mainUrl : subUrl;
         camera.rtspTransport = config.cameras.isEmpty() ? "tcp" : config.cameras.get(0).rtspTransport;
 
-        DiscoveredCamera.DiscoveredProfile sub = found.profiles.get(assignment.subProfileToken());
-        DiscoveredCamera.DiscoveredProfile main = found.profiles.get(assignment.mainProfileToken());
+        DiscoveredCamera.DiscoveredProfile sub = found.profiles.get(subToken);
+        DiscoveredCamera.DiscoveredProfile main = found.profiles.get(mainToken);
         if (sub != null) {
             camera.subWidth = sub.width;
             camera.subHeight = sub.height;
@@ -150,6 +158,49 @@ public final class CameraRegistry {
 
         camera.validate();
         return camera;
+    }
+
+    /**
+     * The profile token to actually use.
+     *
+     * Prefers the approved token, then a profile with the same name, and
+     * finally the smallest or largest rendition by pixel count. A camera that
+     * renumbers its profiles on reboot must not take its own stream offline
+     * until somebody notices and re-approves it.
+     */
+    private static String resolveToken(DiscoveredCamera camera, String approved, boolean largest) {
+        if (approved != null && camera.profiles.containsKey(approved)) {
+            return approved;
+        }
+        if (approved != null && !camera.profiles.isEmpty()) {
+            log.info("camera {} no longer has profile {} — selecting the {} rendition instead",
+                    camera.id, approved, largest ? "largest" : "smallest");
+        }
+
+        // Deliberately not filtered on rtspUrl: these profiles come from the
+        // redacted view, where that field is always null by design. The URL is
+        // fetched separately from the unredacted scan once a token is chosen.
+        DiscoveredCamera.DiscoveredProfile chosen = null;
+        for (DiscoveredCamera.DiscoveredProfile candidate : camera.profiles.values()) {
+            if (chosen == null) {
+                chosen = candidate;
+                continue;
+            }
+            long candidateArea = area(candidate);
+            long chosenArea = area(chosen);
+            if (largest ? candidateArea > chosenArea : candidateArea < chosenArea) {
+                chosen = candidate;
+            }
+        }
+        return chosen == null ? approved : chosen.token;
+    }
+
+    /** Unknown dimensions sort last for "largest" and first for "smallest". */
+    private static long area(DiscoveredCamera.DiscoveredProfile profile) {
+        if (profile.width == null || profile.height == null) {
+            return 0;
+        }
+        return (long) profile.width * profile.height;
     }
 
     /** Everything reportable upward, for the heartbeat's camera list. */
