@@ -137,11 +137,15 @@ public final class CameraRegistry {
         String subToken = resolveToken(found, assignment.subProfileToken(), false);
         String mainToken = resolveToken(found, assignment.mainProfileToken(), true);
 
-        String subUrl = discovery.streamUrl(assignment.identity(), subToken);
-        String mainUrl = discovery.streamUrl(assignment.identity(), mainToken);
+        // Keyed by what the camera is called now, not by what the approval
+        // called it. The scan is indexed by current identity, so looking it up
+        // under a superseded one finds nothing — and the camera would resolve,
+        // report its profiles, and then be dropped for having no stream.
+        String subUrl = discovery.streamUrl(found.id, subToken);
+        String mainUrl = discovery.streamUrl(found.id, mainToken);
         if (subUrl == null && mainUrl == null) {
             log.warn("approved camera {} has no usable stream URL — credentials may be missing",
-                    assignment.identity());
+                    found.id);
             return null;
         }
 

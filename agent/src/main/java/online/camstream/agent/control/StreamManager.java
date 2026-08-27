@@ -9,6 +9,7 @@ import online.camstream.agent.supervise.Backoff;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.services.s3.model.DeleteObjectRequest;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -323,8 +324,32 @@ public final class StreamManager implements AutoCloseable {
         Optional.ofNullable(active.remove(rendition)).ifPresent(pipeline -> {
             pipeline.ffmpeg().close();
             clean(pipeline.directory());
+            retirePlaylist(rendition);
             log.info("[{}] stopped", rendition);
         });
+    }
+
+    /**
+     * Removes the playlist when a rendition stops.
+     *
+     * The segments it names stay in the bucket until their lifecycle rule
+     * expires them, and the playlist would otherwise go on describing them as
+     * live. A viewer opening this camera an hour later loaded that playlist and
+     * watched hour-old footage while waiting for the encoder to start — the
+     * stream looked like it was working, and was showing the wrong day.
+     *
+     * Deleting it means the manifest 404s until real segments exist, which the
+     * player already understands as "starting". One DELETE per stop.
+     */
+    private void retirePlaylist(Rendition rendition) {
+        String key = config.keyPrefix() + rendition.keySuffix() + "index.m3u8";
+        try {
+            s3.deleteObject(DeleteObjectRequest.builder().bucket(config.bucket).key(key).build());
+        } catch (RuntimeException e) {
+            // A playlist left behind is untidy, not fatal; the next start
+            // overwrites it. Never let this fail a shutdown.
+            log.debug("could not remove {}: {}", key, e.toString());
+        }
     }
 
     private void stopAll() {

@@ -6,6 +6,7 @@ import org.slf4j.LoggerFactory;
 
 import java.net.URI;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -128,18 +129,7 @@ public final class DiscoveryService implements CameraSource {
         // camera on the far side then reports the router's address. Left alone
         // that would fold a dozen cameras into one identity, so the value is
         // dropped and identity falls through to the serial.
-        Map<String, Long> perMac = found.values().stream()
-                .map(camera -> camera.macAddress)
-                .filter(Objects::nonNull)
-                .collect(Collectors.groupingBy(mac -> mac, Collectors.counting()));
-        for (DiscoveredCamera camera : found.values()) {
-            if (camera.macAddress != null && perMac.getOrDefault(camera.macAddress, 0L) > 1) {
-                log.warn("{} devices report MAC {} — a router is answering for them, "
-                                + "so it cannot identify any of them",
-                        perMac.get(camera.macAddress), camera.macAddress);
-                camera.macAddress = null;
-            }
-        }
+        discardSharedMacs(found.values());
 
         for (DiscoveredCamera camera : found.values()) {
             // Identity first, from whatever is already known, so that
@@ -147,6 +137,14 @@ public final class DiscoveryService implements CameraSource {
             // Interrogation may then upgrade it once a serial number appears.
             assignIdentity(camera);
             interrogate(camera);
+            assignIdentity(camera);
+        }
+
+        // Again, because interrogation can have introduced addresses ARP never
+        // saw. Cloned firmware shipping one address across a production run is
+        // rarer than proxy ARP but no less fatal to an identity.
+        discardSharedMacs(found.values());
+        for (DiscoveredCamera camera : found.values()) {
             assignIdentity(camera);
         }
 
@@ -207,6 +205,26 @@ public final class DiscoveryService implements CameraSource {
                 .toList();
     }
 
+    /**
+     * Drops any hardware address claimed by more than one device.
+     *
+     * Whatever the source, an address two devices share cannot identify either
+     * of them — so it is discarded and identity falls through to the serial.
+     */
+    private static void discardSharedMacs(Collection<DiscoveredCamera> cameras) {
+        Map<String, Long> perMac = cameras.stream()
+                .map(camera -> camera.macAddress)
+                .filter(Objects::nonNull)
+                .collect(Collectors.groupingBy(mac -> mac, Collectors.counting()));
+        for (DiscoveredCamera camera : cameras) {
+            if (camera.macAddress != null && perMac.getOrDefault(camera.macAddress, 0L) > 1) {
+                log.warn("{} devices report hardware address {} — it cannot identify any of them",
+                        perMac.get(camera.macAddress), camera.macAddress);
+                camera.macAddress = null;
+            }
+        }
+    }
+
     private static String macIdentity(DiscoveredCamera camera) {
         if (camera.macAddress == null || camera.macAddress.isBlank()) {
             return null;
@@ -252,6 +270,18 @@ public final class DiscoveryService implements CameraSource {
                     continue;
                 }
                 collectProfiles(camera, credential);
+                // Ask the camera for its own MAC where ARP could not supply
+                // one. ARP only sees the local segment, so a camera a routed
+                // hop away — most of them, on a site of any size — would
+                // otherwise fall back to identifying by serial number.
+                if (camera.macAddress == null || camera.macAddress.isBlank()) {
+                    String mac = onvif.hardwareAddress(camera, credential.username(), credential.password());
+                    if (mac != null) {
+                        log.info("camera at {} reported its hardware address over ONVIF: {}",
+                                camera.ipAddress, mac);
+                        camera.macAddress = mac;
+                    }
+                }
                 camera.authState = DiscoveredCamera.AuthState.AUTHENTICATED;
                 return;
             } catch (OnvifClient.AuthenticationFailed e) {

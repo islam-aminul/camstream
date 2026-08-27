@@ -14,6 +14,9 @@ import java.security.SecureRandom;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Locale;
 import java.util.Base64;
 
 /**
@@ -29,6 +32,8 @@ final class OnvifClient {
     private static final Logger log = LoggerFactory.getLogger(OnvifClient.class);
 
     private static final String DEVICE_NS = "http://www.onvif.org/ver10/device/wsdl";
+    private static final java.util.regex.Pattern MAC_ADDRESS =
+            java.util.regex.Pattern.compile("([0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2}");
     private static final String MEDIA_NS = "http://www.onvif.org/ver10/media/wsdl";
     private static final String MEDIA2_NS = "http://www.onvif.org/ver20/media/wsdl";
 
@@ -132,6 +137,58 @@ final class OnvifClient {
         camera.model = Xml.text(response, "Model");
         camera.firmware = Xml.text(response, "FirmwareVersion");
         camera.serialNumber = Xml.text(response, "SerialNumber");
+    }
+
+    /**
+     * The camera's own hardware address, asked of the camera itself.
+     *
+     * ARP is the cheaper source but only sees the local segment: a camera one
+     * routed hop away has no ARP entry at all, and on a site of any size most
+     * of them are. The camera knows its own MAC regardless of how far away it
+     * is, so this is what makes a hardware-address identity usable beyond a
+     * flat network.
+     *
+     * Returns null rather than throwing: some firmware restricts
+     * GetNetworkInterfaces to an administrator account, and a viewer-level
+     * credential failing here is ordinary, not an error.
+     */
+    String hardwareAddress(DiscoveredCamera camera, String username, String password) {
+        try {
+            Document response = call(camera.onvifServiceUrl, DEVICE_NS,
+                    "<t:GetNetworkInterfaces/>", username, password);
+
+            // A camera can report several interfaces — a wired one and a
+            // wireless one, and sometimes a disabled interface with a zeroed
+            // address. Enabled first, and never a zero address, or two cameras
+            // would agree on the same identity.
+            // The specification names the repeated element "NetworkInterfaces",
+            // plural, even though each one describes a single interface. The
+            // singular is accepted too: firmware gets this wrong both ways.
+            List<Element> interfaces = new ArrayList<>(Xml.elements(response, "NetworkInterfaces"));
+            interfaces.addAll(Xml.elements(response, "NetworkInterface"));
+
+            String fallback = null;
+            for (Element iface : interfaces) {
+                String mac = Xml.text(iface, "HwAddress");
+                if (mac == null || !MAC_ADDRESS.matcher(mac.trim()).matches()) {
+                    continue;
+                }
+                String normalised = mac.trim().replace('-', ':').toLowerCase(Locale.ROOT);
+                if (normalised.equals("00:00:00:00:00:00")) {
+                    continue;
+                }
+                if ("true".equalsIgnoreCase(Xml.text(iface, "Enabled"))) {
+                    return normalised;
+                }
+                if (fallback == null) {
+                    fallback = normalised;
+                }
+            }
+            return fallback;
+        } catch (Exception e) {
+            log.debug("GetNetworkInterfaces failed for {}: {}", camera.ipAddress, e.toString());
+            return null;
+        }
     }
 
     /** Media service endpoint, which is frequently not the device endpoint. */
