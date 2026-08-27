@@ -1,5 +1,5 @@
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, QueryCommand, PutCommand, GetCommand } from '@aws-sdk/lib-dynamodb';
+import { DynamoDBDocumentClient, QueryCommand, PutCommand, GetCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { IoTDataPlaneClient, PublishCommand } from '@aws-sdk/client-iot-data-plane';
 import type { APIGatewayProxyEventV2WithJWTAuthorizer, APIGatewayProxyStructuredResultV2 } from 'aws-lambda';
 import { isValidId, parseThingName, premisesScope, withinScope } from '../shared/tenant';
@@ -16,6 +16,16 @@ const IOT_ENDPOINT = process.env.IOT_DATA_ENDPOINT!;
  * inside this, so closing a tab stops the stream within a minute.
  */
 const DEMAND_TTL_SECONDS = 60;
+
+/**
+ * How long an unchanged desired state may go unrepeated.
+ *
+ * Publishing only on change is what makes the fan-out affordable, but MQTT at
+ * QoS 1 to a disconnected agent is still a message that lands nowhere. A
+ * periodic resend bounds how long a missed one can leave an agent out of step
+ * without putting the per-keepalive cost back.
+ */
+const WATCH_RESEND_SECONDS = 300;
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const iot = new IoTDataPlaneClient({ endpoint: `https://${IOT_ENDPOINT}` });
@@ -58,6 +68,15 @@ interface DemandRecord {
   /** Premises this viewer may drive. Empty means the whole tenant. */
   scope?: string[];
   expiresAt: number;
+}
+
+interface DeviceRecord {
+  thingName: string;
+  maxConcurrentTranscodes?: number;
+  /** Digest of the last desired state actually published to this agent. */
+  watchDigest?: string;
+  /** When an unchanged state should be repeated anyway. */
+  watchResendAfter?: number;
 }
 
 interface CameraRecord {
@@ -159,8 +178,24 @@ export async function handler(
   const codecs = Array.isArray(body.codecs)
     ? body.codecs.filter((c: unknown): c is string => typeof c === 'string' && /^[a-z0-9]{1,12}$/i.test(c)).slice(0, 8)
     : [];
+  // Keyed "thingName/cameraId", like `visible`. Keyed by cameraId alone, a
+  // viewer asking to transcode their own cam-01 started an encode on every
+  // agent in the tenant that happened to have a camera of that name — burning
+  // a scarce slot, and the operator's CPU, at a site nobody had asked about.
+  // Bare ids are still accepted and scoped to what the viewer can see, so an
+  // older player keeps working.
   const transcode = Array.isArray(body.transcode)
-    ? body.transcode.filter((c: unknown): c is string => isValidId(c)).slice(0, 32)
+    ? body.transcode
+        .filter((c: unknown): c is string => typeof c === 'string' && c.length <= 160)
+        .flatMap((entry: string) => {
+          if (entry.includes('/')) {
+            const slash = entry.indexOf('/');
+            return parseThingName(entry.slice(0, slash)) && isValidId(entry.slice(slash + 1))
+              ? [entry] : [];
+          }
+          return isValidId(entry) ? visible.map((v) => `${v.slice(0, v.indexOf('/'))}/${entry}`) : [];
+        })
+        .slice(0, 32)
     : [];
 
   // At most one full-resolution stream per viewer — this is the cap that keeps
@@ -196,8 +231,8 @@ export async function handler(
   }));
   const wasRequestedAt = (previous.Item?.transcodeSince ?? {}) as Record<string, number>;
   const transcodeSince: Record<string, number> = {};
-  for (const cameraId of transcode) {
-    transcodeSince[cameraId] = wasRequestedAt[cameraId] ?? now;
+  for (const entry of transcode) {
+    transcodeSince[entry] = wasRequestedAt[entry] ?? now;
   }
 
   await ddb.send(
@@ -221,25 +256,49 @@ export async function handler(
 
   const [demands, devices, cameras] = await Promise.all([
     queryPrefix<DemandRecord>(tenantId, 'DEMAND#'),
-    queryPrefix<{ thingName: string; maxConcurrentTranscodes?: number }>(tenantId, 'DEVICE#'),
+    queryPrefix<DeviceRecord>(tenantId, 'DEVICE#'),
     queryPrefix<CameraRecord>(tenantId, 'LIVECAMERA#'),
   ]);
+  const digestOf = new Map(devices.map((d) => [d.thingName, d.watchDigest]));
+  const resendDueAt = new Map(devices.map((d) => [d.thingName, d.watchResendAfter ?? 0]));
 
   const desired = resolveDesiredState(now, demands, devices, cameras);
 
-  // Every known device is told its full desired state, including an empty one,
-  // so an agent whose last viewer left learns to stop rather than time out.
-  await Promise.all(
-    desired.map((state) =>
-      iot.send(
-        new PublishCommand({
-          topic: `camstream/${state.thingName}/watch`,
-          qos: 1,
-          payload: Buffer.from(JSON.stringify({ renditions: state.renditions, issuedAt: now })),
-        }),
-      ),
-    ),
-  );
+  // Every agent is told its full desired state, including an empty one, so one
+  // whose last viewer left learns to stop rather than time out — but only when
+  // that state has actually changed.
+  //
+  // This used to publish to every agent in the tenant on every keepalive. The
+  // player re-posts every 25 seconds per viewer, so the cost was
+  // agents x viewers x 2.4 a minute, almost all of it telling agents nothing
+  // had happened. A hundred-agent tenant with twenty viewers was some 4,800
+  // messages a minute to say so.
+  //
+  // The digest lives on the device record, so a resend also happens whenever
+  // the record is rewritten — and `resendAfter` bounds how long a dropped
+  // message can leave an agent out of step.
+  const publishes = desired.map(async (state) => {
+    const digest = JSON.stringify(state.renditions);
+    const previousDigest = digestOf.get(state.thingName);
+    const dueAt = resendDueAt.get(state.thingName) ?? 0;
+    if (digest === previousDigest && now < dueAt) {
+      return;
+    }
+    await iot.send(
+      new PublishCommand({
+        topic: `camstream/${state.thingName}/watch`,
+        qos: 1,
+        payload: Buffer.from(JSON.stringify({ renditions: state.renditions, issuedAt: now })),
+      }),
+    );
+    await ddb.send(new UpdateCommand({
+      TableName: TABLE,
+      Key: { pk: `TENANT#${tenantId}`, sk: `DEVICE#${state.thingName}` },
+      UpdateExpression: 'SET watchDigest = :digest, watchResendAfter = :due',
+      ExpressionAttributeValues: { ':digest': digest, ':due': now + WATCH_RESEND_SECONDS },
+    }));
+  });
+  await Promise.all(publishes);
 
   return json(200, {
     keepaliveInSeconds: Math.floor(DEMAND_TTL_SECONDS / 2),
@@ -263,7 +322,7 @@ export async function handler(
 export function resolveDesiredState(
   now: number,
   demands: DemandRecord[],
-  devices: { thingName: string; maxConcurrentTranscodes?: number }[],
+  devices: DeviceRecord[],
   cameras: CameraRecord[],
 ): DesiredState[] {
   const live = demands.filter((d) => d.expiresAt > now);
@@ -298,7 +357,7 @@ export function resolveDesiredState(
     const variant = variantFor(
       codecByCamera.get(`${thingName}/${cameraId}`),
       viewerCodecs,
-      transcodeRequested.includes(cameraId),
+      transcodeRequested.includes(`${thingName}/${cameraId}`),
     );
     if (variant === null) {
       return;
@@ -309,10 +368,10 @@ export function resolveDesiredState(
   for (const demand of live) {
     const viewerCodecs = demand.codecs ?? [];
     const transcodeRequested = demand.transcode ?? [];
-    for (const [cameraId, at] of Object.entries(demand.transcodeSince ?? {})) {
-      const existing = requestedAt.get(cameraId);
+    for (const [entry, at] of Object.entries(demand.transcodeSince ?? {})) {
+      const existing = requestedAt.get(entry);
       if (existing === undefined || at < existing) {
-        requestedAt.set(cameraId, at);
+        requestedAt.set(entry, at);
       }
     }
     for (const entry of demand.visible ?? []) {
@@ -377,9 +436,10 @@ function applyTranscodeCap(
   // later request evict a transcode somebody was already watching — and, with
   // two viewers, let one silently take the other's stream away. Ties fall back
   // to the name so the choice is at least stable between calls.
+  const queuedAt = (r: { cameraId: string }) => requestedAt.get(`${thingName}/${r.cameraId}`) ?? Infinity;
   const contenders = renditions
     .filter((r) => r.variant === 'h264')
-    .sort((a, b) => (requestedAt.get(a.cameraId) ?? Infinity) - (requestedAt.get(b.cameraId) ?? Infinity)
+    .sort((a, b) => queuedAt(a) - queuedAt(b)
       || a.cameraId.localeCompare(b.cameraId)
       || a.profile.localeCompare(b.profile));
   const granted = new Set(contenders.slice(0, Math.max(0, cap))

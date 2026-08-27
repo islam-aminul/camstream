@@ -252,6 +252,15 @@ public final class DeviceClient {
             if (camera.macAddress != null && !camera.macAddress.isBlank()) {
                 node.put("macAddress", camera.macAddress);
             }
+            // The grid shows the sub stream, so those are the dimensions the
+            // console means by "resolution". It read them from the record and
+            // they were never written, so the field was dead on both ends.
+            Integer width = camera.widthFor(StreamProfile.SUB);
+            Integer height = camera.heightFor(StreamProfile.SUB);
+            if (width != null && width > 0 && height != null && height > 0) {
+                node.put("width", width);
+                node.put("height", height);
+            }
             ArrayNode profiles = node.putArray("profiles");
             for (StreamProfile profile : StreamProfile.values()) {
                 if (camera.supports(profile)) {

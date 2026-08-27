@@ -352,6 +352,9 @@ export class Api extends Construct {
           // acting on it — deleting one used to check the caller's role but
           // never the target's tenant.
           'cognito-idp:AdminGetUser',
+          // Changing a role means leaving the old group as well as joining the
+          // new one, and moving someone between sites rewrites an attribute.
+          'cognito-idp:AdminUpdateUserAttributes',
           'cognito-idp:AdminAddUserToGroup',
           'cognito-idp:AdminRemoveUserFromGroup',
           // Needed to report each user's role, which is group membership.
@@ -383,6 +386,7 @@ export class Api extends Construct {
       [apigwv2.HttpMethod.DELETE, '/api/admin/credentials'],
       [apigwv2.HttpMethod.GET, '/api/admin/users'],
       [apigwv2.HttpMethod.POST, '/api/admin/users'],
+      [apigwv2.HttpMethod.PATCH, '/api/admin/users/{username}'],
       [apigwv2.HttpMethod.DELETE, '/api/admin/users/{username}'],
     ] as [apigwv2.HttpMethod, string][]) {
       this.httpApi.addRoutes({

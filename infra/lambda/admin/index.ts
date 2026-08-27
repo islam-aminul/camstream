@@ -9,10 +9,11 @@ import {
 import { SSMClient, GetParameterCommand } from '@aws-sdk/client-ssm';
 import {
   CognitoIdentityProviderClient, ListUsersCommand, AdminCreateUserCommand, AdminDeleteUserCommand, AdminGetUserCommand,
-  AdminAddUserToGroupCommand, AdminListGroupsForUserCommand,
+  AdminAddUserToGroupCommand, AdminListGroupsForUserCommand, AdminRemoveUserFromGroupCommand,
+  AdminUpdateUserAttributesCommand,
 } from '@aws-sdk/client-cognito-identity-provider';
 import type { APIGatewayProxyEventV2WithJWTAuthorizer, APIGatewayProxyStructuredResultV2 } from 'aws-lambda';
-import { isValidId, parseThingName, thingName as buildThingName, THING_NAME_PATTERN } from '../shared/tenant';
+import { isValidId, parseThingName, thingName as buildThingName, isThingName } from '../shared/tenant';
 import { identify, can, targetTenant, ROLES, type Caller, type Role } from '../shared/roles';
 import { fail, json } from '../shared/http';
 import { label } from '../shared/sanitise';
@@ -70,11 +71,12 @@ export async function handler(
   try {
     switch (route) {
       case 'GET /api/admin/me':          return json(200, { ...caller });
-      case 'GET /api/admin/premises':    return await listPremises(caller);
+      case 'GET /api/admin/premises':    return await listPremises(caller, event.queryStringParameters?.tenantId);
       case 'POST /api/admin/premises':   return await createPremises(caller, event.body);
       case 'DELETE /api/admin/premises/{premisesId}':
-        return await deletePremises(caller, event.pathParameters?.premisesId);
-      case 'GET /api/admin/agents':      return await listAgents(caller);
+        return await deletePremises(caller, event.pathParameters?.premisesId,
+          event.queryStringParameters?.tenantId);
+      case 'GET /api/admin/agents':      return await listAgents(caller, event.queryStringParameters?.tenantId);
       case 'POST /api/admin/agents':     return await createAgent(caller, event.body);
       case 'PATCH /api/admin/agents/{thingName}':
         return await updateAgent(caller, event.pathParameters?.thingName, event.body);
@@ -96,6 +98,8 @@ export async function handler(
       case 'POST /api/admin/scan':       return await triggerScan(caller, event.body);
       case 'GET /api/admin/users':       return await listUsers(caller);
       case 'POST /api/admin/users':      return await createUser(caller, event.body);
+      case 'PATCH /api/admin/users/{username}':
+        return await updateUser(caller, event.pathParameters?.username, event.body);
       case 'DELETE /api/admin/users/{username}':
         return await deleteUser(caller, event.pathParameters?.username);
       default:
@@ -166,10 +170,24 @@ function refuseOutOfScope(caller: Caller, thing: string): APIGatewayProxyStructu
 
 // ---------------------------------------------------------------- premises
 
-async function listPremises(caller: Caller) {
+/**
+ * The tenant a read should address.
+ *
+ * Creating a premises or an agent already accepted a `tenantId` for a
+ * superadmin, but every read and delete hard-coded the caller's own — so
+ * onboarding a customer half-worked: you could create their site and then not
+ * see it. Reads take the same optional parameter, resolved by the same rule.
+ */
+function readTenant(caller: Caller, requested: string | undefined): string | null {
+  return targetTenant(caller, requested);
+}
+
+async function listPremises(caller: Caller, requestedTenant?: string) {
   if (!can(caller, 'manageEstate')) return fail(403, 'Not permitted to list premises');
-  const premises = await queryPrefix<PremisesRecord>(caller.tenantId, 'PREMISES#');
-  return json(200, { premises: premises.filter((p) => visible(caller, p.premisesId)) });
+  const tenantId = readTenant(caller, requestedTenant);
+  if (!tenantId) return fail(403, 'Not permitted to act on that tenant');
+  const premises = await queryPrefix<PremisesRecord>(tenantId, 'PREMISES#');
+  return json(200, { tenantId, premises: premises.filter((p) => visible(caller, p.premisesId)) });
 }
 
 async function createPremises(caller: Caller, rawBody: string | undefined) {
@@ -210,32 +228,36 @@ async function createPremises(caller: Caller, rawBody: string | undefined) {
   return json(200, { premisesId, tenantId });
 }
 
-async function deletePremises(caller: Caller, premisesId: string | undefined) {
+async function deletePremises(caller: Caller, premisesId: string | undefined, requestedTenant?: string) {
   if (!can(caller, 'manageEstate')) return fail(403, 'Not permitted');
   if (!premisesId || !isValidId(premisesId)) return fail(400, 'Invalid premises id');
   if (!visible(caller, premisesId)) return fail(403, 'Not permitted for that premises');
+  const tenantId = readTenant(caller, requestedTenant);
+  if (!tenantId) return fail(403, 'Not permitted to act on that tenant');
 
-  const agents = await queryPrefix<Record<string, unknown>>(caller.tenantId, 'DEVICE#');
+  const agents = await queryPrefix<Record<string, unknown>>(tenantId, 'DEVICE#');
   const attached = agents.filter((a) => a.premisesId === premisesId);
   if (attached.length > 0) {
     // Deleting it would orphan agents whose thing names encode it.
     return fail(400, `${attached.length} agent(s) are still assigned to this premises`);
   }
   await ddb.send(new DeleteCommand({
-    TableName: TABLE, Key: { pk: key.tenant(caller.tenantId), sk: key.premises(premisesId) },
+    TableName: TABLE, Key: { pk: key.tenant(tenantId), sk: key.premises(premisesId) },
   }));
-  return json(200, { removed: premisesId });
+  return json(200, { removed: premisesId, tenantId });
 }
 
 // ------------------------------------------------------------------ agents
 
-async function listAgents(caller: Caller) {
+async function listAgents(caller: Caller, requestedTenant?: string) {
   if (!can(caller, 'manageEstate')) return fail(403, 'Not permitted to list agents');
+  const forTenant = readTenant(caller, requestedTenant);
+  if (!forTenant) return fail(403, 'Not permitted to act on that tenant');
   // Health arrives on its own item, written directly by an IoT rule, so it is
   // read alongside the registration rather than being part of it.
   const [devices, health] = await Promise.all([
-    queryPrefix<Record<string, unknown>>(caller.tenantId, 'DEVICE#'),
-    queryPrefix<Record<string, unknown>>(caller.tenantId, 'HEALTH#'),
+    queryPrefix<Record<string, unknown>>(forTenant, 'DEVICE#'),
+    queryPrefix<Record<string, unknown>>(forTenant, 'HEALTH#'),
   ]);
   const healthOf = new Map(health.map((h) => [String(h.thingName), h]));
   return json(200, {
@@ -505,9 +527,9 @@ async function createAgent(caller: Caller, rawBody: string | undefined) {
  */
 async function agentIdentity(caller: Caller, thing: string | undefined) {
   if (!can(caller, 'manageEstate')) return fail(403, 'Not permitted');
-  if (!thing || !THING_NAME_PATTERN.test(thing)) return fail(400, 'Invalid agent name');
+  if (!isThingName(thing)) return fail(400, 'Invalid agent name');
 
-  const [tenantId, premisesId, deviceId] = thing.split('--');
+  const { tenantId, premisesId, deviceId } = parseThingName(thing)!;
   if (tenantId !== caller.tenantId && !can(caller, 'crossTenant')) return fail(403, 'Not permitted');
   if (!visible(caller, premisesId)) return fail(403, 'Not permitted for that premises');
 
@@ -752,9 +774,21 @@ async function pushConfig(tenantId: string, thing: string): Promise<void> {
 
 async function listUsers(caller: Caller) {
   if (!can(caller, 'manageUsers')) return fail(403, 'Not permitted to manage users');
-  const result = await cognito.send(new ListUsersCommand({ UserPoolId: USER_POOL_ID, Limit: 60 }));
 
-  const users = await Promise.all((result.Users ?? []).map(async (user) => {
+  // Every page, not the first sixty. The cap was applied before the tenant
+  // filter, so a tenant whose users sorted late saw an empty console — and
+  // nothing said the list had been truncated.
+  const found = [];
+  let token: string | undefined;
+  do {
+    const page = await cognito.send(new ListUsersCommand({
+      UserPoolId: USER_POOL_ID, Limit: 60, PaginationToken: token,
+    }));
+    found.push(...(page.Users ?? []));
+    token = page.PaginationToken;
+  } while (token && found.length < 5000);
+
+  const users = await Promise.all(found.map(async (user) => {
     const attributes = Object.fromEntries((user.Attributes ?? []).map((a) => [a.Name, a.Value]));
     const groups = await cognito.send(new AdminListGroupsForUserCommand({
       UserPoolId: USER_POOL_ID, Username: user.Username!,
@@ -830,6 +864,106 @@ async function createUser(caller: Caller, rawBody: string | undefined) {
  * a superadmin. Usernames are email addresses, so the guess did not even have
  * to be an informed one.
  */
+/**
+ * Changes a user's role, the sites they may see, or both.
+ *
+ * The routes were create, list and delete. AdminRemoveUserFromGroup was
+ * granted to this function and never called, so changing someone's role — or
+ * moving them between sites, which the reasoning for making `custom:premises`
+ * mutable calls routine — meant deleting the account and re-inviting it.
+ *
+ * The same guards as createUser, because this is the same decision made later:
+ * only a superadmin may mint or unmake one, and nobody may grant access to a
+ * premises they cannot see themselves.
+ */
+async function updateUser(caller: Caller, username: string | undefined, rawBody: string | undefined) {
+  if (!can(caller, 'manageUsers')) return fail(403, 'Not permitted to manage users');
+  if (!username) return fail(400, 'Username is required');
+
+  let body: { role?: unknown; premises?: unknown };
+  try {
+    body = JSON.parse(rawBody ?? '{}');
+  } catch {
+    return fail(400, 'Body must be JSON');
+  }
+
+  const target = await cognito
+    .send(new AdminGetUserCommand({ UserPoolId: USER_POOL_ID, Username: username }))
+    .catch((err) => {
+      if (err?.name === 'UserNotFoundException') return null;
+      throw err;
+    });
+  if (!target) return fail(404, 'No such user');
+
+  const targetTenantId = (target.UserAttributes ?? [])
+    .find((attribute) => attribute.Name === 'custom:tenantId')?.Value;
+  // Indistinguishable from absent, as in deleteUser: this must not become a
+  // way to test whether an address exists in another tenant.
+  if (!can(caller, 'crossTenant') && targetTenantId !== caller.tenantId) {
+    return fail(404, 'No such user');
+  }
+
+  const held = (await cognito.send(new AdminListGroupsForUserCommand({
+    UserPoolId: USER_POOL_ID, Username: username,
+  }))).Groups ?? [];
+  const wasSuperadmin = held.some((g) => g.GroupName === 'superadmin');
+  if (wasSuperadmin && !can(caller, 'crossTenant')) {
+    return fail(403, 'Only a superadmin may change a superadmin');
+  }
+
+  const changed: Record<string, unknown> = {};
+
+  if (body.role !== undefined) {
+    const role = String(body.role) as Role;
+    if (!(ROLES as readonly string[]).includes(role)) {
+      return fail(400, `role must be one of ${ROLES.join(', ')}`);
+    }
+    if (role === 'superadmin' && !can(caller, 'crossTenant')) {
+      return fail(403, 'Only a superadmin may create a superadmin');
+    }
+    // Every role is removed before the new one is added, or an account that
+    // was demoted would keep whichever of its old groups outranked the new.
+    for (const group of held) {
+      if (group.GroupName && group.GroupName !== role) {
+        await cognito.send(new AdminRemoveUserFromGroupCommand({
+          UserPoolId: USER_POOL_ID, Username: username, GroupName: group.GroupName,
+        }));
+      }
+    }
+    if (!held.some((g) => g.GroupName === role)) {
+      await cognito.send(new AdminAddUserToGroupCommand({
+        UserPoolId: USER_POOL_ID, Username: username, GroupName: role,
+      }));
+    }
+    changed.role = role;
+  }
+
+  if (body.premises !== undefined) {
+    const requested = Array.isArray(body.premises)
+      ? body.premises.filter((p): p is string => typeof p === 'string' && isValidId(p))
+      : [];
+    const beyond = requested.filter((p) => !visible(caller, p));
+    if (beyond.length > 0) {
+      return fail(403, `You cannot grant access to: ${beyond.join(', ')}`);
+    }
+    // A restricted administrator must not be able to lift someone else's
+    // restriction, which clearing the list would do.
+    if (requested.length === 0 && caller.premises.length > 0) {
+      return fail(403, 'Restricted accounts cannot grant access to every premises');
+    }
+    await cognito.send(new AdminUpdateUserAttributesCommand({
+      UserPoolId: USER_POOL_ID, Username: username,
+      UserAttributes: [{ Name: 'custom:premises', Value: requested.join(',') }],
+    }));
+    changed.premises = requested;
+  }
+
+  if (Object.keys(changed).length === 0) {
+    return fail(400, 'Nothing to change — supply role, premises, or both');
+  }
+  return json(200, { updated: username, ...changed });
+}
+
 async function deleteUser(caller: Caller, username: string | undefined) {
   if (!can(caller, 'manageUsers')) return fail(403, 'Not permitted to manage users');
   if (!username) return fail(400, 'Username is required');

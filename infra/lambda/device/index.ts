@@ -223,6 +223,9 @@ async function writeCameras(pk: string, thingName: string, cameras: unknown[], n
           // the agent, so they are shaped rather than trusted.
           ipAddress: ipAddress(camera.ipAddress),
           macAddress: macAddress(camera.macAddress),
+          // Bounded like everything else the camera gets a say in.
+          width: bounded(camera.width, 1, 16384),
+          height: bounded(camera.height, 1, 16384),
           profiles: Array.isArray(camera.profiles)
             ? camera.profiles.filter((p): p is string => p === 'sub' || p === 'main')
             : ['sub'],
