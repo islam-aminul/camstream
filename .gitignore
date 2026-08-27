@@ -32,3 +32,10 @@ aws-account
 
 # Playwright MCP scratch output
 .playwright-mcp/
+
+# tsc output. The CDK app runs through ts-node and the lambdas are bundled by
+# esbuild, so nothing here is ever the artefact that ships — but `npm run build`
+# in infra/ emits it, and it once went into a commit.
+infra/bin/*.js
+infra/lib/*.js
+infra/lambda/**/*.js
