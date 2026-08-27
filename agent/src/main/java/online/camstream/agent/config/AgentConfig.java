@@ -146,7 +146,9 @@ public final class AgentConfig {
      * console; the control plane enforces the same number, so a viewer is told
      * their transcode is queued rather than watching it never start.
      */
-    public int maxConcurrentTranscodes = 1;
+    // Volatile: written by the MQTT worker when configuration arrives, read by
+    // the supervisor thread that decides what to start.
+    public volatile int maxConcurrentTranscodes = 1;
 
     /**
      * Ceiling on addresses scanned per sweep. 0 means scan whatever the

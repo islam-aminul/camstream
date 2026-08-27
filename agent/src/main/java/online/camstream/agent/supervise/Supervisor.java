@@ -84,6 +84,15 @@ public final class Supervisor implements AutoCloseable {
     public void supervise(Task task) {
         State state = new State(task);
         states.add(state);
+        // One thread per registered task, so a slow one cannot starve a fast
+        // one. The pool was a fixed three for four tasks, and the fast one is
+        // segment publishing at 250ms while the slow ones are a LAN sweep and
+        // an ffprobe per camera — so a site large enough to scan for a while
+        // was a site whose segments stopped being uploaded while it did.
+        if (scheduler instanceof java.util.concurrent.ScheduledThreadPoolExecutor pool
+                && pool.getCorePoolSize() < states.size()) {
+            pool.setCorePoolSize(states.size());
+        }
         schedule(state, task.runImmediately() ? Duration.ZERO : task.interval());
         log.info("supervising \"{}\" every {}", task.name(), describe(task.interval()));
     }

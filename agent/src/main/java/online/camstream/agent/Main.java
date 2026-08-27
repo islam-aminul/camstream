@@ -231,6 +231,13 @@ public final class Main {
                 CountDownLatch shutdown = new CountDownLatch(1);
                 Runtime.getRuntime().addShutdownHook(new Thread(() -> {
                     log.info("shutting down");
+                    // Before the manager, not after. The supervisor's threads
+                    // are daemons and keep running until the JVM exits, so the
+                    // 250ms publish task could be mid-tick during close() — or
+                    // worse, fire a retry and start a rendition after
+                    // stopAll() had already run, leaving exactly one orphaned
+                    // ffmpeg at the moment this hook exists to prevent that.
+                    supervisor.close();
                     // Stop the encoders here rather than leaving it to
                     // try-with-resources on the main thread: the JVM exits as
                     // soon as the hooks finish, and losing that race orphans

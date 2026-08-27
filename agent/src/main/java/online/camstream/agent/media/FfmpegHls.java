@@ -101,7 +101,7 @@ public final class FfmpegHls implements AutoCloseable {
                     if (line.contains("401 Unauthorized") || line.contains("403 Forbidden")) {
                         refused = true;
                     }
-                    log.warn("[{}] ffmpeg: {}", label, line);
+                    log.warn("[{}] ffmpeg: {}", label, redact(line));
                 }
             } catch (IOException e) {
                 // Process ended; nothing useful left to read.
@@ -131,6 +131,19 @@ public final class FfmpegHls implements AutoCloseable {
                     rendition, camera.id);
         }
         return configured;
+    }
+
+    /**
+     * Removes any userinfo from a URL before it reaches the log.
+     *
+     * ffmpeg echoes the input URL in several error paths, and that URL is
+     * rtsp://user:password@host/path. The whole credential design turns on
+     * plaintext existing in exactly two places — the administrator's browser
+     * tab and this process's memory — and journald or the WinSW log directory
+     * was quietly becoming a third.
+     */
+    static String redact(String line) {
+        return line == null ? null : line.replaceAll("([a-zA-Z][a-zA-Z0-9+.-]*://)[^/\s@]*@", "$1<redacted>@");
     }
 
     public boolean isAlive() {

@@ -180,8 +180,18 @@ public final class StreamManager implements AutoCloseable {
     /**
      * Uploads whatever ffmpeg has produced, restarts anything that died, and
      * shuts everything down if the control plane has gone quiet.
+     *
+     * Synchronized on the same monitor as {@link #apply}, which it was not.
+     * ConcurrentHashMap makes each operation atomic and does nothing for the
+     * sequences: tick() would stop a dead rendition and be interrupted before
+     * recording its retry, apply() would find it in neither map and start it,
+     * and the retry would then start it a second time — replacing the map
+     * entry without closing the first ffmpeg. The orphan keeps its RTSP
+     * session, and a camera with a handful of slots then refuses everyone,
+     * including this agent when it restarts. That is the same failure the
+     * shutdown hook exists to prevent, reachable during normal operation.
      */
-    public void tick() {
+    public synchronized void tick() {
         if (Duration.between(lastInstruction, Instant.now()).getSeconds() > config.idleShutdownSeconds
                 && !active.isEmpty()) {
             log.info("no watch instruction for {}s — stopping all renditions", config.idleShutdownSeconds);
@@ -329,7 +339,13 @@ public final class StreamManager implements AutoCloseable {
             if (restartedRenditions.remove(rendition)) {
                 publisher.encoderRestarted();
             }
-            active.put(rendition, new Pipeline(ffmpeg, publisher, directory, Instant.now()));
+            // Belt and braces against the race above ever reappearing: a
+            // displaced pipeline is closed rather than leaked.
+            Pipeline displaced = active.put(rendition, new Pipeline(ffmpeg, publisher, directory, Instant.now()));
+            if (displaced != null) {
+                log.warn("[{}] a pipeline was already running — closing the previous one", rendition);
+                displaced.ffmpeg().close();
+            }
             retryAfter.remove(rendition);
             backoffs.computeIfAbsent(rendition, r -> new Backoff(MIN_BACKOFF, MAX_BACKOFF, HEALTHY_AFTER))
                     .started();
