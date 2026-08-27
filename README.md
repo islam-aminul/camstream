@@ -321,6 +321,13 @@ decrypts it with a private key that never leaves the edge box.
 `DiscoveredCamera.redacted()` enforces the right-hand column, dropping the
 stream URLs before anything is reported upward.
 
+Everything in the left-hand column is bounded on arrival. A camera's ONVIF
+response is attacker-controlled input on the customer's network, and the agent
+relays it verbatim — so manufacturer, model, MAC, address and profile fields are
+length-capped, type-checked and stripped of control characters at the control
+plane. Unbounded, one device could push a record past DynamoDB's 400KB item
+limit and make the console unreadable for everyone.
+
 Two consequences, both deliberate: **there is no credential recovery** — replace
 an agent and the credentials are re-entered — and a bug in the admin UI cannot
 leak them, because plaintext exists only in the admin's browser tab and on the
