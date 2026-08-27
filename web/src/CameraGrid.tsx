@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { Player } from './Player';
 import { cameraKey, manifestFor, playsNatively, transcodeWouldHelp, type Camera, type DeclinedTranscode } from './api';
 
@@ -26,7 +26,8 @@ interface Props {
   onUnavailable: (camera: Camera) => void;
   /** The page currently on screen, so demand can follow it. */
   onVisible: (keys: string[]) => void;
-  title: string;
+  /** The premises and agent selectors, rendered into the toolbar. */
+  picker: ReactNode;
 }
 
 /** Whether a camera needs an operator to look at it rather than just watch it. */
@@ -39,7 +40,7 @@ function needsAttention(camera: Camera, undecodable: string[], unavailable: stri
 
 export function CameraGrid({
   cameras, transcoding, undecodable, unavailable, queued,
-  onSelect, onTranscode, onUndecodable, onUnavailable, onVisible, title,
+  onSelect, onTranscode, onUndecodable, onUnavailable, onVisible, picker,
 }: Props) {
   const [query, setQuery] = useState('');
   const [status, setStatus] = useState<Status>('all');
@@ -60,12 +61,15 @@ export function CameraGrid({
         .some((field) => field?.toLowerCase().includes(needle));
     });
 
-    // Grouped by where they are, then by name. Sorting on the name alone
-    // scatters a site's cameras across the estate, and "Lobby" exists at every
-    // site — so the sort has to carry location or neighbouring tiles come from
-    // opposite ends of the country.
+    // Working cameras first, then by where they are, then by name.
+    //
+    // Online-first matters more than it looks: a site with a handful of live
+    // cameras among a hundred decommissioned ones would otherwise open on a
+    // wall of dead tiles, with the pictures somebody actually came to watch
+    // several pages in. Location still orders the rest, because "Lobby" exists
+    // at every site and a name alone does not say which one this is.
     return filtered.sort((a, b) =>
-      (a.premisesId ?? '').localeCompare(b.premisesId ?? '')
+      Number(b.online) - Number(a.online)
       || (a.siteName ?? a.thingName).localeCompare(b.siteName ?? b.thingName)
       || a.displayName.localeCompare(b.displayName));
   }, [cameras, query, status, undecodable, unavailable, transcoding]);
@@ -96,7 +100,7 @@ export function CameraGrid({
   return (
     <>
       <div className="toolbar">
-        <span className="toolbar-title">{title}</span>
+        {picker}
 
         <div className="search">
           <svg className="search-icon" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
@@ -204,6 +208,7 @@ export function CameraGrid({
                     <span className="live-badge"><span className="dot" />Live</span>
                     <Player
                       src={manifestFor(camera, 'sub', isTranscoding)}
+                      showDelay
                       onUndecodable={() => onUndecodable(camera)}
                       onUnavailable={() => onUnavailable(camera)}
                     />
@@ -220,9 +225,7 @@ export function CameraGrid({
                 {/* Where it is, not how big it is: every camera on a site tends
                     to report the same resolution, and "Lobby" exists at all of
                     them — so location is what actually distinguishes tiles. */}
-                <span className="tile-sub">
-                  {camera.siteName || camera.premisesId || camera.resolution}
-                </span>
+                <span className="tile-sub">{camera.siteName || camera.resolution}</span>
               </div>
             </button>
           );

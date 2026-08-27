@@ -30,6 +30,15 @@ interface PlayerProps {
    * noise, and on wherever a single stream is being looked at properly.
    */
   showStats?: boolean;
+  /**
+   * Show just how far behind live this stream is, as a chip.
+   *
+   * The full panel is too much for a tile in a wall of them, but the delay
+   * itself is the one number an operator watching live footage needs — a
+   * camera that quietly drifts thirty seconds behind looks perfectly healthy
+   * otherwise.
+   */
+  showDelay?: boolean;
 }
 
 /** What the player can say about the stream it is currently decoding. */
@@ -73,7 +82,7 @@ function isCodecFailure(details: string): boolean {
  * and saying "starting" indefinitely hides it.
  */
 export function Player({
-  src, muted = true, onUndecodable, onUnavailable, preferHighest, showStats,
+  src, muted = true, onUndecodable, onUnavailable, preferHighest, showStats, showDelay,
 }: PlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [status, setStatus] = useState<'starting' | 'playing' | 'failed'>('starting');
@@ -108,10 +117,21 @@ export function Player({
     }
 
     const hls = new Hls({
-      // Sit close to the live edge. Two segments of buffer is the practical
-      // floor before stalls outweigh the latency saved.
-      liveSyncDurationCount: 2,
-      liveMaxLatencyDurationCount: 6,
+      // Start one segment from the live edge, not two.
+      //
+      // The playlist carries a window of several segments so a player that
+      // stalls has somewhere to recover from. Beginning two segments inside
+      // that window meant playback opened on footage roughly seven seconds
+      // old — with a camera whose GOP sets a 3.3s segment, the viewer watched
+      // the recent past and only reached the present after the buffer drained.
+      // On a surveillance stream that is not a latency figure, it is the wrong
+      // picture: the door already closed.
+      liveSyncDurationCount: 1,
+      liveMaxLatencyDurationCount: 4,
+      // Rather than stall or jump when it falls behind, play fractionally
+      // faster until it is level again. Imperceptible, and it keeps the
+      // timeline continuous where a seek would drop frames.
+      maxLiveSyncPlaybackRate: 1.5,
       lowLatencyMode: false,
       backBufferLength: 10,
       // Nothing exists until the agent is told to publish, and that takes as
@@ -170,9 +190,27 @@ export function Player({
         /* autoplay refusal is not fatal; the poster stays until the user clicks */
       });
     });
+    /**
+     * A live playlist that arrives while the player is still starting can
+     * leave the playhead behind the window hls.js chose. Once, on the first
+     * fragment, the playhead is put on the live edge — after that hls.js keeps
+     * it there itself and seeking again would fight it.
+     */
+    let alignedToLive = false;
+    const alignToLive = () => {
+      if (alignedToLive) return;
+      const live = hls.liveSyncPosition;
+      if (live == null || !Number.isFinite(live)) return;
+      alignedToLive = true;
+      if (video.currentTime < live - 0.5) {
+        video.currentTime = live;
+      }
+    };
+
     hls.on(Hls.Events.FRAG_BUFFERED, () => {
       buffered = true;
       setBuffering(true);
+      alignToLive();
       if (video.currentTime > 0) {
         clearTimeout(stallTimer);
         setStatus('playing');
@@ -237,7 +275,7 @@ export function Player({
      * camera's own capture and encode delay, which nothing downstream can see.
      */
     const sample = () => {
-      if (!showStats || settled) return;
+      if ((!showStats && !showDelay) || settled) return;
       const level = hls.levels[hls.currentLevel];
       const quality = typeof video.getVideoPlaybackQuality === 'function'
         ? video.getVideoPlaybackQuality()
@@ -261,7 +299,7 @@ export function Player({
         levelCount: hls.levels.length,
       });
     };
-    const sampler = showStats ? setInterval(sample, 1000) : undefined;
+    const sampler = (showStats || showDelay) ? setInterval(sample, 1000) : undefined;
 
     hls.loadSource(src);
     hls.attachMedia(video);
@@ -270,7 +308,7 @@ export function Player({
       clearInterval(sampler);
       hls.destroy();
     };
-  }, [src, onUndecodable, onUnavailable, preferHighest, showStats]);
+  }, [src, onUndecodable, onUnavailable, preferHighest, showStats, showDelay]);
 
   return (
     <div className="player">
@@ -283,6 +321,14 @@ export function Player({
               ? 'Buffering…'
               : 'Starting stream…'}
         </div>
+      )}
+      {showDelay && !showStats && status === 'playing' && stats?.delaySeconds != null && (
+        <span
+          className={`delay-chip${stats.delaySeconds > 30 ? ' stale' : ''}`}
+          title="How far behind live this picture is"
+        >
+          {round(stats.delaySeconds)}s
+        </span>
       )}
       {showStats && status === 'playing' && stats && (
         <div className="player-stats">
