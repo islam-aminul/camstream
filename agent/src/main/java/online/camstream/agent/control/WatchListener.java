@@ -6,7 +6,9 @@ import online.camstream.agent.config.AgentConfig;
 import online.camstream.agent.config.StreamProfile;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import software.amazon.awssdk.crt.CRT;
 import software.amazon.awssdk.crt.mqtt.MqttClientConnection;
+import software.amazon.awssdk.crt.mqtt.MqttClientConnectionEvents;
 import software.amazon.awssdk.crt.mqtt.QualityOfService;
 import software.amazon.awssdk.iot.AwsIotMqttConnectionBuilder;
 
@@ -14,6 +16,9 @@ import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashSet;
 import java.util.Set;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 
 /**
  * Subscribes to this device's watch topic and reports the desired set of
@@ -43,9 +48,49 @@ public final class WatchListener implements AutoCloseable {
 
     private final MqttClientConnection connection;
     private final String prefix;
+    private final Handlers handlers;
+
+    /**
+     * Where handler bodies actually run.
+     *
+     * The CRT delivers messages on its event loop, and handling one here used
+     * to mean running it there. A scan is discovery end to end — a multicast
+     * probe, a sweep of every address the interface netmasks imply, then ONVIF
+     * and ffprobe per candidate — which on a modest LAN is about thirty
+     * seconds, the same as the keepalive. Blocking the loop for that long
+     * stops the client answering its own pings, so the connection drops, and
+     * the reconnect below is what a dropped connection then needs. One thread,
+     * so ordering between messages is still the order they arrived in.
+     */
+    private final ExecutorService work = Executors.newSingleThreadExecutor(runnable -> {
+        Thread thread = new Thread(runnable, "camstream-mqtt-work");
+        thread.setDaemon(true);
+        return thread;
+    });
+
+    private volatile boolean closed;
 
     public WatchListener(AgentConfig config, Handlers handlers) {
         this.prefix = "camstream/" + config.thingName();
+        this.handlers = handlers;
+
+        // A clean session means the broker keeps nothing for us, so every
+        // reconnect arrives with no subscriptions at all. Nothing else would
+        // notice: presence still reports the socket as up and the heartbeat
+        // still publishes, so the console shows a healthy agent that has in
+        // fact stopped listening.
+        MqttClientConnectionEvents events = new MqttClientConnectionEvents() {
+            @Override
+            public void onConnectionInterrupted(int errorCode) {
+                log.warn("MQTT connection interrupted: {}", CRT.awsErrorString(errorCode));
+            }
+
+            @Override
+            public void onConnectionResumed(boolean sessionPresent) {
+                log.info("MQTT connection resumed (sessionPresent={})", sessionPresent);
+                submit("reconnect", () -> restore(sessionPresent));
+            }
+        };
 
         try (AwsIotMqttConnectionBuilder builder = AwsIotMqttConnectionBuilder
                 .newMtlsBuilderFromPath(config.certificatePath, config.privateKeyPath)) {
@@ -54,29 +99,78 @@ public final class WatchListener implements AutoCloseable {
                     .withClientId(config.thingName())
                     .withCleanSession(true)
                     .withKeepAliveSecs(30)
+                    .withConnectionEventCallbacks(events)
                     .build();
         }
 
         try {
             connection.connect().get();
             log.info("connected to {} as {}", config.iotDataEndpoint, config.thingName());
-
-            subscribe(prefix + "/watch", payload ->
-                    handlers.onDesiredState(parse(payload)));
-            subscribe(prefix + "/config", payload ->
-                    handlers.onConfigVersion(MAPPER.readTree(payload).path("configVersion").asLong(-1)));
-            subscribe(prefix + "/command", payload ->
-                    handlers.onCommand(MAPPER.readTree(payload).path("action").asText("")));
-
-            // Only after subscriptions exist, so nothing published in response
-            // to the report is missed.
-            handlers.onConnected();
+            subscribeAll();
+            // Off the calling thread, so the caller can publish this listener
+            // before the handler needs to reach back into it.
+            submit("connect", handlers::onConnected);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new IllegalStateException("Interrupted connecting to AWS IoT", e);
         } catch (ExecutionException e) {
             throw new IllegalStateException("Could not connect to AWS IoT", e.getCause());
         }
+    }
+
+    /**
+     * Puts the session back after a reconnect.
+     *
+     * Re-subscribing is the whole point: without it the agent holds a live
+     * socket it will never hear anything on, and the only recovery is a
+     * restart. Reconciling afterwards covers what was published while it was
+     * away — a config push or a watch instruction sent during the gap is
+     * simply gone, since neither is retained.
+     */
+    private void restore(boolean sessionPresent) {
+        try {
+            if (!sessionPresent) {
+                subscribeAll();
+            }
+            handlers.onConnected();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } catch (Exception e) {
+            log.error("could not restore the MQTT session — this agent is deaf until it reconnects: {}",
+                    e.toString());
+        }
+    }
+
+    private void subscribeAll() throws InterruptedException, ExecutionException {
+        subscribe(prefix + "/watch", payload ->
+                handlers.onDesiredState(parse(payload)));
+        subscribe(prefix + "/config", payload ->
+                handlers.onConfigVersion(MAPPER.readTree(payload).path("configVersion").asLong(-1)));
+        subscribe(prefix + "/command", payload ->
+                handlers.onCommand(MAPPER.readTree(payload).path("action").asText("")));
+    }
+
+    /** Runs work off the event loop, and never throws back onto it. */
+    private void submit(String what, ThrowingRunnable body) {
+        if (closed) {
+            return;
+        }
+        try {
+            work.submit(() -> {
+                try {
+                    body.run();
+                } catch (Exception e) {
+                    log.warn("[{}] handler failed: {}", what, e.toString());
+                }
+            });
+        } catch (RejectedExecutionException e) {
+            log.debug("[{}] dropped: the listener is shutting down", what);
+        }
+    }
+
+    @FunctionalInterface
+    private interface ThrowingRunnable {
+        void run() throws Exception;
     }
 
     /**
@@ -92,15 +186,22 @@ public final class WatchListener implements AutoCloseable {
                 QualityOfService.AT_MOST_ONCE));
     }
 
-    /** A malformed message must never take down the connection. */
+    /**
+     * A malformed message must never take down the connection, and a slow one
+     * must never take down the socket — so the payload is copied out here and
+     * everything else happens on the worker.
+     */
     private void subscribe(String topic, PayloadHandler handler)
             throws InterruptedException, ExecutionException {
         connection.subscribe(topic, QualityOfService.AT_LEAST_ONCE, message -> {
-            try {
-                handler.accept(new String(message.getPayload(), StandardCharsets.UTF_8));
-            } catch (Exception e) {
-                log.warn("ignoring malformed message on {}: {}", topic, e.toString());
-            }
+            String payload = new String(message.getPayload(), StandardCharsets.UTF_8);
+            submit(topic, () -> {
+                try {
+                    handler.accept(payload);
+                } catch (Exception e) {
+                    log.warn("ignoring malformed message on {}: {}", topic, e.toString());
+                }
+            });
         }).get();
         log.info("subscribed to {}", topic);
     }
@@ -132,6 +233,10 @@ public final class WatchListener implements AutoCloseable {
 
     @Override
     public void close() {
+        closed = true;
+        // Before the disconnect, so a handler still in flight cannot resubscribe
+        // a connection that is on its way down.
+        work.shutdownNow();
         try {
             connection.disconnect().get();
         } catch (InterruptedException e) {
