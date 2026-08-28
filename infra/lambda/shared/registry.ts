@@ -178,6 +178,38 @@ export function slugFor(identity: string): string {
 export const DEFAULT_MAX_TRANSCODES = 1;
 
 /**
+ * One page of items, and where to resume.
+ *
+ * The cursor is DynamoDB's own LastEvaluatedKey, base64-encoded so a caller
+ * cannot read meaning into it or hand back something we would then trust as a
+ * key. It is opaque on purpose: the shape of a page boundary is ours to change.
+ */
+export interface Page<T> {
+  items: T[];
+  cursor?: string;
+}
+
+export function encodeCursor(key: Record<string, unknown> | undefined): string | undefined {
+  return key ? Buffer.from(JSON.stringify(key), 'utf8').toString('base64url') : undefined;
+}
+
+/**
+ * Decodes a cursor, or returns undefined for anything that is not one.
+ *
+ * A malformed cursor starts the listing again rather than failing: a stale
+ * bookmark should show the first page, not an error page.
+ */
+export function decodeCursor(cursor: string | undefined): Record<string, unknown> | undefined {
+  if (!cursor) return undefined;
+  try {
+    const parsed = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'));
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Every item under one partition and sort-key prefix.
  *
  * DynamoDB caps a Query response at 1MB and hands back a cursor for the rest.
