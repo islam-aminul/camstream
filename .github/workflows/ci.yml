@@ -259,6 +259,13 @@ jobs:
         working-directory: agent
         run: mvn -B --no-transfer-progress package -DskipTests
 
+      # -AllowSystemTools resolves java and ffmpeg from PATH. The runner has
+      # java; it does not have ffmpeg, and the installer is quite right to
+      # refuse without it. The bundled-archive path — the normal route, and the
+      # one carrying the ARM64 JVM guard — is exercised by the Linux job.
+      - name: Install ffmpeg
+        run: choco install ffmpeg -y --no-progress --limit-output
+
       # install.ps1 had never been executed by anything. It is the supported
       # path for a platform the product explicitly ships to, and it carries the
       # ARM64 JVM guard that is the difference between a clear refusal and an
