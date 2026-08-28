@@ -28,7 +28,28 @@ export const key = {
   demand: (sessionId: string) => `DEMAND#${sessionId}`,
   credential: (thingName: string, scope: string) => `CREDENTIAL#${thingName}#${scope}`,
   tenant: (tenantId: string) => `TENANT#${tenantId}`,
+  /**
+   * The customer itself, under a registry-wide partition.
+   *
+   * A tenant used to exist only as a prefix on other people's keys — writing
+   * into `TENANT#acme` was what brought it into being, so a typo created a
+   * customer nobody could find, and nothing could enumerate them. This record
+   * makes a customer a thing that can be listed, named and refused.
+   */
+  customer: (tenantId: string) => `CUSTOMER#${tenantId}`,
 };
+
+/** Partition holding the customer list. One row per customer; there are few. */
+export const REGISTRY_PK = 'REGISTRY';
+
+export interface CustomerRecord {
+  pk: string;
+  sk: string;
+  tenantId: string;
+  displayName: string;
+  createdAt: number;
+  createdBy: string;
+}
 
 /** How one agent sees a camera. A camera may be reachable from several. */
 export interface Sighting {

@@ -413,6 +413,8 @@ export class Api extends Construct {
     // group membership decides what that identity may do.
     for (const [method, routePath] of [
       [apigwv2.HttpMethod.GET, '/api/admin/me'],
+      [apigwv2.HttpMethod.GET, '/api/admin/customers'],
+      [apigwv2.HttpMethod.POST, '/api/admin/customers'],
       [apigwv2.HttpMethod.GET, '/api/admin/premises'],
       [apigwv2.HttpMethod.POST, '/api/admin/premises'],
       [apigwv2.HttpMethod.DELETE, '/api/admin/premises/{premisesId}'],

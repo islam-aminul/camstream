@@ -83,7 +83,20 @@ public final class AgentConfig {
      * the request bill. 2s lands around 5s of glass-to-glass latency; 4s halves
      * request cost for roughly double the delay.
      */
-    public int segmentDurationMs = 2000;
+    /**
+     * Segment length, and the largest cost lever in the system.
+     *
+     * Every segment interval writes two S3 objects: the segment, and the
+     * rewritten playlist that names it. HLS requires both, so the request bill
+     * scales inversely with this number while storage barely moves — at a few
+     * thousand concurrent cameras, requests are the bill and storage is a
+     * rounding error. Two seconds costs roughly twice what four does.
+     *
+     * Four is the chosen balance: about twelve seconds to the live edge, which
+     * keeps a viewer close enough to the present to be watching the event
+     * rather than its aftermath, at half the request cost of two.
+     */
+    public int segmentDurationMs = 4000;
 
     /** Segments kept in the live playlist window. */
     public int playlistWindow = 4;

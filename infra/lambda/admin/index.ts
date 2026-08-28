@@ -13,7 +13,7 @@ import {
   AdminUpdateUserAttributesCommand,
 } from '@aws-sdk/client-cognito-identity-provider';
 import type { APIGatewayProxyEventV2WithJWTAuthorizer, APIGatewayProxyStructuredResultV2 } from 'aws-lambda';
-import { isValidId, parseThingName, thingName as buildThingName, isThingName } from '../shared/tenant';
+import { isValidId, isValidDisplayName, idFrom, parseThingName, thingName as buildThingName, isThingName } from '../shared/tenant';
 import { identify, can, targetTenant, ROLES, type Caller, type Role } from '../shared/roles';
 import { fail, json } from '../shared/http';
 import { label } from '../shared/sanitise';
@@ -26,7 +26,7 @@ class Refused extends Error {
     this.name = 'Refused';
   }
 }
-import { key, slugFor, DEFAULT_MAX_TRANSCODES, queryAllPages, type CameraRecord, type DiscoveredRecord, type PremisesRecord } from '../shared/registry';
+import { key, slugFor, DEFAULT_MAX_TRANSCODES, queryAllPages, REGISTRY_PK, type CameraRecord, type CustomerRecord, type DiscoveredRecord, type PremisesRecord } from '../shared/registry';
 import { buildInstaller, isPlatform, PLATFORMS } from './installer';
 
 const TABLE = process.env.REGISTRY_TABLE!;
@@ -71,6 +71,8 @@ export async function handler(
   try {
     switch (route) {
       case 'GET /api/admin/me':          return json(200, { ...caller });
+      case 'GET /api/admin/customers':   return await listCustomers(caller);
+      case 'POST /api/admin/customers':  return await createCustomer(caller, event.body);
       case 'GET /api/admin/premises':    return await listPremises(caller, event.queryStringParameters?.tenantId);
       case 'POST /api/admin/premises':   return await createPremises(caller, event.body);
       case 'DELETE /api/admin/premises/{premisesId}':
@@ -168,6 +170,89 @@ function refuseOutOfScope(caller: Caller, thing: string): APIGatewayProxyStructu
   return null;
 }
 
+// --------------------------------------------------------------- customers
+
+/**
+ * Every customer, for the top level of the console's selection rail.
+ *
+ * Superadmin only, and deliberately unpaginated: a customer list is measured
+ * in tens, and paging it would be ceremony over a single page.
+ */
+async function listCustomers(caller: Caller) {
+  if (!can(caller, 'crossTenant')) return fail(403, 'Only a superadmin may list customers');
+  const customers = await queryAllPages<CustomerRecord>(
+    (input) => ddb.send(new QueryCommand(input)), TABLE, REGISTRY_PK, 'CUSTOMER#');
+  return json(200, {
+    customers: customers
+      .map((c) => ({ tenantId: c.tenantId, displayName: c.displayName, createdAt: c.createdAt }))
+      .sort((a, b) => a.displayName.localeCompare(b.displayName)),
+  });
+}
+
+/**
+ * Brings a customer into existence deliberately.
+ *
+ * Until now a tenant was created by writing into it: passing an unrecognised
+ * `tenantId` to any create call made one, so a typo produced a customer with
+ * no users, no name, and no way to find it again. It also meant nothing could
+ * enumerate customers without scanning the whole table.
+ *
+ * The caller supplies a name and the id is derived from it, because the id
+ * ends up inside IoT thing names, S3 keys and signed cookies where spaces are
+ * either illegal or need escaping everywhere.
+ */
+async function createCustomer(caller: Caller, rawBody: string | undefined) {
+  if (!can(caller, 'crossTenant')) return fail(403, 'Only a superadmin may create a customer');
+
+  let body: { displayName?: unknown };
+  try {
+    body = JSON.parse(rawBody ?? '{}');
+  } catch {
+    return fail(400, 'Body must be JSON');
+  }
+
+  const displayName = String(body.displayName ?? '').trim();
+  if (!isValidDisplayName(displayName)) {
+    return fail(400,
+      'displayName must be 3-64 characters of letters, digits, single spaces and single hyphens, '
+      + 'with no "--" and no repeated spaces');
+  }
+  const tenantId = idFrom(displayName);
+  if (!tenantId) return fail(400, `"${displayName}" does not reduce to a usable id`);
+
+  const record: CustomerRecord = {
+    pk: REGISTRY_PK, sk: key.customer(tenantId),
+    tenantId, displayName,
+    createdAt: Math.floor(Date.now() / 1000), createdBy: caller.email,
+  };
+  await ddb.send(new PutCommand({
+    TableName: TABLE, Item: record,
+    // Re-creating one would rename a live customer and re-point everything
+    // already filed under its id.
+    ConditionExpression: 'attribute_not_exists(sk)',
+  })).catch((err) => {
+    if (err?.name === 'ConditionalCheckFailedException') {
+      throw new Refused(409, `A customer with the id "${tenantId}" already exists`);
+    }
+    throw err;
+  });
+
+  return json(200, { tenantId, displayName });
+}
+
+/**
+ * Refuses to act on a customer that was never created.
+ *
+ * This is the other half of making customers real: without it, a mistyped
+ * tenant still silently brings one into being on the next write.
+ */
+async function customerExists(tenantId: string): Promise<boolean> {
+  const found = await ddb.send(new GetCommand({
+    TableName: TABLE, Key: { pk: REGISTRY_PK, sk: key.customer(tenantId) },
+  }));
+  return found.Item !== undefined;
+}
+
 // ---------------------------------------------------------------- premises
 
 /**
@@ -196,9 +281,25 @@ async function createPremises(caller: Caller, rawBody: string | undefined) {
   const tenantId = targetTenant(caller, body.tenantId);
   if (!tenantId) return fail(403, 'Not permitted to act on that tenant');
 
-  const premisesId = String(body.premisesId ?? '').trim().toLowerCase();
-  if (!isValidId(premisesId)) {
-    return fail(400, 'premisesId must be 3-32 chars of [a-z0-9-] and must not contain "--"');
+  // A customer must exist before anything can be filed under it. Without this
+  // a mistyped tenantId still creates one by writing into it.
+  if (!(await customerExists(tenantId))) {
+    return fail(404, `No customer with the id "${tenantId}"`);
+  }
+
+  // The name is typed; the id is derived. An explicit premisesId is still
+  // accepted so an existing integration does not break.
+  const displayName = String(body.displayName ?? '').trim();
+  const premisesId = body.premisesId
+    ? String(body.premisesId).trim().toLowerCase()
+    : (displayName ? idFrom(displayName) : null);
+  if (displayName && !isValidDisplayName(displayName)) {
+    return fail(400,
+      'displayName must be 3-64 characters of letters, digits, single spaces and single hyphens, '
+      + 'with no "--" and no repeated spaces');
+  }
+  if (!premisesId || !isValidId(premisesId)) {
+    return fail(400, 'Supply a displayName, or a premisesId of 3-32 chars of [a-z0-9-] without "--"');
   }
   // Someone restricted to particular sites creating a new one would produce a
   // premises they immediately cannot see or manage.
@@ -210,7 +311,7 @@ async function createPremises(caller: Caller, rawBody: string | undefined) {
     pk: key.tenant(tenantId),
     sk: key.premises(premisesId),
     premisesId,
-    displayName: String(body.displayName ?? premisesId).slice(0, 128),
+    displayName: displayName || premisesId,
     address: body.address ? String(body.address).slice(0, 256) : undefined,
     createdAt: Math.floor(Date.now() / 1000),
     createdBy: caller.email,
@@ -477,10 +578,22 @@ async function createAgent(caller: Caller, rawBody: string | undefined) {
   const tenantId = targetTenant(caller, body.tenantId);
   if (!tenantId) return fail(403, 'Not permitted to act on that tenant');
 
+  if (!(await customerExists(tenantId))) {
+    return fail(404, `No customer with the id "${tenantId}"`);
+  }
+
   const premisesId = String(body.premisesId ?? '').trim().toLowerCase();
-  const deviceId = String(body.deviceId ?? '').trim().toLowerCase();
-  if (!isValidId(premisesId) || !isValidId(deviceId)) {
-    return fail(400, 'premisesId and deviceId must be 3-32 chars of [a-z0-9-] without "--"');
+  const siteName = String(body.siteName ?? '').trim();
+  const deviceId = body.deviceId
+    ? String(body.deviceId).trim().toLowerCase()
+    : (siteName ? idFrom(siteName) : null);
+  if (siteName && !isValidDisplayName(siteName)) {
+    return fail(400,
+      'siteName must be 3-64 characters of letters, digits, single spaces and single hyphens, '
+      + 'with no "--" and no repeated spaces');
+  }
+  if (!isValidId(premisesId) || !deviceId || !isValidId(deviceId)) {
+    return fail(400, 'premisesId is required, and deviceId must be supplied or derivable from siteName');
   }
   if (!visible(caller, premisesId)) return fail(403, 'Not permitted for that premises');
 
@@ -504,7 +617,7 @@ async function createAgent(caller: Caller, rawBody: string | undefined) {
     TableName: TABLE,
     Item: {
       pk: key.tenant(tenantId), sk: key.device(thingName),
-      thingName, premisesId, siteName: String(body.siteName ?? deviceId).slice(0, 128),
+      thingName, premisesId, siteName: siteName || deviceId,
       connected: false, createdAt: now, createdBy: caller.email,
     },
     ConditionExpression: 'attribute_not_exists(sk)',
@@ -824,6 +937,9 @@ async function createUser(caller: Caller, rawBody: string | undefined) {
 
   const tenantId = targetTenant(caller, body.tenantId);
   if (!tenantId) return fail(403, 'Not permitted to act on that tenant');
+  if (!(await customerExists(tenantId))) {
+    return fail(404, `No customer with the id "${tenantId}"`);
+  }
 
   const requested = Array.isArray(body.premises)
     ? body.premises.filter((p): p is string => typeof p === 'string' && isValidId(p))
