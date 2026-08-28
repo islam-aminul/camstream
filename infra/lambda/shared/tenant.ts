@@ -14,6 +14,59 @@
 
 const ID = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
+/**
+ * What a person types, and what the machine uses, are different strings.
+ *
+ * A display name is read by people, so it carries spaces and capitals:
+ * "HQ North". An id is an AWS IoT thing name segment, an S3 key prefix, a
+ * CloudFront cookie wildcard and a URL segment — and IoT thing names forbid
+ * spaces outright, permitting only letters, digits, hyphen, underscore and
+ * colon. A space therefore cannot live in an id whatever we would prefer.
+ *
+ * So the id is derived rather than typed. Somebody enters "HQ North" and gets
+ * `hq-north` without having to know why.
+ */
+const DISPLAY_NAME = /^[A-Za-z0-9]+(?:[ -][A-Za-z0-9]+)*$/;
+
+/**
+ * A name a person may type.
+ *
+ * Letters, digits, single spaces and single hyphens. Two hyphens together are
+ * refused because `--` separates the parts of a thing name, and two spaces
+ * together because they are invisible and make two names that look identical
+ * behave differently.
+ */
+export function isValidDisplayName(value: unknown): value is string {
+  if (typeof value !== 'string') {
+    return false;
+  }
+  const trimmed = value.trim();
+  return (
+    trimmed.length >= 3 &&
+    trimmed.length <= 64 &&
+    DISPLAY_NAME.test(trimmed) &&
+    !trimmed.includes('--') &&
+    !trimmed.includes('  ')
+  );
+}
+
+/**
+ * The id a display name becomes.
+ *
+ * Returns null when the result would not be a usable id, rather than quietly
+ * producing something shorter or stranger than the caller expects — a name of
+ * "aa" or "---" has no reasonable slug and should be refused at the edge.
+ */
+export function idFrom(displayName: string): string | null {
+  const slug = displayName
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/-{2,}/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return isValidId(slug) ? slug : null;
+}
+
 export function isValidId(value: unknown): value is string {
   return (
     typeof value === 'string' &&
