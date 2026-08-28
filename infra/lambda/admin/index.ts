@@ -26,7 +26,7 @@ class Refused extends Error {
     this.name = 'Refused';
   }
 }
-import { key, slugFor, DEFAULT_MAX_TRANSCODES, queryAllPages, REGISTRY_PK, type CameraRecord, type CustomerRecord, type DiscoveredRecord, type PremisesRecord } from '../shared/registry';
+import { key, slugFor, DEFAULT_MAX_TRANSCODES, queryAllPages, encodeCursor, decodeCursor, REGISTRY_PK, type CameraRecord, type CustomerRecord, type DiscoveredRecord, type PremisesRecord } from '../shared/registry';
 import { buildInstaller, isPlatform, PLATFORMS } from './installer';
 
 const TABLE = process.env.REGISTRY_TABLE!;
@@ -79,7 +79,11 @@ export async function handler(
         return await deletePremises(caller, event.pathParameters?.premisesId,
           event.queryStringParameters?.tenantId);
       case 'GET /api/admin/agents':      return await listAgents(caller,
-          event.queryStringParameters?.tenantId, event.queryStringParameters?.premisesId);
+          event.queryStringParameters?.tenantId, event.queryStringParameters?.premisesId,
+          event.queryStringParameters);
+      case 'GET /api/admin/cameras':     return await listCameras(caller, event.queryStringParameters);
+      case 'GET /api/admin/counts':      return await counts(caller, event.queryStringParameters);
+      case 'GET /api/admin/search':      return await search(caller, event.queryStringParameters);
       case 'POST /api/admin/agents':     return await createAgent(caller, event.body);
       case 'PATCH /api/admin/agents/{thingName}':
         return await updateAgent(caller, event.pathParameters?.thingName, event.body);
@@ -139,6 +143,38 @@ function queryPrefix<T>(pk: string, prefix: string): Promise<T[]> {
 async function getRecord<T>(pk: string, sk: string): Promise<T | undefined> {
   const result = await ddb.send(new GetCommand({ TableName: TABLE, Key: { pk, sk } }));
   return result.Item as T | undefined;
+}
+
+/**
+ * Filtering, sorting and paging, applied in the lambda rather than in DynamoDB.
+ *
+ * This works because of the partitioning, not in spite of it. A site holds on
+ * the order of a hundred cameras, so reading the partition and narrowing it
+ * here costs about what one page would have cost anyway — and it buys
+ * case-insensitive matching anywhere in a name, which a DynamoDB filter
+ * expression cannot do, without a search service or a second index to keep
+ * true. Estate-wide search is the case this does not cover, and it is
+ * deliberately prefix-only for the same reason.
+ */
+function paginate<T extends Record<string, unknown>>(
+  rows: T[],
+  options: { q?: string; sortBy: (row: T) => string; cursor?: string; limit?: string },
+): { items: T[]; cursor?: string; total: number } {
+  const needle = (options.q ?? '').trim().toLowerCase();
+  const matched = needle
+    ? rows.filter((row) => options.sortBy(row).toLowerCase().includes(needle))
+    : rows;
+  matched.sort((a, b) => options.sortBy(a).localeCompare(options.sortBy(b)));
+
+  const limit = Math.min(Math.max(Number(options.limit) || 50, 1), 200);
+  // The cursor is an offset into a stable sort, which is what makes a page
+  // boundary meaningful once filtering has changed which rows exist at all.
+  const from = Number((decodeCursor(options.cursor) ?? {}).from ?? 0) || 0;
+  const items = matched.slice(from, from + limit);
+  const next = from + limit < matched.length
+    ? encodeCursor({ from: from + limit })
+    : undefined;
+  return { items, cursor: next, total: matched.length };
 }
 
 /**
@@ -377,7 +413,12 @@ async function deletePremises(caller: Caller, premisesId: string | undefined, re
 
 // ------------------------------------------------------------------ agents
 
-async function listAgents(caller: Caller, requestedTenant?: string, premisesId?: string) {
+async function listAgents(
+  caller: Caller,
+  requestedTenant?: string,
+  premisesId?: string,
+  query?: Record<string, string | undefined>,
+) {
   if (!can(caller, 'manageEstate')) return fail(403, 'Not permitted to list agents');
   const forTenant = readTenant(caller, requestedTenant);
   if (!forTenant) return fail(403, 'Not permitted to act on that tenant');
@@ -395,9 +436,16 @@ async function listAgents(caller: Caller, requestedTenant?: string, premisesId?:
     queryPrefix<Record<string, unknown>>(key.tenant(forTenant), 'HEALTH#'),
   ]);
   const healthOf = new Map(health.map((h) => [String(h.thingName), h]));
+  const page = paginate(devices.filter((d) => visible(caller, d.premisesId as string | undefined)), {
+    q: query?.q,
+    sortBy: (d) => String(d.siteName ?? d.thingName ?? ''),
+    cursor: query?.cursor,
+    limit: query?.limit,
+  });
   return json(200, {
-    agents: devices
-      .filter((d) => visible(caller, d.premisesId as string | undefined))
+    total: page.total,
+    cursor: page.cursor,
+    agents: page.items
       .map((device) => ({
         thingName: device.thingName,
         premisesId: device.premisesId,
@@ -743,6 +791,147 @@ async function agentInstaller(caller: Caller, thing: string | undefined, platfor
     },
     body: installer.body,
   };
+}
+
+// --------------------------------------------------------- listing at scale
+
+/**
+ * The approved cameras at one site, filtered, sorted and paged.
+ *
+ * Distinct from /api/streams, which answers "where do I fetch this camera's
+ * video". This answers "what cameras exist here", which is what the console's
+ * table and the rail's third dropdown are built on.
+ */
+async function listCameras(caller: Caller, query: Record<string, string | undefined> | undefined) {
+  if (!can(caller, 'viewStreams')) return fail(403, 'Not permitted');
+  const tenantId = readTenant(caller, query?.tenantId);
+  if (!tenantId) return fail(403, 'Not permitted to act on that tenant');
+  const site = siteOf(caller, tenantId, query?.premisesId);
+  if (site.refusal) return site.refusal;
+
+  const [approved, live] = await Promise.all([
+    queryPrefix<CameraRecord>(site.pk, 'CAMERA#'),
+    queryPrefix<Record<string, unknown>>(site.pk, 'LIVECAMERA#'),
+  ]);
+  const publishing = new Set(live.map((c) => `${c.thingName}/${c.cameraId}`));
+
+  const rows = approved
+    // Narrowing by agent is the rail's second dropdown feeding the third.
+    .filter((c) => !query?.agentId || c.assignedTo === query.agentId)
+    .map((c) => ({
+      identity: c.identity,
+      cameraId: c.cameraId,
+      displayName: c.displayName,
+      assignedTo: c.assignedTo,
+      sourceCodec: c.sourceCodec ?? null,
+      approvedAt: c.approvedAt,
+      publishing: publishing.has(`${c.assignedTo}/${c.cameraId}`),
+    }))
+    .filter((c) => query?.status !== 'publishing' || c.publishing);
+
+  const page = paginate(rows as unknown as Record<string, unknown>[], {
+    q: query?.q,
+    sortBy: (c) => String(c.displayName ?? c.cameraId ?? ''),
+    cursor: query?.cursor,
+    limit: query?.limit,
+  });
+  return json(200, { total: page.total, cursor: page.cursor, cameras: page.items });
+}
+
+/**
+ * Totals for the rail, without fetching the rows behind them.
+ *
+ * A rail that says "Cameras (128)" should not have to read 128 records to say
+ * so, and at a hundred sites the console would otherwise read the estate just
+ * to render its own furniture.
+ */
+async function counts(caller: Caller, query: Record<string, string | undefined> | undefined) {
+  if (!can(caller, 'viewStreams')) return fail(403, 'Not permitted');
+  const tenantId = readTenant(caller, query?.tenantId);
+  if (!tenantId) return fail(403, 'Not permitted to act on that tenant');
+
+  const countOf = async (pk: string, prefix: string) => {
+    const result = await ddb.send(new QueryCommand({
+      TableName: TABLE,
+      KeyConditionExpression: 'pk = :pk AND begins_with(sk, :prefix)',
+      ExpressionAttributeValues: { ':pk': pk, ':prefix': prefix },
+      Select: 'COUNT',
+    }));
+    return result.Count ?? 0;
+  };
+
+  if (query?.premisesId) {
+    const site = siteOf(caller, tenantId, query.premisesId);
+    if (site.refusal) return site.refusal;
+    const [agents, cameras, discovered] = await Promise.all([
+      countOf(site.pk, 'DEVICE#'),
+      countOf(site.pk, 'CAMERA#'),
+      countOf(site.pk, 'DISCOVERED#'),
+    ]);
+    return json(200, { tenantId, premisesId: query.premisesId, agents, cameras, discovered });
+  }
+
+  const premises = await queryPrefix<PremisesRecord>(key.tenant(tenantId), 'PREMISES#');
+  const mine = premises.filter((p) => visible(caller, p.premisesId));
+  return json(200, { tenantId, premises: mine.length });
+}
+
+/**
+ * Finds something by name without knowing where it lives.
+ *
+ * Premises come from one partition and are matched anywhere in the name.
+ * Cameras and agents are matched within a site when one is given, because that
+ * is one partition too. Across the estate they are matched by prefix over a
+ * bounded fan-out — searching every site on every keystroke is exactly the
+ * read this rebuild removed, so this is meant for a deliberate search rather
+ * than type-ahead.
+ */
+async function search(caller: Caller, query: Record<string, string | undefined> | undefined) {
+  if (!can(caller, 'viewStreams')) return fail(403, 'Not permitted');
+  const tenantId = readTenant(caller, query?.tenantId);
+  if (!tenantId) return fail(403, 'Not permitted to act on that tenant');
+  const needle = (query?.q ?? '').trim().toLowerCase();
+  if (needle.length < 2) return fail(400, 'Search for at least two characters');
+
+  const premises = (await queryPrefix<PremisesRecord>(key.tenant(tenantId), 'PREMISES#'))
+    .filter((p) => visible(caller, p.premisesId))
+    .filter((p) => `${p.displayName} ${p.premisesId}`.toLowerCase().includes(needle));
+
+  // One site if named, otherwise a bounded sweep of the sites this caller can
+  // see. The bound is what keeps a search from becoming a scan of the estate.
+  const sites = query?.premisesId
+    ? [query.premisesId]
+    : (await queryPrefix<PremisesRecord>(key.tenant(tenantId), 'PREMISES#'))
+        .filter((p) => visible(caller, p.premisesId))
+        .map((p) => p.premisesId)
+        .slice(0, 25);
+
+  const found = await Promise.all(sites.map(async (premisesId) => {
+    const pk = key.site(tenantId, premisesId);
+    const [agents, cameras] = await Promise.all([
+      queryPrefix<Record<string, unknown>>(pk, 'DEVICE#'),
+      queryPrefix<CameraRecord>(pk, 'CAMERA#'),
+    ]);
+    return {
+      agents: agents
+        .filter((a) => `${a.siteName ?? ''} ${a.thingName ?? ''}`.toLowerCase().includes(needle))
+        .map((a) => ({ thingName: a.thingName, siteName: a.siteName, premisesId })),
+      cameras: cameras
+        .filter((c) => `${c.displayName} ${c.cameraId}`.toLowerCase().includes(needle))
+        .map((c) => ({
+          identity: c.identity, cameraId: c.cameraId, displayName: c.displayName,
+          assignedTo: c.assignedTo, premisesId,
+        })),
+    };
+  }));
+
+  return json(200, {
+    premises: premises.map((p) => ({ premisesId: p.premisesId, displayName: p.displayName })).slice(0, 25),
+    agents: found.flatMap((f) => f.agents).slice(0, 25),
+    cameras: found.flatMap((f) => f.cameras).slice(0, 50),
+    // Says plainly when the answer is partial, rather than looking complete.
+    searchedSites: sites.length,
+  });
 }
 
 // ----------------------------------------------------------------- cameras

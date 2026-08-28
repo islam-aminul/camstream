@@ -3,6 +3,7 @@ import { DynamoDBDocumentClient, QueryCommand } from '@aws-sdk/lib-dynamodb';
 import { sessionSuperseded } from '../shared/session';
 import type { APIGatewayProxyEventV2WithJWTAuthorizer, APIGatewayProxyStructuredResultV2 } from 'aws-lambda';
 import { isValidId, parseThingName, premisesScope, withinScope } from '../shared/tenant';
+import { identify, targetTenant } from '../shared/roles';
 import { fail, json } from '../shared/http';
 import { key, queryAllPages } from '../shared/registry';
 
@@ -29,10 +30,15 @@ export async function handler(
   event: APIGatewayProxyEventV2WithJWTAuthorizer,
 ): Promise<APIGatewayProxyStructuredResultV2> {
   const claims = event.requestContext.authorizer?.jwt?.claims;
-  const tenantId = claims?.['custom:tenantId'];
-  if (!isValidId(tenantId)) {
+  const caller = identify(event);
+  if (!caller) {
     return fail(403, 'Account is not associated with a valid tenant');
   }
+  // A superadmin selects a customer before a site, so this takes the same
+  // optional tenantId the admin reads take. Without it the top level of the
+  // rail can pick a customer whose cameras it then cannot show.
+  const tenantId = targetTenant(caller, event.queryStringParameters?.tenantId);
+  if (!tenantId) return fail(403, 'Not permitted to act on that tenant');
   const scope = premisesScope(claims as Record<string, unknown> | undefined);
 
   // Cameras are read for one site, not one customer. Ten thousand cameras
@@ -75,7 +81,20 @@ export async function handler(
       .map((device) => [String(device.thingName ?? ''), String(device.siteName)]),
   );
 
+  // The console names what is on screen. Returning the whole site was what
+  // made this endpoint outgrow a Lambda response; sixteen tiles is sixteen
+  // entries, and the camera list itself comes from /api/admin/cameras.
+  const wanted = (event.queryStringParameters?.cameraIds ?? '')
+    .split(',').map((id) => id.trim()).filter(Boolean);
+  const wantedSet = new Set(wanted);
+
   const cameras = records
+    .filter((item: Record<string, unknown>) => {
+      if (wantedSet.size === 0) return true;
+      const record = item as unknown as CameraRecord;
+      return wantedSet.has(record.cameraId)
+        || wantedSet.has(`${record.thingName}/${record.cameraId}`);
+    })
     // A restricted viewer must not learn which other sites exist, what their
     // agents are called, or what is watched there.
     .filter((item: Record<string, unknown>) =>
