@@ -6,7 +6,7 @@ import { isValidId, parseThingName, premisesScope, withinScope } from '../shared
 import { fail, json } from '../shared/http';
 import { readSession, sessionSuperseded } from '../shared/session';
 import { canDecode } from '../shared/playability';
-import { DEFAULT_MAX_TRANSCODES, queryAllPages } from '../shared/registry';
+import { DEFAULT_MAX_TRANSCODES, key, queryAllPages } from '../shared/registry';
 
 const TABLE = process.env.REGISTRY_TABLE!;
 const IOT_ENDPOINT = process.env.IOT_DATA_ENDPOINT!;
@@ -139,6 +139,7 @@ export async function handler(
 
   let body: {
     sessionId?: unknown;
+    premisesId?: unknown;
     visible?: unknown;
     main?: unknown;
     codecs?: unknown;
@@ -155,6 +156,20 @@ export async function handler(
   if (typeof body.sessionId !== 'string') {
     return fail(400, 'Body must include sessionId');
   }
+  // A viewer watches one site at a time — that is a product decision, and it is
+  // what makes this call read one partition instead of the whole customer.
+  // Resolving what an agent should publish needs every demand that mentions it;
+  // partitioned by tenant that meant reading the tenant, some 11,500 items a
+  // call at the size this is sold for, against a per-partition ceiling of about
+  // 3,000 reads a second.
+  if (!isValidId(body.premisesId)) {
+    return fail(400, 'Body must include the premisesId being watched');
+  }
+  const premisesId = body.premisesId;
+  if (!withinScope(`${tenantId}--${premisesId}--x`, premisesScope(claims as Record<string, unknown>))) {
+    return fail(403, 'That premises is not within your permitted sites');
+  }
+  const sitePk = key.site(tenantId, premisesId);
   const current = await readSession(ddb, TABLE, userSub);
   if (!current || current.sessionId !== body.sessionId
       || await sessionSuperseded(ddb, TABLE, userSub, claims as Record<string, unknown>)) {
@@ -227,7 +242,7 @@ export async function handler(
   // to the back of the queue, and a second request must not evict the first.
   const previous = await ddb.send(new GetCommand({
     TableName: TABLE,
-    Key: { pk: `TENANT#${tenantId}`, sk: `DEMAND#${body.sessionId}` },
+    Key: { pk: sitePk, sk: key.demand(body.sessionId) },
   }));
   const wasRequestedAt = (previous.Item?.transcodeSince ?? {}) as Record<string, number>;
   const transcodeSince: Record<string, number> = {};
@@ -239,8 +254,8 @@ export async function handler(
     new PutCommand({
       TableName: TABLE,
       Item: {
-        pk: `TENANT#${tenantId}`,
-        sk: `DEMAND#${body.sessionId}`,
+        pk: sitePk,
+        sk: key.demand(body.sessionId),
         sessionId: body.sessionId,
         visible,
         mainThingName,
@@ -255,9 +270,9 @@ export async function handler(
   );
 
   const [demands, devices, cameras] = await Promise.all([
-    queryPrefix<DemandRecord>(tenantId, 'DEMAND#'),
-    queryPrefix<DeviceRecord>(tenantId, 'DEVICE#'),
-    queryPrefix<CameraRecord>(tenantId, 'LIVECAMERA#'),
+    queryPrefix<DemandRecord>(sitePk, 'DEMAND#'),
+    queryPrefix<DeviceRecord>(sitePk, 'DEVICE#'),
+    queryPrefix<CameraRecord>(sitePk, 'LIVECAMERA#'),
   ]);
   const digestOf = new Map(devices.map((d) => [d.thingName, d.watchDigest]));
   const resendDueAt = new Map(devices.map((d) => [d.thingName, d.watchResendAfter ?? 0]));
@@ -293,7 +308,7 @@ export async function handler(
     );
     await ddb.send(new UpdateCommand({
       TableName: TABLE,
-      Key: { pk: `TENANT#${tenantId}`, sk: `DEVICE#${state.thingName}` },
+      Key: { pk: sitePk, sk: key.device(state.thingName) },
       UpdateExpression: 'SET watchDigest = :digest, watchResendAfter = :due',
       ExpressionAttributeValues: { ':digest': digest, ':due': now + WATCH_RESEND_SECONDS },
     }));
@@ -462,8 +477,7 @@ function applyTranscodeCap(
     : { thingName, renditions: kept };
 }
 
-function queryPrefix<T>(tenantId: string, prefix: string): Promise<T[]> {
+function queryPrefix<T>(pk: string, prefix: string): Promise<T[]> {
   return queryAllPages<T>(
-    (input) => ddb.send(new QueryCommand(input)),
-    TABLE, `TENANT#${tenantId}`, prefix);
+    (input) => ddb.send(new QueryCommand(input)), TABLE, pk, prefix);
 }

@@ -4,7 +4,7 @@ import { sessionSuperseded } from '../shared/session';
 import type { APIGatewayProxyEventV2WithJWTAuthorizer, APIGatewayProxyStructuredResultV2 } from 'aws-lambda';
 import { isValidId, parseThingName, premisesScope, withinScope } from '../shared/tenant';
 import { fail, json } from '../shared/http';
-import { queryAllPages } from '../shared/registry';
+import { key, queryAllPages } from '../shared/registry';
 
 const TABLE = process.env.REGISTRY_TABLE!;
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
@@ -35,20 +35,31 @@ export async function handler(
   }
   const scope = premisesScope(claims as Record<string, unknown> | undefined);
 
+  // Cameras are read for one site, not one customer. Ten thousand cameras
+  // serialised at 810 bytes each is 7.7 MB, past the 6 MB a Lambda may return,
+  // so the tenant-wide form of this endpoint stopped working before the
+  // console could render it.
+  const premisesId = event.queryStringParameters?.premisesId;
+  if (!isValidId(premisesId)) {
+    return fail(400, 'premisesId is required');
+  }
+  if (!withinScope(`${tenantId}--${premisesId}--x`, scope)) {
+    return fail(403, 'That premises is not within your permitted sites');
+  }
+  const sitePk = key.site(tenantId, premisesId);
+
   if (await sessionSuperseded(ddb, TABLE, String(claims?.sub ?? ''), claims as Record<string, unknown>)) {
     return fail(409, 'Session superseded by a newer sign-in');
   }
 
   const [records, devices] = await Promise.all([
     queryAllPages<Record<string, unknown>>(
-      (input) => ddb.send(new QueryCommand(input)),
-      TABLE, `TENANT#${tenantId}`, 'LIVECAMERA#'),
+      (input) => ddb.send(new QueryCommand(input)), TABLE, sitePk, 'LIVECAMERA#'),
     // Paginated like the cameras beside it. A single Query stops at 1MB, and
     // a short device list does not error — it just leaves every camera whose
     // agent fell off the end reported as offline.
     queryAllPages<Record<string, unknown>>(
-      (input) => ddb.send(new QueryCommand(input)),
-      TABLE, `TENANT#${tenantId}`, 'DEVICE#'),
+      (input) => ddb.send(new QueryCommand(input)), TABLE, sitePk, 'DEVICE#'),
   ]);
 
   // A camera is reachable exactly when the agent that publishes it is

@@ -78,7 +78,8 @@ export async function handler(
       case 'DELETE /api/admin/premises/{premisesId}':
         return await deletePremises(caller, event.pathParameters?.premisesId,
           event.queryStringParameters?.tenantId);
-      case 'GET /api/admin/agents':      return await listAgents(caller, event.queryStringParameters?.tenantId);
+      case 'GET /api/admin/agents':      return await listAgents(caller,
+          event.queryStringParameters?.tenantId, event.queryStringParameters?.premisesId);
       case 'POST /api/admin/agents':     return await createAgent(caller, event.body);
       case 'PATCH /api/admin/agents/{thingName}':
         return await updateAgent(caller, event.pathParameters?.thingName, event.body);
@@ -89,10 +90,12 @@ export async function handler(
       case 'GET /api/admin/agents/{thingName}/installer':
         return await agentInstaller(caller, event.pathParameters?.thingName,
           event.queryStringParameters?.platform);
-      case 'GET /api/admin/discovered':  return await listDiscovered(caller);
+      case 'GET /api/admin/discovered':  return await listDiscovered(caller,
+          event.queryStringParameters?.premisesId);
       case 'POST /api/admin/cameras':    return await approveCamera(caller, event.body);
       case 'DELETE /api/admin/cameras/{identity}':
-        return await removeCamera(caller, event.pathParameters?.identity);
+        return await removeCamera(caller, event.pathParameters?.identity,
+          event.queryStringParameters?.premisesId);
       case 'POST /api/admin/credentials':return await storeCredential(caller, event.body);
       case 'DELETE /api/admin/credentials':
         return await removeCredential(caller, event.queryStringParameters?.thingName,
@@ -118,10 +121,9 @@ export async function handler(
   }
 }
 
-function queryPrefix<T>(tenantId: string, prefix: string): Promise<T[]> {
+function queryPrefix<T>(pk: string, prefix: string): Promise<T[]> {
   return queryAllPages<T>(
-    (input) => ddb.send(new QueryCommand(input)),
-    TABLE, key.tenant(tenantId), prefix);
+    (input) => ddb.send(new QueryCommand(input)), TABLE, pk, prefix);
 }
 
 /**
@@ -134,12 +136,38 @@ function queryPrefix<T>(tenantId: string, prefix: string): Promise<T[]> {
  * matches `DISCOVERED#sn-ABCD`, so a camera could be approved from a
  * different camera's record.
  */
-async function getRecord<T>(tenantId: string, sk: string): Promise<T | undefined> {
-  const result = await ddb.send(new GetCommand({
-    TableName: TABLE,
-    Key: { pk: key.tenant(tenantId), sk },
-  }));
+async function getRecord<T>(pk: string, sk: string): Promise<T | undefined> {
+  const result = await ddb.send(new GetCommand({ TableName: TABLE, Key: { pk, sk } }));
   return result.Item as T | undefined;
+}
+
+/**
+ * The partition an agent's records live in, taken from its own name.
+ *
+ * A thing name is <tenant>--<premises>--<device>, so anything addressed by one
+ * already knows where to look. Callers reach this only after refuseOutOfScope
+ * has established the name parses and belongs to them.
+ */
+function siteOfThing(thing: string): string {
+  const identity = parseThingName(thing)!;
+  return key.site(identity.tenantId, identity.premisesId);
+}
+
+/**
+ * The premises a request names, checked against what the caller may see.
+ *
+ * Most reads now address one site rather than one customer, because that is
+ * where the estate-sized collections live.
+ */
+function siteOf(caller: Caller, tenantId: string, premisesId: unknown):
+    { pk: string; refusal?: undefined } | { pk?: undefined; refusal: APIGatewayProxyStructuredResultV2 } {
+  if (!isValidId(premisesId)) {
+    return { refusal: fail(400, 'premisesId is required') };
+  }
+  if (!visible(caller, premisesId)) {
+    return { refusal: fail(403, 'That premises is not within your permitted sites') };
+  }
+  return { pk: key.site(tenantId, premisesId) };
 }
 
 /** Premises this caller may act on. Empty claim means all within the tenant. */
@@ -271,7 +299,7 @@ async function listPremises(caller: Caller, requestedTenant?: string) {
   if (!can(caller, 'manageEstate')) return fail(403, 'Not permitted to list premises');
   const tenantId = readTenant(caller, requestedTenant);
   if (!tenantId) return fail(403, 'Not permitted to act on that tenant');
-  const premises = await queryPrefix<PremisesRecord>(tenantId, 'PREMISES#');
+  const premises = await queryPrefix<PremisesRecord>(key.tenant(tenantId), 'PREMISES#');
   return json(200, { tenantId, premises: premises.filter((p) => visible(caller, p.premisesId)) });
 }
 
@@ -336,8 +364,7 @@ async function deletePremises(caller: Caller, premisesId: string | undefined, re
   const tenantId = readTenant(caller, requestedTenant);
   if (!tenantId) return fail(403, 'Not permitted to act on that tenant');
 
-  const agents = await queryPrefix<Record<string, unknown>>(tenantId, 'DEVICE#');
-  const attached = agents.filter((a) => a.premisesId === premisesId);
+  const attached = await queryPrefix<Record<string, unknown>>(key.site(tenantId, premisesId), 'DEVICE#');
   if (attached.length > 0) {
     // Deleting it would orphan agents whose thing names encode it.
     return fail(400, `${attached.length} agent(s) are still assigned to this premises`);
@@ -350,15 +377,22 @@ async function deletePremises(caller: Caller, premisesId: string | undefined, re
 
 // ------------------------------------------------------------------ agents
 
-async function listAgents(caller: Caller, requestedTenant?: string) {
+async function listAgents(caller: Caller, requestedTenant?: string, premisesId?: string) {
   if (!can(caller, 'manageEstate')) return fail(403, 'Not permitted to list agents');
   const forTenant = readTenant(caller, requestedTenant);
   if (!forTenant) return fail(403, 'Not permitted to act on that tenant');
+  // Agents are listed for one site. A thousand of them across a customer is
+  // more than a page and more than a partition; the console always has a site
+  // selected, and counts come from their own endpoint.
+  const site = siteOf(caller, forTenant, premisesId);
+  if (site.refusal) return site.refusal;
   // Health arrives on its own item, written directly by an IoT rule, so it is
   // read alongside the registration rather than being part of it.
   const [devices, health] = await Promise.all([
-    queryPrefix<Record<string, unknown>>(forTenant, 'DEVICE#'),
-    queryPrefix<Record<string, unknown>>(forTenant, 'HEALTH#'),
+    queryPrefix<Record<string, unknown>>(site.pk, 'DEVICE#'),
+    // Health stays partitioned by customer: the IoT rule that writes it builds
+    // its key in SQL and cannot cut a thing name at the second separator.
+    queryPrefix<Record<string, unknown>>(key.tenant(forTenant), 'HEALTH#'),
   ]);
   const healthOf = new Map(health.map((h) => [String(h.thingName), h]));
   return json(200, {
@@ -414,7 +448,7 @@ async function updateAgent(caller: Caller, thingName: string | undefined, rawBod
 
   const existing = await ddb.send(new GetCommand({
     TableName: TABLE,
-    Key: { pk: key.tenant(caller.tenantId), sk: key.device(thing) },
+    Key: { pk: siteOfThing(thing), sk: key.device(thing) },
   }));
   if (!existing.Item) return fail(404, 'No such agent');
 
@@ -424,7 +458,7 @@ async function updateAgent(caller: Caller, thingName: string | undefined, rawBod
 
   await ddb.send(new UpdateCommand({
     TableName: TABLE,
-    Key: { pk: key.tenant(caller.tenantId), sk: key.device(thing) },
+    Key: { pk: siteOfThing(thing), sk: key.device(thing) },
     UpdateExpression: 'SET maxConcurrentTranscodes = :cap',
     ExpressionAttributeValues: { ':cap': cap },
   }));
@@ -453,10 +487,10 @@ async function removeAgent(caller: Caller, thingName: string | undefined) {
   const outOfScope = refuseOutOfScope(caller, thing);
   if (outOfScope) return outOfScope;
 
-  const existing = await getRecord<Record<string, unknown>>(caller.tenantId, key.device(thing));
+  const existing = await getRecord<Record<string, unknown>>(siteOfThing(thing), key.device(thing));
   if (!existing) return fail(404, 'No such agent');
 
-  const cameras = await queryPrefix<CameraRecord>(caller.tenantId, 'CAMERA#');
+  const cameras = await queryPrefix<CameraRecord>(siteOfThing(thing), 'CAMERA#');
   const owned = cameras.filter((camera) => camera.assignedTo === thing);
   if (owned.length > 0) {
     return fail(400,
@@ -470,13 +504,13 @@ async function removeAgent(caller: Caller, thingName: string | undefined) {
   const stale = [
     key.device(thing),
     `HEALTH#${thing}`,
-    ...(await queryPrefix<Record<string, unknown>>(caller.tenantId, `CREDENTIAL#${thing}#`))
+    ...(await queryPrefix<Record<string, unknown>>(siteOfThing(thing), `CREDENTIAL#${thing}#`))
       .map((item) => String(item.sk)),
-    ...(await queryPrefix<Record<string, unknown>>(caller.tenantId, `LIVECAMERA#${thing}#`))
+    ...(await queryPrefix<Record<string, unknown>>(siteOfThing(thing), `LIVECAMERA#${thing}#`))
       .map((item) => String(item.sk)),
   ];
   for (const sk of stale) {
-    await ddb.send(new DeleteCommand({ TableName: TABLE, Key: { pk: key.tenant(caller.tenantId), sk } }));
+    await ddb.send(new DeleteCommand({ TableName: TABLE, Key: { pk: siteOfThing(thing), sk } }));
   }
 
   return json(200, { removed: thing, records: stale.length, identityRevoked: retired });
@@ -530,11 +564,11 @@ async function removeCredential(caller: Caller, thingName: unknown, scope: unkno
   if (target !== '*' && !CAMERA_IDENTITY.test(target)) return fail(400, 'Invalid scope');
 
   const existing = await getRecord<Record<string, unknown>>(
-    caller.tenantId, key.credential(thing, target));
+    siteOfThing(thing), key.credential(thing, target));
   if (!existing) return fail(404, 'No credential stored for that scope');
 
   await ddb.send(new DeleteCommand({
-    TableName: TABLE, Key: { pk: key.tenant(caller.tenantId), sk: key.credential(thing, target) },
+    TableName: TABLE, Key: { pk: siteOfThing(thing), sk: key.credential(thing, target) },
   }));
   // The agent replaces its whole relayed set from the config it fetches, so
   // bumping the version is what actually revokes this on the edge box.
@@ -597,7 +631,7 @@ async function createAgent(caller: Caller, rawBody: string | undefined) {
   }
   if (!visible(caller, premisesId)) return fail(403, 'Not permitted for that premises');
 
-  const premises = await getRecord<PremisesRecord>(tenantId, key.premises(premisesId));
+  const premises = await getRecord<PremisesRecord>(key.tenant(tenantId), key.premises(premisesId));
   if (!premises) return fail(404, 'No such premises');
 
   const thingName = buildThingName({ tenantId, premisesId, deviceId });
@@ -616,7 +650,7 @@ async function createAgent(caller: Caller, rawBody: string | undefined) {
   await ddb.send(new PutCommand({
     TableName: TABLE,
     Item: {
-      pk: key.tenant(tenantId), sk: key.device(thingName),
+      pk: key.site(tenantId, premisesId), sk: key.device(thingName),
       thingName, premisesId, siteName: siteName || deviceId,
       connected: false, createdAt: now, createdBy: caller.email,
     },
@@ -646,7 +680,7 @@ async function agentIdentity(caller: Caller, thing: string | undefined) {
   if (tenantId !== caller.tenantId && !can(caller, 'crossTenant')) return fail(403, 'Not permitted');
   if (!visible(caller, premisesId)) return fail(403, 'Not permitted for that premises');
 
-  const tokens = await queryPrefix<Record<string, unknown>>(tenantId, 'ENROLLMENT#');
+  const tokens = await queryPrefix<Record<string, unknown>>(key.tenant(tenantId), 'ENROLLMENT#');
   const now = Math.floor(Date.now() / 1000);
   const usable = tokens
     .filter((t) => t.thingName === thing && !t.usedAt && Number(t.expiresAt) > now)
@@ -713,12 +747,14 @@ async function agentInstaller(caller: Caller, thing: string | undefined, platfor
 
 // ----------------------------------------------------------------- cameras
 
-async function listDiscovered(caller: Caller) {
+async function listDiscovered(caller: Caller, premisesId?: string) {
   if (!can(caller, 'manageEstate')) return fail(403, 'Not permitted to list discovered cameras');
+  const site = siteOf(caller, caller.tenantId, premisesId);
+  if (site.refusal) return site.refusal;
   const [discovered, approved, agents] = await Promise.all([
-    queryPrefix<DiscoveredRecord>(caller.tenantId, 'DISCOVERED#'),
-    queryPrefix<CameraRecord>(caller.tenantId, 'CAMERA#'),
-    queryPrefix<Record<string, unknown>>(caller.tenantId, 'DEVICE#'),
+    queryPrefix<DiscoveredRecord>(site.pk, 'DISCOVERED#'),
+    queryPrefix<CameraRecord>(site.pk, 'CAMERA#'),
+    queryPrefix<Record<string, unknown>>(site.pk, 'DEVICE#'),
   ]);
   const premisesOf = new Map(agents.map((a) => [String(a.thingName), a.premisesId as string | undefined]));
   const approvedByIdentity = new Map(approved.map((camera) => [camera.identity, camera]));
@@ -765,7 +801,7 @@ async function approveCamera(caller: Caller, rawBody: string | undefined) {
   const outOfScope = refuseOutOfScope(caller, assignedTo);
   if (outOfScope) return outOfScope;
 
-  const record = await getRecord<DiscoveredRecord>(caller.tenantId, key.discovered(identity));
+  const record = await getRecord<DiscoveredRecord>(siteOfThing(assignedTo), key.discovered(identity));
   if (!record) return fail(404, 'No such discovered camera');
   // Assigning to an agent that cannot see it yields a stream that never starts.
   if (!Object.keys(record.reachableBy ?? {}).includes(assignedTo)) {
@@ -773,7 +809,7 @@ async function approveCamera(caller: Caller, rawBody: string | undefined) {
   }
 
   const camera: CameraRecord = {
-    pk: key.tenant(caller.tenantId), sk: key.camera(identity), identity,
+    pk: siteOfThing(assignedTo), sk: key.camera(identity), identity,
     cameraId: typeof body.cameraId === 'string' && isValidId(body.cameraId) ? body.cameraId : slugFor(identity),
     displayName: String(body.displayName ?? record.model ?? identity).slice(0, 128),
     assignedTo,
@@ -782,7 +818,7 @@ async function approveCamera(caller: Caller, rawBody: string | undefined) {
     sourceCodec: body.sourceCodec ? String(body.sourceCodec) : undefined,
     approvedAt: Math.floor(Date.now() / 1000), approvedBy: caller.email,
   };
-  const previousOwner = (await getRecord<CameraRecord>(caller.tenantId, key.camera(identity)))?.assignedTo;
+  const previousOwner = (await getRecord<CameraRecord>(siteOfThing(assignedTo), key.camera(identity)))?.assignedTo;
 
   await ddb.send(new PutCommand({ TableName: TABLE, Item: camera }));
   await pushConfig(caller.tenantId, assignedTo);
@@ -797,13 +833,15 @@ async function approveCamera(caller: Caller, rawBody: string | undefined) {
   return json(200, { approved: camera.cameraId, assignedTo, reassignedFrom: previousOwner ?? null });
 }
 
-async function removeCamera(caller: Caller, identity: string | undefined) {
+async function removeCamera(caller: Caller, identity: string | undefined, premisesId?: string) {
   if (!can(caller, 'manageEstate')) return fail(403, 'Not permitted');
+  const site = siteOf(caller, caller.tenantId, premisesId);
+  if (site.refusal) return site.refusal;
   // Shaped like the identity approveCamera accepts. Without this an unbounded
   // path parameter reached a key expression unchecked.
   if (!identity || !CAMERA_IDENTITY.test(identity)) return fail(400, 'Invalid camera identity');
 
-  const existing = await getRecord<CameraRecord>(caller.tenantId, key.camera(identity));
+  const existing = await getRecord<CameraRecord>(site.pk, key.camera(identity));
   if (!existing) return fail(404, 'No such camera');
   // The scope check used to sit inside `if (assignedTo)`, so a record without
   // an owner was deleted by anyone in the tenant, and a 200 came back either
@@ -812,7 +850,7 @@ async function removeCamera(caller: Caller, identity: string | undefined) {
   if (outOfScope) return outOfScope;
 
   await ddb.send(new DeleteCommand({
-    TableName: TABLE, Key: { pk: key.tenant(caller.tenantId), sk: key.camera(identity) },
+    TableName: TABLE, Key: { pk: site.pk, sk: key.camera(identity) },
   }));
   if (existing.assignedTo) await pushConfig(caller.tenantId, existing.assignedTo);
   return json(200, { removed: identity });
@@ -835,7 +873,7 @@ async function storeCredential(caller: Caller, rawBody: string | undefined) {
   await ddb.send(new PutCommand({
     TableName: TABLE,
     Item: {
-      pk: key.tenant(caller.tenantId), sk: key.credential(thing, scope),
+      pk: siteOfThing(thing), sk: key.credential(thing, scope),
       thingName: thing, scope, ciphertext,
       storedAt: Math.floor(Date.now() / 1000), storedBy: caller.email,
     },
@@ -868,7 +906,7 @@ async function triggerScan(caller: Caller, rawBody: string | undefined) {
 async function pushConfig(tenantId: string, thing: string): Promise<void> {
   const updated = await ddb.send(new UpdateCommand({
     TableName: TABLE,
-    Key: { pk: key.tenant(tenantId), sk: key.device(thing) },
+    Key: { pk: siteOfThing(thing), sk: key.device(thing) },
     UpdateExpression: 'SET configVersion = if_not_exists(configVersion, :zero) + :one',
     ExpressionAttributeValues: { ':zero': 0, ':one': 1 },
     ReturnValues: 'UPDATED_NEW',

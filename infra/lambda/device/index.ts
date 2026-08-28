@@ -9,7 +9,15 @@ import { fail, json } from '../shared/http';
 
 const TABLE = process.env.REGISTRY_TABLE!;
 const DISCOVERY_TTL_SECONDS = 7 * 24 * 60 * 60;
-const MAX_CAMERAS = 64;
+/**
+ * The most cameras one agent may publish.
+ *
+ * How many it can actually carry is a property of the hardware — CPU, memory,
+ * disk throughput, network interface, upstream bandwidth — which only the
+ * agent can measure. This is the ceiling above which the answer is no
+ * regardless.
+ */
+const MAX_CAMERAS = 128;
 const MAX_DISCOVERED = 256;
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
@@ -60,7 +68,10 @@ export async function handler(
   if (!identity) {
     return fail(403, `Device name "${thingName}" is not a valid CamStream thing name`);
   }
-  const pk = key.tenant(identity.tenantId);
+  // The agent's own premises, taken from the name on its certificate. It never
+  // sends one, which is why re-partitioning the registry needed no agent
+  // change at all.
+  const pk = key.site(identity.tenantId, identity.premisesId);
 
   const route = event.routeKey.split(' ')[1] ?? '';
   if (route === '/api/device/config') {
@@ -147,7 +158,16 @@ async function acceptReport(
     return fail(400, 'Body must be JSON');
   }
 
-  const cameras = Array.isArray(body.cameras) ? body.cameras.slice(0, MAX_CAMERAS) : [];
+  const reported = Array.isArray(body.cameras) ? body.cameras : [];
+  // Refused, not truncated. Quietly discarding the hundred and twenty-ninth
+  // camera means an operator who wired one up sees nothing and is told
+  // nothing; an error at least names the wall they have hit.
+  if (reported.length > MAX_CAMERAS) {
+    return fail(400,
+      `This agent reported ${reported.length} cameras; one agent may publish at most ${MAX_CAMERAS}. `
+      + 'Split the site across more agents.');
+  }
+  const cameras = reported;
   const invalid = cameras.find((c) => !isValidId((c as { cameraId?: unknown }).cameraId));
   if (invalid) {
     return fail(400, `Invalid cameraId: ${JSON.stringify((invalid as { cameraId?: unknown }).cameraId)}`);

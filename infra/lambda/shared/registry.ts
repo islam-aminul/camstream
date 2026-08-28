@@ -1,22 +1,40 @@
 /**
  * Registry key layout.
  *
- *   TENANT#<t>  PREMISES#<premisesId>           a physical site
- *   TENANT#<t>  ENROLLMENT#<token>              one-time agent enrollment token
- *   TENANT#<t>  DEVICE#<thingName>              an enrolled agent
- *   TENANT#<t>  LIVECAMERA#<thing>#<cameraId>   a camera an agent can publish
- *   TENANT#<t>  DISCOVERED#<identity>           a physical camera, as seen by any agent
- *   TENANT#<t>  CAMERA#<identity>               a camera an administrator approved
- *   TENANT#<t>  DEMAND#<sessionId>              what one viewer currently wants
- *   TENANT#<t>  CREDENTIAL#<thingName>#<scope>  ciphertext only this agent can open
- *   USER#<sub>  SESSION                         the account's single live session
+ *   REGISTRY                  CUSTOMER#<tenantId>              a customer
+ *   TENANT#<t>                PREMISES#<premisesId>            a physical site
+ *   TENANT#<t>                ENROLLMENT#<token>               one-time agent token
+ *   TENANT#<t>                HEALTH#<thingName>               last heartbeat
+ *   TENANT#<t>#PREMISES#<p>   DEVICE#<thingName>               an enrolled agent
+ *   TENANT#<t>#PREMISES#<p>   CAMERA#<identity>                an approved camera
+ *   TENANT#<t>#PREMISES#<p>   LIVECAMERA#<thing>#<cameraId>    a camera being published
+ *   TENANT#<t>#PREMISES#<p>   DISCOVERED#<identity>            a camera any agent can see
+ *   TENANT#<t>#PREMISES#<p>   CREDENTIAL#<thing>#<scope>       ciphertext for one agent
+ *   TENANT#<t>#PREMISES#<p>   DEMAND#<sessionId>               what one viewer wants
+ *   USER#<sub>                SESSION                          the single live session
+ *
+ * Premises is the partition for everything that scales with the estate, and
+ * that is the whole point. A single partition key gets about 3,000 reads a
+ * second regardless of what the table is provisioned for, and resolving what
+ * an agent should publish means reading every demand that mentions it — which,
+ * partitioned by tenant, meant reading the tenant. A hundred sites is a
+ * hundred partitions and about a hundredth of the work per call.
+ *
+ * Three things stay at tenant level on purpose. Premises and enrollment tokens
+ * are few and are read before a premises is known. Health is written by an IoT
+ * topic rule with no Lambda in the path, and that rule builds its key in SQL —
+ * it can cut the thing name at the first separator but not the second, because
+ * IoT SQL has no indexof that takes an offset. A thousand agents heartbeating
+ * once a minute is about seventeen writes a second, comfortably inside one
+ * partition, so the cheap rule survives and the console fetches health only
+ * for the agents on the page it is showing.
  *
  * Discovered cameras are keyed by the camera's own identity rather than by the
- * agent that found it. A premises large enough to need several agents will have
- * overlapping scan ranges, and the same camera seen twice must merge into one
- * record — otherwise it is approved twice, published twice, and billed twice.
+ * agent that found it. A premises large enough to need several agents will
+ * have overlapping scan ranges, and the same camera seen twice must merge into
+ * one record — otherwise it is approved twice, published twice, and billed
+ * twice.
  */
-
 export const key = {
   premises: (premisesId: string) => `PREMISES#${premisesId}`,
   enrollment: (token: string) => `ENROLLMENT#${token}`,
@@ -28,6 +46,14 @@ export const key = {
   demand: (sessionId: string) => `DEMAND#${sessionId}`,
   credential: (thingName: string, scope: string) => `CREDENTIAL#${thingName}#${scope}`,
   tenant: (tenantId: string) => `TENANT#${tenantId}`,
+  /**
+   * The partition holding everything that scales with the estate.
+   *
+   * Every camera, agent, sighting, credential and viewer demand for one site
+   * lives here, which is what keeps a watch call reading one premises rather
+   * than one customer.
+   */
+  site: (tenantId: string, premisesId: string) => `TENANT#${tenantId}#PREMISES#${premisesId}`,
   /**
    * The customer itself, under a registry-wide partition.
    *
