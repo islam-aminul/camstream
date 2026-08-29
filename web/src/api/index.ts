@@ -36,6 +36,38 @@ export interface Camera {
   publishing: boolean;
 }
 
+
+/** A camera as the live view needs it: where to fetch it and what it emits. */
+export interface Stream {
+  thingName: string;
+  cameraId: string;
+  displayName: string;
+  resolution?: string;
+  lastSeen?: number;
+  online: boolean;
+  premisesId: string | null;
+  siteName: string | null;
+  profiles: string[];
+  sourceCodec: string;
+  sourceCodecProfile: string | null;
+  manifestUrl: {
+    sub: string; main: string; subH264: string; mainH264: string; master: string;
+  };
+}
+
+/** What one agent has been asked to publish, and what it could not. */
+export interface DesiredState {
+  thingName: string;
+  renditions: { cameraId: string; profile: 'sub' | 'main'; variant: 'source' | 'h264' }[];
+  declined?: { cameraId: string; profile: 'sub' | 'main' }[];
+  maxConcurrentTranscodes?: number;
+}
+
+export interface WatchResponse {
+  keepaliveInSeconds: number;
+  desired: DesiredState[];
+}
+
 /** A page, plus how many matched and where to resume. */
 export interface Page<T> { total: number; cursor?: string; items: T[] }
 
@@ -69,6 +101,8 @@ export const api = {
 
   cameras: (p: {
     tenantId?: string; premisesId: string; agentId?: string;
+    /** An exact camera, for showing one on its own. */
+    cameraId?: string;
     q?: string; status?: string; cursor?: string; limit?: number;
   }) =>
     get<{ total: number; cursor?: string; cameras: Camera[] }>('/api/admin/cameras', p)
@@ -85,4 +119,32 @@ export const api = {
       cameras: { identity: string; cameraId: string; displayName: string; premisesId: string }[];
       searchedSites: number;
     }>('/api/admin/search', p),
+
+  /**
+   * The manifests for the cameras named, and nothing else.
+   *
+   * Deliberately not "every camera at this site": ten thousand of them
+   * serialise to more than a Lambda may return, and the grid only ever shows
+   * a screenful.
+   */
+  streams: (p: { tenantId?: string; premisesId: string; cameraIds: string[] }) =>
+    get<{ tenantId: string; cameras: Stream[] }>('/api/streams', {
+      tenantId: p.tenantId, premisesId: p.premisesId, cameraIds: p.cameraIds.join(','),
+    }).then((r) => r.cameras),
+
+  /**
+   * Declares what this viewer currently has on screen.
+   *
+   * This is what actually starts and stops streams, so it is a statement of
+   * demand rather than a subscription: stop posting it and the agent stops
+   * publishing within a minute.
+   */
+  watch: (body: {
+    sessionId: string;
+    premisesId: string;
+    visible: string[];
+    main?: { thingName: string; cameraId: string };
+    codecs: string[];
+    transcode: string[];
+  }) => post<WatchResponse>('/api/watch', body),
 };
