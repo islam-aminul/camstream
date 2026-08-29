@@ -125,9 +125,9 @@ export async function handler(
   }
 }
 
-function queryPrefix<T>(pk: string, prefix: string): Promise<T[]> {
+function queryPrefix<T>(pk: string, prefix: string, projection?: string): Promise<T[]> {
   return queryAllPages<T>(
-    (input) => ddb.send(new QueryCommand(input)), TABLE, pk, prefix);
+    (input) => ddb.send(new QueryCommand(input)), TABLE, pk, prefix, projection);
 }
 
 /**
@@ -155,6 +155,19 @@ async function getRecord<T>(pk: string, sk: string): Promise<T | undefined> {
  * expression cannot do, without a search service or a second index to keep
  * true. Estate-wide search is the case this does not cover, and it is
  * deliberately prefix-only for the same reason.
+ *
+ * Measured, because the premise above is the whole argument and premises rot.
+ * At a hundred cameras in a site — the shape this is sold at, ten thousand
+ * cameras across a hundred sites — every read here is about 120ms, and a page
+ * of sixteen costs the same as a page of two hundred, which is the point.
+ *
+ * The cost is linear in the size of the *site*, not the estate. Ten thousand
+ * cameras in one site takes the same read to about 1.5s, because the partition
+ * is then some two megabytes and arrives over several round trips. That is the
+ * boundary: sites of a few hundred are comfortable, and a site of thousands
+ * wants a secondary index on the name so a page can be fetched rather than
+ * filtered. Splitting such a site across premises is the cheaper answer, and
+ * is what the partitioning already assumes.
  */
 function paginate<T extends Record<string, unknown>>(
   rows: T[],
@@ -434,8 +447,10 @@ async function listAgents(
     // Health stays partitioned by customer: the IoT rule that writes it builds
     // its key in SQL and cannot cut a thing name at the second separator.
     queryPrefix<Record<string, unknown>>(key.tenant(forTenant), 'HEALTH#'),
-    // Assignments, which is what capacity is actually measured against.
-    queryPrefix<CameraRecord>(site.pk, 'CAMERA#'),
+    // Assignments, which is what capacity is actually measured against. Only
+    // the owning agent is read: the rest of a camera record is several times
+    // its size, and this walks every camera at the site to count them.
+    queryPrefix<CameraRecord>(site.pk, 'CAMERA#', 'assignedTo'),
   ]);
   const healthOf = new Map(health.map((h) => [String(h.thingName), h]));
 

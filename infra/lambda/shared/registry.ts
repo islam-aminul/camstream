@@ -225,10 +225,19 @@ export async function queryAllPages<T>(
     KeyConditionExpression: string;
     ExpressionAttributeValues: Record<string, unknown>;
     ExclusiveStartKey?: Record<string, unknown>;
+    ProjectionExpression?: string;
   }) => Promise<{ Items?: Record<string, unknown>[]; LastEvaluatedKey?: Record<string, unknown> }>,
   table: string,
   pk: string,
   prefix: string,
+  /**
+   * Attributes to fetch, when the caller needs only some of them.
+   *
+   * A page is a megabyte of *returned* data, so narrowing what comes back
+   * narrows how many round trips a full read takes. It does not reduce the
+   * items read — this makes a large partition cheaper to walk, not cheap.
+   */
+  projection?: string,
 ): Promise<T[]> {
   const items: Record<string, unknown>[] = [];
   let cursor: Record<string, unknown> | undefined;
@@ -238,6 +247,7 @@ export async function queryAllPages<T>(
       KeyConditionExpression: 'pk = :pk AND begins_with(sk, :prefix)',
       ExpressionAttributeValues: { ':pk': pk, ':prefix': prefix },
       ExclusiveStartKey: cursor,
+      ...(projection ? { ProjectionExpression: projection } : {}),
     });
     items.push(...(page.Items ?? []));
     cursor = page.LastEvaluatedKey;
