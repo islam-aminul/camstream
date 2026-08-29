@@ -71,6 +71,16 @@ export interface TileInput {
  */
 export const AGENT_STREAM_CEILING = 128;
 
+/**
+ * The most an operator may ask one agent to convert at once.
+ *
+ * Mirrors MAX_CONCURRENT_TRANSCODES in infra/lambda/shared/registry.ts, which
+ * is the authority; this copy exists so the console can refuse an impossible
+ * number before the round trip rather than after it. Kept in step by
+ * transcode-bound.test.ts.
+ */
+export const MAX_TRANSCODE_CAP = 32;
+
 export function tileView(input: TileInput): TileView {
   if (!input.reported) {
     return {

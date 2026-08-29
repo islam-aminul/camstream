@@ -178,6 +178,21 @@ export function slugFor(identity: string): string {
 export const DEFAULT_MAX_TRANSCODES = 1;
 
 /**
+ * The most an operator may ask one agent to convert at once.
+ *
+ * Not a capability, a guard rail. The agent's own resource ceiling is the real
+ * limit and applies underneath this one, so a machine that cannot manage two
+ * will not manage two whatever is typed here. This bound exists so a typed
+ * number is a plausible one - the difference between "this box has cores to
+ * spare" and a fat-fingered 300 that the console would then display as the
+ * agent's settled intent.
+ *
+ * The agent enforces the same bound when it validates its own configuration,
+ * and `transcode-bound.test.ts` fails if the two ever drift apart.
+ */
+export const MAX_CONCURRENT_TRANSCODES = 32;
+
+/**
  * One page of items, and where to resume.
  *
  * The cursor is DynamoDB's own LastEvaluatedKey, base64-encoded so a caller

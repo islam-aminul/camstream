@@ -183,6 +183,15 @@ public final class AgentConfig {
     public volatile int maxConcurrentTranscodes = 1;
 
     /**
+     * The most this may be set to, matching what the console will accept.
+     *
+     * The resource ceiling below is the real limit; this only keeps a typed
+     * number plausible. Kept in step with MAX_CONCURRENT_TRANSCODES in
+     * infra/lambda/shared/registry.ts by transcode-bound.test.ts.
+     */
+    public static final int MAX_CONCURRENT_TRANSCODES = 32;
+
+    /**
      * A ceiling the agent has imposed on itself because the machine cannot
      * carry more.
      *
@@ -327,8 +336,9 @@ public final class AgentConfig {
         if (defaultRtspTransport == null || !defaultRtspTransport.matches("tcp|udp")) {
             throw new IllegalArgumentException("defaultRtspTransport must be \"tcp\" or \"udp\"");
         }
-        if (maxConcurrentTranscodes < 0 || maxConcurrentTranscodes > 64) {
-            throw new IllegalArgumentException("maxConcurrentTranscodes must be between 0 and 64");
+        if (maxConcurrentTranscodes < 0 || maxConcurrentTranscodes > MAX_CONCURRENT_TRANSCODES) {
+            throw new IllegalArgumentException(
+                    "maxConcurrentTranscodes must be between 0 and " + MAX_CONCURRENT_TRANSCODES);
         }
         if (heartbeatActiveMinutes < 1 || heartbeatActiveMinutes > 1440) {
             throw new IllegalArgumentException("heartbeatActiveMinutes must be between 1 and 1440");
