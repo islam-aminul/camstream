@@ -29,12 +29,6 @@ const iot = new IoTClient({});
  * discovered — every earlier test found nothing to report, so the path had
  * never run.
  */
-const RESERVED_NAMES = (thingName: string) => ({
-  '#agent': thingName,
-  '#identity': 'identity',
-  '#model': 'model',
-});
-
 /** Certificate id -> thing name, cached for the container's lifetime. */
 const thingNameByCertId = new Map<string, string>();
 
@@ -339,15 +333,23 @@ async function recordDiscoveries(pk: string, thingName: string, reported: unknow
             }).filter((profile) => profile.token.length > 0)
           : [],
       };
+      const learnt = learnedFrom(camera);
+      const known = learnt.values;
+      // #identity and #model are reserved words; #agent is the thing name used
+      // as a map key. Only the ones the expression actually names may appear,
+      // because DynamoDB rejects an unused entry as firmly as a missing one.
+      const names: Record<string, string> = {
+        '#agent': thingName, '#identity': 'identity', ...learnt.names,
+      };
+      const learned = learnt.clause;
+
       const values = {
         ':identity': identity,
         ':stable': camera.identityStable === true,
         ':sighting': sighting,
         ':now': now,
         ':expiresAt': expiresAt,
-        ':mac': macAddress(camera.macAddress) ?? null,
-        ':make': label(camera.manufacturer, 64) ?? null,
-        ':model': label(camera.model, 64) ?? null,
+        ...known,
       };
       try {
         // reachableBy is a map keyed by thing name, so concurrent reports from
@@ -357,9 +359,8 @@ async function recordDiscoveries(pk: string, thingName: string, reported: unknow
           Key: { pk, sk: key.discovered(identity) },
           UpdateExpression:
             'SET #identity = :identity, identityStable = :stable, reachableBy.#agent = :sighting, ' +
-            'lastSeen = :now, expiresAt = :expiresAt, macAddress = if_not_exists(macAddress, :mac), ' +
-            'manufacturer = if_not_exists(manufacturer, :make), #model = if_not_exists(#model, :model)',
-          ExpressionAttributeNames: RESERVED_NAMES(thingName),
+            'lastSeen = :now, expiresAt = :expiresAt' + learned,
+          ExpressionAttributeNames: names,
           ExpressionAttributeValues: values,
           ConditionExpression: 'attribute_exists(reachableBy)',
         }));
@@ -371,18 +372,52 @@ async function recordDiscoveries(pk: string, thingName: string, reported: unknow
         // whole. :sighting is deliberately dropped — DynamoDB rejects an
         // ExpressionAttributeValues entry that the expression never uses.
         const { ':sighting': _unused, ...withoutSighting } = values;
+        const { '#agent': _agent, ...firstNames } = names;
         await ddb.send(new UpdateCommand({
           TableName: TABLE,
           Key: { pk, sk: key.discovered(identity) },
           UpdateExpression:
             'SET #identity = :identity, identityStable = :stable, reachableBy = :first, ' +
-            'macAddress = :mac, manufacturer = :make, #model = :model, lastSeen = :now, expiresAt = :expiresAt',
-          ExpressionAttributeNames: { '#identity': 'identity', '#model': 'model' },
+            'lastSeen = :now, expiresAt = :expiresAt' + learned,
+          ExpressionAttributeNames: firstNames,
           ExpressionAttributeValues: { ...withoutSighting, ':first': { [thingName]: sighting } },
         }));
       }
     }),
   );
+}
+
+/**
+ * What a sighting learned about the device itself, as an update clause.
+ *
+ * Only fields this sighting actually carries. These used to be written with
+ * `if_not_exists`, meaning to stop a later, less informative sighting erasing
+ * a name already known - and it achieved the opposite. A camera first seen
+ * before its credentials were set answers no ONVIF question, so its record was
+ * created with `manufacturer` explicitly null, and a DynamoDB null is a value
+ * that exists. Every later report found the attribute present and kept it, so
+ * the console read "Unknown model" for the life of the record while the agent
+ * reported CPPLUS on every single scan.
+ *
+ * Writing only what is known leaves the attribute absent until something knows
+ * it, which is both the honest representation of "not discovered yet" and the
+ * state `if_not_exists` was reasoning about in the first place.
+ */
+export function learnedFrom(camera: {
+  macAddress?: unknown; manufacturer?: unknown; model?: unknown;
+}): { clause: string; names: Record<string, string>; values: Record<string, unknown> } {
+  const mac = macAddress(camera.macAddress);
+  const make = label(camera.manufacturer, 64);
+  const model = label(camera.model, 64);
+
+  const sets: string[] = [];
+  const names: Record<string, string> = {};
+  const values: Record<string, unknown> = {};
+  if (mac) { sets.push('macAddress = :mac'); values[':mac'] = mac; }
+  if (make) { sets.push('manufacturer = :make'); values[':make'] = make; }
+  if (model) { sets.push('#model = :model'); names['#model'] = 'model'; values[':model'] = model; }
+
+  return { clause: sets.length ? ', ' + sets.join(', ') : '', names, values };
 }
 
 /**
