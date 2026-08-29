@@ -277,7 +277,11 @@ public final class AgentConfig {
 
     /** Resolves paths that default to sitting under the state directory. */
     public void resolveStatePaths() {
-        Path state = Path.of(stateDir == null || stateDir.isBlank() ? "." : stateDir);
+        // Normalised onto the field, not just used locally: callers read
+        // config.stateDir directly, and one of them handed a null straight to
+        // Path.of - a crash at start-up for any config that omitted it.
+        stateDir = stateDir == null || stateDir.isBlank() ? "." : stateDir;
+        Path state = Path.of(stateDir);
         certificatePath = orElse(certificatePath, state.resolve("device.crt").toString());
         privateKeyPath = orElse(privateKeyPath, state.resolve("device.key").toString());
         credentialKeyPath = orElse(credentialKeyPath, state.resolve("credential-key.pem").toString());

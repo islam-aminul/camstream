@@ -122,15 +122,23 @@ function windowsLauncher(scriptName: string): string {
 REM CamStream agent installer.
 REM
 REM Double-click this, or run it from a prompt. It asks for administrator if it
-REM does not already have it. Arguments are passed through, so to use tools
-REM already on this machine rather than supplying your own:
+REM does not already have it. Arguments are passed through:
 REM
-REM   install.cmd -AllowSystemTools
+REM   install.cmd -AllowSystemTools    use java and ffmpeg already on this machine
+REM   install.cmd -Replace             take this machine over from another agent
 REM
 setlocal
 PowerShell -NoProfile -ExecutionPolicy Bypass -File "%~dp0${scriptName}" %*
-echo.
-pause
+set RESULT=%ERRORLEVEL%
+if not "%RESULT%"=="0" (
+  REM Held open only when there is something to read. A window that pauses on
+  REM success makes every install end with a keypress for no reason; one that
+  REM closes on failure takes the reason with it.
+  echo.
+  echo Install failed with exit code %RESULT%. The message above says why.
+  pause
+)
+exit /b %RESULT%
 `;
 }
 
@@ -277,8 +285,21 @@ function windowsScript(thing: string, identity: string, url: string, version: st
 [CmdletBinding()]
 param(
   [string]$Dependencies,
-  [switch]$AllowSystemTools
+  [switch]$AllowSystemTools,
+  # One machine hosts one agent. Set this to take a machine over from another.
+  [switch]$Replace,
+  # Set when this script relaunched itself elevated. The new window is the only
+  # place the output appears, so a failure there has to be readable before it
+  # closes - and a success has nothing worth holding the window open for.
+  [switch]$Relaunched
 )
+
+trap {
+  Write-Host ''
+  Write-Host $_.Exception.Message -ForegroundColor Red
+  if ($Relaunched) { Read-Host 'Install failed. Press Enter to close' }
+  exit 1
+}
 $ErrorActionPreference = 'Stop'
 
 $Thing     = '${thing}'
@@ -322,9 +343,11 @@ if (-not (New-Object Security.Principal.WindowsPrincipal($identity)).IsInRole(
     throw 'This installs a system service and needs administrator. Run it from an elevated prompt.'
   }
   Write-Host 'This installs a system service and needs administrator; asking for elevation.'
-  $relaunch = @('-NoExit', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $PSCommandPath + '"'))
+  $relaunch = @('-NoProfile', '-ExecutionPolicy', 'Bypass',
+    '-File', ('"' + $PSCommandPath + '"'), '-Relaunched')
   if ($Dependencies)     { $relaunch += @('-Dependencies', ('"' + $Dependencies + '"')) }
   if ($AllowSystemTools) { $relaunch += '-AllowSystemTools' }
+  if ($Replace)          { $relaunch += '-Replace' }
   try {
     Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList $relaunch | Out-Null
   } catch {
