@@ -21,12 +21,22 @@ const DEMAND_TTL_SECONDS = 60;
 /**
  * How long an unchanged desired state may go unrepeated.
  *
- * Publishing only on change is what makes the fan-out affordable, but MQTT at
- * QoS 1 to a disconnected agent is still a message that lands nowhere. A
- * periodic resend bounds how long a missed one can leave an agent out of step
- * without putting the per-keepalive cost back.
+ * Publishing only on change is what makes the fan-out affordable, but silence
+ * is also how an agent decides everyone has left: it stops every rendition
+ * once no instruction has arrived for `idleShutdownSeconds`. So this is not
+ * merely a bound on how stale a dropped message may leave someone - it is the
+ * heartbeat the agent is listening for, and it has to beat faster than that
+ * window or a working stream stops itself mid-view. It did: at 300 against a
+ * 30-second window every stream died half a minute in and flickered back once
+ * every five minutes, which is indistinguishable from a stream that never
+ * worked.
+ *
+ * The expensive thing was never the cadence, it was multiplying it by viewers.
+ * This resends per agent that has demand, whether one person is watching or
+ * fifty, so the fan-out stays flat. `watch-cadence.test.ts` holds the
+ * relationship to the agent's window.
  */
-const WATCH_RESEND_SECONDS = 300;
+const WATCH_RESEND_SECONDS = 45;
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const iot = new IoTDataPlaneClient({ endpoint: `https://${IOT_ENDPOINT}` });

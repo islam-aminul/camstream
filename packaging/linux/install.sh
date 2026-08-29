@@ -243,7 +243,7 @@ ffprobePath: $FFPROBE_BIN
 
 segmentDurationMs: 2000
 playlistWindow: 4
-idleShutdownSeconds: 30
+idleShutdownSeconds: 150
 
 discoveryEnabled: true
 discoveryIntervalMinutes: 30
