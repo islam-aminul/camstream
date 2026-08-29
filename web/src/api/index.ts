@@ -305,6 +305,17 @@ export const api = {
     post<{ requested: string; version: string }>(
       `/api/admin/agents/${encodeURIComponent(thingName)}/update`, { platform }),
 
+  /**
+   * Sets how many cameras one agent may convert at once.
+   *
+   * A ceiling on intent, not on capability: the agent applies its own resource
+   * limit underneath this, so asking for more than the machine can bear gets
+   * what the machine can bear.
+   */
+  setTranscodeCap: (thingName: string, maxConcurrentTranscodes: number) =>
+    patch<{ thingName: string; maxConcurrentTranscodes: number }>(
+      `/api/admin/agents/${encodeURIComponent(thingName)}`, { maxConcurrentTranscodes }),
+
   /** Asks one agent to sweep its network now, rather than waiting for its cycle. */
   scan: (thingName: string) =>
     post<{ requested: string }>('/api/admin/scan', { thingName }),

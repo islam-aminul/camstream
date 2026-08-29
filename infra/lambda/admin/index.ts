@@ -26,7 +26,7 @@ class Refused extends Error {
     this.name = 'Refused';
   }
 }
-import { key, slugFor, DEFAULT_MAX_TRANSCODES, queryAllPages, encodeCursor, decodeCursor, REGISTRY_PK, type CameraRecord, type CustomerRecord, type DiscoveredRecord, type PremisesRecord } from '../shared/registry';
+import { key, slugFor, DEFAULT_MAX_TRANSCODES, MAX_CONCURRENT_TRANSCODES, queryAllPages, encodeCursor, decodeCursor, REGISTRY_PK, type CameraRecord, type CustomerRecord, type DiscoveredRecord, type PremisesRecord } from '../shared/registry';
 import { buildInstaller, buildInstallerArchive, bundleUrl, bundleBuildId, isPlatform, PLATFORMS } from './installer';
 
 const TABLE = process.env.REGISTRY_TABLE!;
@@ -530,8 +530,9 @@ async function updateAgent(caller: Caller, thingName: string | undefined, rawBod
   }
 
   const cap = body.maxConcurrentTranscodes;
-  if (!Number.isInteger(cap) || (cap as number) < 0 || (cap as number) > 64) {
-    return fail(400, 'maxConcurrentTranscodes must be a whole number between 0 and 64');
+  if (!Number.isInteger(cap) || (cap as number) < 0 || (cap as number) > MAX_CONCURRENT_TRANSCODES) {
+    return fail(400,
+      `maxConcurrentTranscodes must be a whole number between 0 and ${MAX_CONCURRENT_TRANSCODES}`);
   }
 
   const existing = await ddb.send(new GetCommand({

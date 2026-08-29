@@ -5,12 +5,13 @@ import Tag from 'primevue/tag';
 import Button from 'primevue/button';
 import InputText from 'primevue/inputtext';
 import Select from 'primevue/select';
+import InputNumber from 'primevue/inputnumber';
 import Message from 'primevue/message';
 import PagedTable from '@/components/PagedTable.vue';
 import { useSelectionStore } from '@/stores/selection';
 import { api, type Agent, type Platform } from '@/api';
 import { isValidDisplayName, nameComplaint } from '@/naming';
-import { AGENT_STREAM_CEILING } from '@/player/tile-state';
+import { AGENT_STREAM_CEILING, MAX_TRANSCODE_CAP } from '@/player/tile-state';
 
 /**
  * The agents at the selected site: what each is carrying, and whether it is
@@ -46,6 +47,51 @@ async function upgrade(agent: Agent, platform: Platform) {
     createError.value = (err as Error).message;
   } finally {
     upgrading.value = null;
+  }
+}
+
+/**
+ * How many cameras an agent may convert at once.
+ *
+ * A conversion is a full re-encode - roughly a core per 1080p stream - where
+ * an ordinary camera is a stream copy, so this is the one number on this page
+ * that decides whether the machine at the site keeps up. It was previously
+ * only displayed, which meant the only way to change it was a hand-rolled API
+ * call with a token lifted out of devtools.
+ *
+ * The agent applies its own resource ceiling underneath whatever is set here,
+ * so this is a statement of intent rather than a promise: ask for eight on a
+ * machine that can carry two and it will carry two, and go back to eight if
+ * the machine is ever able to.
+ */
+const editingCap = ref<string | null>(null);
+const capDraft = ref<number | null>(null);
+const savingCap = ref(false);
+
+function beginCap(agent: Agent) {
+  editingCap.value = agent.thingName;
+  capDraft.value = agent.maxConcurrentTranscodes;
+  createError.value = null;
+}
+
+async function saveCap(agent: Agent) {
+  const wanted = capDraft.value;
+  if (wanted === null || !Number.isInteger(wanted) || wanted < 0 || wanted > MAX_TRANSCODE_CAP) {
+    createError.value = `Choose a whole number between 0 and ${MAX_TRANSCODE_CAP}.`;
+    return;
+  }
+  savingCap.value = true;
+  createError.value = null;
+  try {
+    await api.setTranscodeCap(agent.thingName, wanted);
+    editingCap.value = null;
+    notice.value = `${agent.siteName || agent.thingName} will convert `
+      + `${wanted === 0 ? 'nothing' : `up to ${wanted} camera${wanted === 1 ? '' : 's'}`} at a time.`;
+    await table.value?.refresh();
+  } catch (err) {
+    createError.value = (err as Error).message;
+  } finally {
+    savingCap.value = false;
   }
 }
 
@@ -222,9 +268,34 @@ async function create() {
             </span>
           </template>
         </Column>
-        <Column header="Transcoding">
+        <Column header="Transcoding" style="width: 13rem">
           <template #body="{ data }">
-            {{ data.maxConcurrentTranscodes }} at a time
+            <span v-if="editingCap === data.thingName" class="cap-edit">
+              <InputNumber
+                v-model="capDraft" :min="0" :max="MAX_TRANSCODE_CAP" :step="1"
+                show-buttons button-layout="horizontal" input-class="cap-edit__input"
+                increment-button-icon="pi pi-plus" decrement-button-icon="pi pi-minus"
+                @keyup.enter="saveCap(data)"
+              />
+              <Button
+                v-tooltip.top="'Save'"
+                size="small" text icon="pi pi-check" aria-label="Save"
+                :loading="savingCap" @click="saveCap(data)"
+              />
+              <Button
+                v-tooltip.top="'Cancel'"
+                size="small" text severity="secondary" icon="pi pi-times" aria-label="Cancel"
+                @click="editingCap = null"
+              />
+            </span>
+            <button
+              v-else
+              v-tooltip.top="`How many cameras this agent may re-encode at once, 0 to ${MAX_TRANSCODE_CAP}. The machine's own limit applies underneath.`"
+              type="button" class="cap-edit__open" @click="beginCap(data)"
+            >
+              {{ data.maxConcurrentTranscodes === 0 ? 'none' : `${data.maxConcurrentTranscodes} at a time` }}
+              <i class="pi pi-pencil" aria-hidden="true" />
+            </button>
           </template>
         </Column>
         <Column field="agentVersion" header="Version">
@@ -293,5 +364,48 @@ async function create() {
 .cap__note {
   max-width: 22rem;
   line-height: 1.35;
+}
+
+.cap-edit {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.15rem;
+}
+
+:deep(.cap-edit__input) {
+  width: 3.2rem;
+  text-align: center;
+}
+
+/* Reads as text until it is hovered, so the column still scans as a column
+   rather than as a row of form controls. */
+.cap-edit__open {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.15rem 0.35rem;
+  margin-left: -0.35rem;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: none;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+
+.cap-edit__open .pi {
+  font-size: 0.7rem;
+  opacity: 0;
+  color: var(--p-text-muted-color);
+}
+
+.cap-edit__open:hover,
+.cap-edit__open:focus-visible {
+  border-color: var(--p-content-border-color);
+}
+
+.cap-edit__open:hover .pi,
+.cap-edit__open:focus-visible .pi {
+  opacity: 1;
 }
 </style>
