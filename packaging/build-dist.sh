@@ -55,7 +55,25 @@ windows_dir="$(stage windows \
   "$ROOT/packaging/windows/install.ps1" \
   "$ROOT/packaging/windows/uninstall.ps1" \
   "$ROOT/packaging/windows/camstream-agent.xml")"
-(cd "$windows_dir" && zip -qr "$OUT/camstream-agent-$VERSION-windows.zip" .)
+# zip is not installed everywhere this is built from - notably not on a
+# Windows box with Git Bash, which is where an operator is most likely to be.
+# Falling back rather than failing matters: the last time this step failed the
+# tarballs were published and the zip was not, so the Windows bundle silently
+# stayed months behind the other two.
+make_zip() {
+  local dir="$1" out="$2"
+  if command -v zip >/dev/null 2>&1; then
+    (cd "$dir" && zip -qr "$out" .)
+  elif command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import shutil,sys; shutil.make_archive(sys.argv[1][:-4], "zip", sys.argv[2])' "$out" "$dir"
+  elif command -v powershell >/dev/null 2>&1; then
+    powershell -NoProfile -Command       "Compress-Archive -Path (Join-Path '$dir' '*') -DestinationPath '$out' -Force"
+  else
+    echo "Need one of: zip, python3, powershell - to build the Windows bundle." >&2
+    exit 1
+  fi
+}
+make_zip "$windows_dir" "$OUT/camstream-agent-$VERSION-windows.zip"
 
 macos_dir="$(stage macos "$ROOT/packaging/macos/online.camstream.agent.plist")"
 tar -czf "$OUT/camstream-agent-$VERSION-macos.tar.gz" -C "$macos_dir" .

@@ -59,7 +59,7 @@ $RuntimeDir = "$InstallDir\runtime"
   Unpacks every archive in dependencies\ into $InstallDir\runtime.
 
   Windows ships bsdtar as tar.exe, which reads .7z, .tar.gz, .tar.xz and .tar
-  alike — so the convenient FFmpeg builds, which are distributed as .7z, need
+  alike - so the convenient FFmpeg builds, which are distributed as .7z, need
   no third-party extractor. Expand-Archive handles .zip, which is what the
   Temurin JRE downloads are.
 #>
@@ -154,7 +154,7 @@ function Assert-Runtime {
 The dependencies\ directory is empty.
 
 The agent ships without a Java runtime or FFmpeg so that you choose the builds
-and their licences. Put both archives in dependencies\ and run this again —
+and their licences. Put both archives in dependencies\ and run this again -
 see dependencies\README.txt.
 
 To use tools already on this machine instead, re-run with -AllowSystemTools.
@@ -186,7 +186,7 @@ see in this window.
   if ($jvmArch -eq 'aarch64' -or $jvmArch -eq 'arm64') {
     throw @'
 This is an ARM64 JVM, and the AWS CRT native library is not published for
-Windows on ARM — the agent would fail at startup with an UnsatisfiedLinkError.
+Windows on ARM - the agent would fail at startup with an UnsatisfiedLinkError.
 
 Put an x64 JRE in dependencies\ instead and re-run. Windows 11 on ARM runs x64
 binaries under emulation, and the agent works normally that way.
@@ -248,7 +248,7 @@ cameras: []
   Copy-Item $ConfigPath "$DataDir\agent.yaml" -Force
 } elseif (-not (Test-Path "$DataDir\agent.yaml")) {
   Copy-Item "$Here\agent.yaml.example" "$DataDir\agent.yaml" -Force
-  Write-Host "  wrote a template to $DataDir\agent.yaml — edit it before starting"
+  Write-Host "  wrote a template to $DataDir\agent.yaml - edit it before starting"
 }
 
 # However the config arrived, it must name the binaries this installation
