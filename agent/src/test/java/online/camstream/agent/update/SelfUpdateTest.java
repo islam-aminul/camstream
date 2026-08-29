@@ -22,9 +22,34 @@ class SelfUpdateTest {
             "https://camstream-live-1234.s3.ap-south-1.amazonaws.com/downloads/agent.zip?X-Amz-Signature=x";
 
     @Test
+    @DisplayName("takes a rebuild of the same version, which is what a version cannot see")
+    void takesARebuildOfTheSameVersion() {
+        // Every build of this project so far has called itself 0.1.0.
+        // Comparing versions would refuse them all as already current.
+        assertEquals(Decision.UPDATE,
+                SelfUpdate.decide("0.1.0", "buildA", "0.1.0", "buildB", GOOD_URL));
+    }
+
+    @Test
+    @DisplayName("installs when it has never recorded which build it is running")
+    void installsWhenItHasNoRecord() {
+        assertEquals(Decision.UPDATE,
+                SelfUpdate.decide("0.1.0", null, "0.1.0", "buildB", GOOD_URL));
+    }
+
+    @Test
+    @DisplayName("falls back to the version when no build is named")
+    void fallsBackToVersion() {
+        assertEquals(Decision.ALREADY_CURRENT,
+                SelfUpdate.decide("0.1.0", "buildA", "0.1.0", null, GOOD_URL));
+        assertEquals(Decision.UPDATE,
+                SelfUpdate.decide("0.1.0", "buildA", "0.2.0", "", GOOD_URL));
+    }
+
+    @Test
     @DisplayName("takes a build it is not already running")
     void takesANewBuild() {
-        assertEquals(Decision.UPDATE, SelfUpdate.decide("0.1.0", "0.2.0", GOOD_URL));
+        assertEquals(Decision.UPDATE, SelfUpdate.decide("0.1.0", "buildA", "0.2.0", "buildB", GOOD_URL));
     }
 
     @Test
@@ -32,7 +57,8 @@ class SelfUpdateTest {
     void skipsTheCurrentBuild() {
         // Restarting a site's agents to install what they are running is an
         // outage for no reason.
-        assertEquals(Decision.ALREADY_CURRENT, SelfUpdate.decide("0.1.0", "0.1.0", GOOD_URL));
+        assertEquals(Decision.ALREADY_CURRENT,
+                SelfUpdate.decide("0.1.0", "buildA", "0.1.0", "buildA", GOOD_URL));
     }
 
     @Test
@@ -40,16 +66,16 @@ class SelfUpdateTest {
     void allowsRollback() {
         // The situation where remote update matters most is a bad build. An
         // agent that only ever moves forward cannot help with it.
-        assertEquals(Decision.UPDATE, SelfUpdate.decide("0.2.0", "0.1.0", GOOD_URL));
+        assertEquals(Decision.UPDATE, SelfUpdate.decide("0.2.0", "buildA", "0.1.0", "buildB", GOOD_URL));
     }
 
     @Test
     @DisplayName("refuses an instruction that does not say what or where")
     void refusesIncompleteInstructions() {
-        assertEquals(Decision.MALFORMED, SelfUpdate.decide("0.1.0", null, GOOD_URL));
-        assertEquals(Decision.MALFORMED, SelfUpdate.decide("0.1.0", "", GOOD_URL));
-        assertEquals(Decision.MALFORMED, SelfUpdate.decide("0.1.0", "0.2.0", null));
-        assertEquals(Decision.MALFORMED, SelfUpdate.decide("0.1.0", "0.2.0", "  "));
+        assertEquals(Decision.MALFORMED, SelfUpdate.decide("0.1.0", "buildA", null, "buildB", GOOD_URL));
+        assertEquals(Decision.MALFORMED, SelfUpdate.decide("0.1.0", "buildA", "", "buildB", GOOD_URL));
+        assertEquals(Decision.MALFORMED, SelfUpdate.decide("0.1.0", "buildA", "0.2.0", "buildB", null));
+        assertEquals(Decision.MALFORMED, SelfUpdate.decide("0.1.0", "buildA", "0.2.0", "buildB", "  "));
     }
 
     @Test
@@ -58,20 +84,20 @@ class SelfUpdateTest {
         // The instruction arrives on a topic only this agent's certificate may
         // be published to, so it is authenticated - but "fetch and execute
         // whatever is at this address" is a capability worth not having.
-        assertEquals(Decision.REFUSED, SelfUpdate.decide("0.1.0", "0.2.0",
+        assertEquals(Decision.REFUSED, SelfUpdate.decide("0.1.0", "buildA", "0.2.0", "buildB",
                 "https://evil.example.com/agent.zip"));
-        assertEquals(Decision.REFUSED, SelfUpdate.decide("0.1.0", "0.2.0",
+        assertEquals(Decision.REFUSED, SelfUpdate.decide("0.1.0", "buildA", "0.2.0", "buildB",
                 "http://camstream-live.s3.ap-south-1.amazonaws.com/agent.zip"));
-        assertEquals(Decision.REFUSED, SelfUpdate.decide("0.1.0", "0.2.0",
+        assertEquals(Decision.REFUSED, SelfUpdate.decide("0.1.0", "buildA", "0.2.0", "buildB",
                 "https://s3.amazonaws.com.evil.example.com/agent.zip"));
     }
 
     @Test
     @DisplayName("refuses a version string that is really a path or a command")
     void refusesStrangeVersions() {
-        assertEquals(Decision.REFUSED, SelfUpdate.decide("0.1.0", "../../etc/passwd", GOOD_URL));
-        assertEquals(Decision.REFUSED, SelfUpdate.decide("0.1.0", "0.2.0; rm -rf /", GOOD_URL));
-        assertEquals(Decision.REFUSED, SelfUpdate.decide("0.1.0", "latest", GOOD_URL));
+        assertEquals(Decision.REFUSED, SelfUpdate.decide("0.1.0", "buildA", "../../etc/passwd", "buildB", GOOD_URL));
+        assertEquals(Decision.REFUSED, SelfUpdate.decide("0.1.0", "buildA", "0.2.0; rm -rf /", "buildB", GOOD_URL));
+        assertEquals(Decision.REFUSED, SelfUpdate.decide("0.1.0", "buildA", "latest", "buildB", GOOD_URL));
     }
 
     @Test
