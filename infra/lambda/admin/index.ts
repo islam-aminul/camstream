@@ -818,6 +818,11 @@ async function listCameras(caller: Caller, query: Record<string, string | undefi
   const rows = approved
     // Narrowing by agent is the rail's second dropdown feeding the third.
     .filter((c) => !query?.agentId || c.assignedTo === query.agentId)
+    // An exact id, for the live view showing one chosen camera on its own.
+    // Distinct from `q`, which is a substring of the display name: searching
+    // for the name would match every camera that happens to contain it, and
+    // choosing a camera in the rail means that camera and no other.
+    .filter((c) => !query?.cameraId || c.cameraId === query.cameraId)
     .map((c) => ({
       identity: c.identity,
       cameraId: c.cameraId,
