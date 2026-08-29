@@ -39,6 +39,17 @@ public final class AgentConfig {
     /** Where the device certificate, keys and working state live. */
     public String stateDir;
 
+    /**
+     * The jar this agent is running from, for replacing it on instruction.
+     *
+     * Normally discovered rather than configured: the JVM knows where it
+     * loaded the code from, and asking it is more reliable than asking an
+     * installer to write the path down correctly. The setting exists for the
+     * case the JVM cannot say - running from a directory of classes during
+     * development, where self-update is meaningless anyway.
+     */
+    public String agentJar;
+
     /** Friendly site label, reported on heartbeat. */
     public String siteName;
 
@@ -348,6 +359,27 @@ public final class AgentConfig {
         require(field, value);
         if (!value.matches("[a-z0-9]+(-[a-z0-9]+)*") || value.contains("--") || value.length() < 3 || value.length() > 32) {
             throw new IllegalArgumentException(field + " must be 3-32 chars of [a-z0-9-] and must not contain '--'");
+        }
+    }
+
+    /**
+     * Where this agent's own program lives.
+     *
+     * Taken from the code source the JVM actually loaded, so an update
+     * replaces the jar that is running rather than one a configuration file
+     * claims is running.
+     */
+    public String agentJarPath() {
+        if (agentJar != null && !agentJar.isBlank()) {
+            return agentJar;
+        }
+        try {
+            java.net.URL location = AgentConfig.class.getProtectionDomain()
+                    .getCodeSource().getLocation();
+            return java.nio.file.Path.of(location.toURI()).toString();
+        } catch (Exception e) {
+            throw new IllegalStateException(
+                    "cannot tell where this agent is installed; set agentJar in the config", e);
         }
     }
 }

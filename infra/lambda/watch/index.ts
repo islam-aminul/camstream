@@ -4,6 +4,7 @@ import { IoTDataPlaneClient, PublishCommand } from '@aws-sdk/client-iot-data-pla
 import type { APIGatewayProxyEventV2WithJWTAuthorizer, APIGatewayProxyStructuredResultV2 } from 'aws-lambda';
 import { isValidId, parseThingName, premisesScope, withinScope } from '../shared/tenant';
 import { fail, json } from '../shared/http';
+import { identify, targetTenant } from '../shared/roles';
 import { readSession, sessionSuperseded } from '../shared/session';
 import { canDecode } from '../shared/playability';
 import { DEFAULT_MAX_TRANSCODES, key, queryAllPages } from '../shared/registry';
@@ -130,15 +131,15 @@ export async function handler(
   event: APIGatewayProxyEventV2WithJWTAuthorizer,
 ): Promise<APIGatewayProxyStructuredResultV2> {
   const claims = event.requestContext.authorizer?.jwt?.claims ?? {};
-  const tenantId = claims['custom:tenantId'];
   const userSub = claims.sub;
 
-  if (typeof userSub !== 'string' || !isValidId(tenantId)) {
-    return fail(403, 'Account is not associated with a valid tenant');
+  if (typeof userSub !== 'string') {
+    return fail(403, 'Token carries no subject');
   }
 
   let body: {
     sessionId?: unknown;
+    tenantId?: unknown;
     premisesId?: unknown;
     visible?: unknown;
     main?: unknown;
@@ -166,6 +167,17 @@ export async function handler(
     return fail(400, 'Body must include the premisesId being watched');
   }
   const premisesId = body.premisesId;
+
+  // Whose cameras these are. The platform operator selects a customer in the
+  // console, and reading their own tenant instead wrote the demand into an
+  // empty partition and resolved a desired state from nothing: the agent was
+  // never asked to publish, and every tile sat waiting for an acknowledgement
+  // that was being filed under the wrong customer.
+  const caller = identify(event);
+  const tenantId = caller ? targetTenant(caller, body.tenantId) : null;
+  if (!tenantId) {
+    return fail(403, 'Not permitted to act on that tenant');
+  }
   if (!withinScope(`${tenantId}--${premisesId}--x`, premisesScope(claims as Record<string, unknown>))) {
     return fail(403, 'That premises is not within your permitted sites');
   }

@@ -39,8 +39,14 @@ public final class WatchListener implements AutoCloseable {
         /** A newer configuration exists; fetch it. */
         void onConfigVersion(long version);
 
-        /** A one-off instruction such as "scan now". */
-        void onCommand(String action);
+        /**
+         * A one-off instruction such as "scan now" or "update to this build".
+         *
+         * The whole message is handed over rather than just the verb: an
+         * update names a version and where to fetch it, and a channel that
+         * carried only a verb would need a second one beside it.
+         */
+        void onCommand(String action, JsonNode command);
 
         /** The connection came up — report, and reconcile configuration. */
         void onConnected();
@@ -146,8 +152,10 @@ public final class WatchListener implements AutoCloseable {
                 handlers.onDesiredState(parse(payload)));
         subscribe(prefix + "/config", payload ->
                 handlers.onConfigVersion(MAPPER.readTree(payload).path("configVersion").asLong(-1)));
-        subscribe(prefix + "/command", payload ->
-                handlers.onCommand(MAPPER.readTree(payload).path("action").asText("")));
+        subscribe(prefix + "/command", payload -> {
+            JsonNode command = MAPPER.readTree(payload);
+            handlers.onCommand(command.path("action").asText(""), command);
+        });
     }
 
     /** Runs work off the event loop, and never throws back onto it. */

@@ -440,6 +440,7 @@ export class Api extends Construct {
       [apigwv2.HttpMethod.GET, '/api/admin/agents/{thingName}/identity'],
       [apigwv2.HttpMethod.GET, '/api/admin/agents/{thingName}/installer'],
       [apigwv2.HttpMethod.POST, '/api/admin/scan'],
+      [apigwv2.HttpMethod.POST, '/api/admin/agents/{thingName}/update'],
       [apigwv2.HttpMethod.GET, '/api/admin/discovered'],
       [apigwv2.HttpMethod.POST, '/api/admin/cameras'],
       [apigwv2.HttpMethod.DELETE, '/api/admin/cameras/{identity}'],
