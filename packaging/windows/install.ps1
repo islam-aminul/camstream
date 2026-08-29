@@ -162,6 +162,26 @@ Looked in: $RuntimeDir
   The preference is lowered inside this function only, so a genuine failure
   anywhere else still stops the install.
 #>
+<#
+  Writes a UTF-8 text file with no byte-order mark.
+
+  Windows PowerShell's -Encoding UTF8 writes one; PowerShell 7's does not.
+  Three bytes of U+FEFF in front of a JSON file are rejected by every JSON
+  parser there is, and this crash-looped a real install: the agent read
+  identity.json, failed on its first character, exited, and was restarted every
+  ten seconds forever.
+
+  .NET is asked directly, because that is the only way to say "UTF-8, no mark"
+  that both editions honour.
+#>
+function Write-Utf8NoBom {
+  param(
+    [Parameter(Mandatory)][string]$Path,
+    [Parameter(Mandatory)][AllowEmptyString()][string]$Content
+  )
+  [IO.File]::WriteAllText($Path, $Content, (New-Object Text.UTF8Encoding $false))
+}
+
 function Invoke-Tool {
   param([Parameter(Mandatory)][string]$Exe, [string[]]$Arguments = @())
   $ErrorActionPreference = 'Continue'
@@ -266,7 +286,7 @@ discoveryIntervalMinutes: 30
 # Cameras are normally approved centrally in the admin console. Anything listed
 # here is configured locally and takes precedence.
 cameras: []
-"@ | Set-Content -Path "$DataDir\agent.yaml" -Encoding UTF8
+"@ | ForEach-Object { Write-Utf8NoBom -Path "$DataDir\agent.yaml" -Content $_ }
     Write-Host "  wrote $DataDir\agent.yaml"
   }
 } elseif ($ConfigPath) {
@@ -325,7 +345,7 @@ function Install-WithWinSW {
   # bundled JVM so the service does not depend on SYSTEM's PATH either.
   (Get-Content "$Here\camstream-agent.xml" -Raw).Replace(
     '<executable>java</executable>', "<executable>$script:JavaBin</executable>") |
-    Set-Content -Path "$InstallDir\$ServiceName.xml" -Encoding UTF8
+    ForEach-Object { Write-Utf8NoBom -Path "$InstallDir\$ServiceName.xml" -Content $_ }
 
   if (Get-Service $ServiceName -ErrorAction SilentlyContinue) {
     & $exe stop  2>$null | Out-Null

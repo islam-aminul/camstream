@@ -7,6 +7,8 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 
+import online.camstream.agent.config.TextFiles;
+
 /**
  * The small file an administrator downloads per agent.
  *
@@ -47,7 +49,7 @@ public final class IdentityFile {
     public String claimPrivateKey;
 
     public static IdentityFile load(Path path) throws IOException {
-        IdentityFile identity = MAPPER.readValue(Files.readString(path), IdentityFile.class);
+        IdentityFile identity = MAPPER.readValue(TextFiles.read(path), IdentityFile.class);
         identity.validate();
         return identity;
     }

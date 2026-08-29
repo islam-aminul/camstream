@@ -292,6 +292,26 @@ if (-not $Dependencies) { $Dependencies = Join-Path $Here 'dependencies' }
 # new window the same arguments. -NoExit keeps that window open: it is where
 # the output goes, and a window that closes on completion takes the result with
 # it.
+<#
+  Writes a UTF-8 text file with no byte-order mark.
+
+  Windows PowerShell's -Encoding UTF8 writes one; PowerShell 7's does not.
+  Three bytes of U+FEFF in front of a JSON file are rejected by every JSON
+  parser there is, and this crash-looped a real install: the agent read
+  identity.json, failed on its first character, exited, and was restarted every
+  ten seconds forever.
+
+  .NET is asked directly, because that is the only way to say "UTF-8, no mark"
+  that both editions honour.
+#>
+function Write-Utf8NoBom {
+  param(
+    [Parameter(Mandatory)][string]$Path,
+    [Parameter(Mandatory)][AllowEmptyString()][string]$Content
+  )
+  [IO.File]::WriteAllText($Path, $Content, (New-Object Text.UTF8Encoding $false))
+}
+
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 if (-not (New-Object Security.Principal.WindowsPrincipal($identity)).IsInRole(
       [Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -323,7 +343,7 @@ try {
   $identityJson = @'
 ${identity}
 '@
-  Set-Content -Path "$Work\\identity.json" -Value $identityJson -Encoding UTF8
+  Write-Utf8NoBom -Path "$Work\\identity.json" -Content $identityJson
 
   # The bundle ships an empty dependencies\\ folder; fill it from wherever the
   # operator put the archives, so install.ps1 finds them where it expects.
