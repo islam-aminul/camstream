@@ -136,7 +136,6 @@ async function jumpTo(target: { premisesId: string; agentId?: string; cameraId?:
       v-model="selection.customerId"
       label="Customer"
       :options="customerOptions"
-      :automatic="selection.automatic.customer"
       :loading="selection.loading.customer"
     />
 
@@ -144,7 +143,6 @@ async function jumpTo(target: { premisesId: string; agentId?: string; cameraId?:
       v-model="selection.premisesId"
       label="Premises"
       :options="premisesOptions"
-      :automatic="selection.automatic.premises"
       :loading="selection.loading.premises"
       :blocked-by="selection.customerId ? null : 'customer'"
     />
@@ -153,7 +151,6 @@ async function jumpTo(target: { premisesId: string; agentId?: string; cameraId?:
       v-model="selection.agentId"
       label="Agent"
       :options="agentOptions"
-      :automatic="selection.automatic.agent"
       :loading="selection.loading.agent"
       :blocked-by="selection.premisesId ? null : 'premises'"
     />

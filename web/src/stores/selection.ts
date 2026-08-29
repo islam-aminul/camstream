@@ -9,18 +9,17 @@ import { settleLevel, createLatest } from './cascade';
  *
  * The rules, all of which have a reason:
  *
- *  - A level holding exactly one option selects it, and says that it did. A
- *    silent selection is indistinguishable from a choice the user made and
- *    forgot, so the control marks itself.
+ *  - A level holding exactly one option selects it, quietly. A single option
+ *    is not a decision anybody made, and saying so drew attention to the
+ *    least interesting thing on the page.
  *  - A level holding several waits. Guessing spends the customer's money at a
  *    site nobody asked about.
  *  - A level holding none says so and disables everything below it. An empty
  *    dropdown and a loading dropdown otherwise look identical.
  *  - Changing a level clears everything beneath it before re-applying
  *    auto-selection, or a stale camera survives under a new site.
- *  - A level that later gains options keeps its current value but stops
- *    calling it automatic — an agent enrolling must not silently move what
- *    somebody is watching.
+ *  - A level that later gains options keeps the value it already had, so an
+ *    agent enrolling does not move what somebody is watching.
  *  - Customer is fixed and hidden when the caller's token pins it, which is
  *    everyone but the platform operator. That is the same rule as
  *    auto-select-when-single, taken one step further: an administrator with
@@ -45,8 +44,6 @@ export const useSelectionStore = defineStore('selection', () => {
   const agentId = ref<string | null>(null);
   const cameraId = ref<string | null>(null);
 
-  /** Levels the app chose rather than the user, so the UI can say so. */
-  const automatic = ref<Record<string, boolean>>({});
   const loading = ref<Record<string, boolean>>({});
   const error = ref<string | null>(null);
 
@@ -91,11 +88,9 @@ export const useSelectionStore = defineStore('selection', () => {
     }
   }
 
-  /** Applies the shared cascade rules, and records whether this level chose. */
-  function settle(level: string, current: string | null, options: string[]): string | null {
-    const settled = settleLevel(current, options);
-    automatic.value = { ...automatic.value, [level]: settled.automatic };
-    return settled.value;
+  /** Applies the shared cascade rules. */
+  function settle(current: string | null, options: string[]): string | null {
+    return settleLevel(current, options);
   }
 
   async function loadCustomers() {
@@ -105,7 +100,7 @@ export const useSelectionStore = defineStore('selection', () => {
     }
     await load('customer', () => api.customers(), (list) => {
       customers.value = list;
-      customerId.value = settle('customer', customerId.value, list.map((c) => c.tenantId));
+      customerId.value = settle(customerId.value, list.map((c) => c.tenantId));
     });
   }
 
@@ -113,7 +108,7 @@ export const useSelectionStore = defineStore('selection', () => {
     if (!customerId.value) { premises.value = []; premisesId.value = null; return; }
     await load('premises', () => api.premises(tenantParam.value), (list) => {
       premises.value = list;
-      premisesId.value = settle('premises', premisesId.value, list.map((p) => p.premisesId));
+      premisesId.value = settle(premisesId.value, list.map((p) => p.premisesId));
     });
   }
 
@@ -123,7 +118,7 @@ export const useSelectionStore = defineStore('selection', () => {
       tenantId: tenantParam.value, premisesId: premisesId.value!, limit: 200,
     }), (page) => {
       agents.value = page.items;
-      agentId.value = settle('agent', agentId.value, page.items.map((a) => a.thingName));
+      agentId.value = settle(agentId.value, page.items.map((a) => a.thingName));
     });
   }
 
@@ -221,7 +216,7 @@ export const useSelectionStore = defineStore('selection', () => {
   return {
     customers, premises, agents, cameras,
     customerId, premisesId, agentId, cameraId,
-    automatic, loading, error,
+    loading, error,
     customerIsPinned, tenantParam, ready,
     loadCustomers, loadPremises, loadAgents, loadCameras, restore,
   };

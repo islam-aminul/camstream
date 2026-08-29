@@ -14,8 +14,6 @@ import { levelStatus } from '@/stores/cascade';
 const props = defineProps<{
   label: string;
   options: { value: string; label: string; hint?: string }[];
-  /** True when this level was chosen by the app rather than by the user. */
-  automatic?: boolean;
   loading?: boolean;
   /** Why the level cannot be used yet, when it cannot. */
   blockedBy?: string | null;
@@ -34,12 +32,11 @@ const status = computed(() => levelStatus({
   loading: props.loading,
   options: props.options.length,
   selected: Boolean(model.value),
-  automatic: props.automatic,
 }));
 </script>
 
 <template>
-  <div class="level" :class="{ 'level--auto': automatic && model }">
+  <div class="level">
     <label :for="`level-${label}`">{{ label }}</label>
     <Select
       :id="`level-${label}`"
@@ -87,12 +84,6 @@ label {
   font-size: 0.72rem;
   line-height: 1.3;
   color: var(--p-text-muted-color);
-}
-
-/* An automatic choice is marked, because a silent one is indistinguishable
-   from a choice the user made and forgot making. */
-.level--auto .level__status {
-  color: var(--p-primary-color);
 }
 
 .option {
