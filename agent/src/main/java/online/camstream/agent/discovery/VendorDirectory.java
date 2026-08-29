@@ -3,7 +3,10 @@ package online.camstream.agent.discovery;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.BufferedReader;
 import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -28,6 +31,17 @@ public final class VendorDirectory {
 
     private static final Logger log = LoggerFactory.getLogger(VendorDirectory.class);
     private static final String RESOURCE = "/oui-cctv.properties";
+
+    /**
+     * The IEEE registry, trimmed to two columns by scripts/refresh-oui.sh.
+     *
+     * The curated table above knows a handful of vendors well enough to guess
+     * their RTSP paths. This knows who owns every assigned prefix and nothing
+     * else, which is all that is needed to stop a camera being called
+     * "Unknown model" in a list. Loaded on first miss rather than at start-up:
+     * a site of recognised cameras never pays for it.
+     */
+    private static final String REGISTRY = "/oui-vendors.csv";
 
     /** What is known about one manufacturer. */
     public record Vendor(String key, String name, List<String> paths,
@@ -113,6 +127,112 @@ public final class VendorDirectory {
         }
         String hex = macOrPrefix.replaceAll("[^0-9A-Fa-f]", "").toUpperCase(Locale.ROOT);
         return hex.length() >= 6 ? hex.substring(0, 6) : null;
+    }
+
+    private static volatile Map<String, String> registrants;
+
+    /**
+     * Every assigned OUI and who holds it, read once and kept.
+     *
+     * Around forty thousand entries and a megabyte on disk. That is worth
+     * saying out loud, because the original table was deliberately partial to
+     * avoid exactly this - but a partial table answers "who made this" with
+     * silence for most of the market, and silence is what put a MAC address in
+     * front of the operator where a name belonged.
+     */
+    private static Map<String, String> registrants() {
+        Map<String, String> loaded = registrants;
+        if (loaded != null) {
+            return loaded;
+        }
+        synchronized (VendorDirectory.class) {
+            if (registrants != null) {
+                return registrants;
+            }
+            Map<String, String> table = new HashMap<>();
+            try (InputStream in = VendorDirectory.class.getResourceAsStream(REGISTRY)) {
+                if (in == null) {
+                    log.warn("no IEEE OUI registry on the classpath; unrecognised devices stay unnamed");
+                } else {
+                    read(new BufferedReader(new InputStreamReader(in, StandardCharsets.UTF_8)), table);
+                    log.debug("IEEE OUI registry holds {} assignments", table.size());
+                }
+            } catch (Exception e) {
+                // An unreadable table costs a nicer name, nothing else.
+                log.warn("could not read the IEEE OUI registry: {}", e.toString());
+            }
+            registrants = Map.copyOf(table);
+            return registrants;
+        }
+    }
+
+    private static void read(BufferedReader reader, Map<String, String> into) throws java.io.IOException {
+        String line;
+        while ((line = reader.readLine()) != null) {
+            if (line.isBlank() || line.charAt(0) == '#') {
+                continue;
+            }
+            List<String> fields = csvFields(line);
+            if (fields.size() < 2) {
+                continue;
+            }
+            String prefix = normalise(fields.get(0));
+            String name = fields.get(1).trim();
+            if (prefix != null && !name.isEmpty() && !name.equalsIgnoreCase("organisation")) {
+                into.put(prefix, name);
+            }
+        }
+    }
+
+    /** A CSV row, honouring the quoting the generator emits for names with commas. */
+    static List<String> csvFields(String line) {
+        List<String> fields = new ArrayList<>();
+        StringBuilder field = new StringBuilder();
+        boolean quoted = false;
+        for (int i = 0; i < line.length(); i++) {
+            char c = line.charAt(i);
+            if (quoted) {
+                if (c != '"') {
+                    field.append(c);
+                } else if (i + 1 < line.length() && line.charAt(i + 1) == '"') {
+                    field.append('"');
+                    i++;
+                } else {
+                    quoted = false;
+                }
+            } else if (c == '"') {
+                quoted = true;
+            } else if (c == ',') {
+                fields.add(field.toString());
+                field.setLength(0);
+            } else {
+                field.append(c);
+            }
+        }
+        fields.add(field.toString());
+        return fields;
+    }
+
+    /**
+     * Who the IEEE says owns this address, for a device the curated table
+     * does not recognise.
+     *
+     * This is the registrant, which is not always the brand on the box -
+     * "Aditya Infotech" makes the cameras sold as CP PLUS. It is still a name
+     * an operator can look up, which a MAC address is not.
+     */
+    public static String registrantFor(String mac) {
+        String prefix = normalise(mac);
+        return prefix == null ? null : registrants().get(prefix);
+    }
+
+    /**
+     * The best name available for a device: the curated brand where there is
+     * one, the IEEE registrant otherwise, and null when even that is unknown.
+     */
+    public static String nameFor(String mac) {
+        Vendor vendor = forMac(mac);
+        return vendor != null ? vendor.name() : registrantFor(mac);
     }
 
     /** The manufacturer of a device with this hardware address, if it is known. */

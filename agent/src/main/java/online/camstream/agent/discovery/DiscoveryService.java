@@ -130,7 +130,33 @@ public final class DiscoveryService implements CameraSource {
                 }
             }
         }
+        byIdentity.values().removeIf(DiscoveryService::isNotACamera);
         lastScan = byIdentity;
+    }
+
+    /**
+     * Whether a device that answered the sweep is worth showing to an operator.
+     *
+     * A port scan finds whatever is listening, and on an ordinary network that
+     * includes the router, a printer, a NAS and the machine running this agent.
+     * They are not cameras, but they arrived through the same door as the
+     * cameras, so they were offered for approval alongside them - a list of
+     * candidates in which the first entry was the gateway.
+     *
+     * The test is the two things a camera must be able to do: answer ONVIF, or
+     * have an RTSP port open. Something that does neither cannot become a
+     * stream no matter which credential is tried, and UNSUPPORTED is set
+     * precisely when both have already been ruled out. A camera that merely
+     * refused its credentials is NEEDS_CREDENTIALS and is still offered, since
+     * that one is fixed by typing a password.
+     */
+    static boolean isNotACamera(DiscoveredCamera camera) {
+        if (camera.authState != DiscoveredCamera.AuthState.UNSUPPORTED) {
+            return false;
+        }
+        log.debug("ignoring {} - {}", camera.ipAddress,
+                camera.note == null ? "not a camera" : camera.note);
+        return true;
     }
 
     /**
@@ -425,9 +451,18 @@ public final class DiscoveryService implements CameraSource {
         if (vendor == null) {
             vendor = VendorDirectory.byName(camera.manufacturer);
         }
-        if (vendor != null && (camera.manufacturer == null || camera.manufacturer.isBlank())) {
-            // Give the operator a name to recognise in a list of numbers.
-            camera.manufacturer = vendor.name();
+        if (camera.manufacturer == null || camera.manufacturer.isBlank()) {
+            // Give the operator a name to recognise in a list of numbers. The
+            // curated table knows a few vendors well; the IEEE registry knows
+            // who owns every assigned prefix, and a device that answered no
+            // ONVIF query has nothing else left to identify it. Without this
+            // the console showed "Unknown model" and the camera was approved
+            // under its own MAC address.
+            String name = vendor != null
+                    ? vendor.name() : VendorDirectory.registrantFor(camera.macAddress);
+            if (name != null && !name.isBlank()) {
+                camera.manufacturer = name;
+            }
         }
         return vendor;
     }
