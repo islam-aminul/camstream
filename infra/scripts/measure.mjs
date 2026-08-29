@@ -62,10 +62,23 @@ async function concurrent(name, path, n) {
 
 const site = `tenantId=${tenantId}&premisesId=${premisesId}`;
 
+// Claim the session slot first. Reads are gated on holding it, and a token
+// minted after another sign-in has displaced the stored session is refused —
+// which looks exactly like a broken endpoint if you have not claimed it.
+await fetch(`${API}/api/session`, {
+  method: 'POST',
+  headers: { authorization: TOKEN, 'content-type': 'application/json' },
+  body: JSON.stringify({ tenantId, premisesId }),
+});
+
 // The ids a full grid asks for, taken from the first page so they are real.
 const firstPage = await fetch(`${API}/api/admin/cameras?${site}&limit=16`, {
   headers: { authorization: TOKEN },
 }).then((r) => r.json());
+if (!firstPage.cameras) {
+  console.error('Could not list cameras:', JSON.stringify(firstPage));
+  process.exit(1);
+}
 const ids = firstPage.cameras.map((c) => c.cameraId).join(',');
 console.log(`Site holds ${firstPage.total} cameras.\n`);
 
