@@ -143,15 +143,49 @@ export function withinScope(thingName: string, scope: string[]): boolean {
 /**
  * CloudFront resource wildcard for a viewer.
  *
- * A viewer restricted to particular premises gets one policy per site, and
- * CloudFront allows only a single statement — so a viewer scoped to more than
- * one site but not all of them receives the tenant-wide wildcard. Narrowing
- * that further needs one cookie set per site, which the player does not
- * currently support; recorded here so the limit is visible rather than implied.
+ * A cookie policy statement carries exactly one resource, so a viewer allowed
+ * several sites cannot be granted all of them at once. That used to be
+ * resolved by issuing the tenant-wide wildcard, which meant a restriction
+ * naming two sites granted every site in the customer — a restriction that
+ * blocked nothing.
+ *
+ * It is resolved instead by asking which site is being watched. A viewer
+ * watches one site at a time, which the watch endpoint already enforces, so
+ * the cookie can be exactly as wide as the screen. The claim remains the
+ * authority: naming a site can only narrow what the claim already allows,
+ * never widen it, and an unnamed site falls back to one the viewer holds
+ * rather than to all of them.
  */
-export function cookieResource(origin: string, tenantId: string, premisesIds: string[] | undefined): string {
-  if (premisesIds && premisesIds.length === 1) {
-    return `${origin}/live/${tenantId}--${premisesIds[0]}--*`;
+export function cookieResource(
+  origin: string,
+  tenantId: string,
+  premisesIds: string[] | undefined,
+  /** The site the viewer is actually watching, when the console has said. */
+  watching?: string,
+): string {
+  const site = (id: string) => `${origin}/live/${tenantId}--${id}--*`;
+  const allowed = premisesIds ?? [];
+
+  // A CloudFront policy statement carries exactly one resource, so several
+  // sites cannot be granted at once. Naming the one being watched is what
+  // closes that: a viewer watches one site at a time — the watch endpoint
+  // already enforces it — so the cookie can be as narrow as the screen.
+  if (watching && (allowed.length === 0 || allowed.includes(watching))) {
+    return site(watching);
   }
+
+  if (allowed.length === 1) {
+    return site(allowed[0]!);
+  }
+
+  // Restricted to several sites and not told which is being watched. The
+  // tenant-wide wildcard used to be issued here, which handed a viewer
+  // restricted to two sites every site in the customer. One of their own
+  // sites is the honest fallback; the console names the right one as soon as
+  // a premises is chosen, which is before anything can be played.
+  if (allowed.length > 1) {
+    return site([...allowed].sort()[0]!);
+  }
+
   return `${origin}/live/${tenantId}--*`;
 }

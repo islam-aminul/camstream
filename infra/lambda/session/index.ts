@@ -4,6 +4,7 @@ import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyEventV2WithJWTAuthorizer, APIGatewayProxyStructuredResultV2 } from 'aws-lambda';
 import { isValidId, cookieResource } from '../shared/tenant';
+import { identify, targetTenant } from '../shared/roles';
 import { fail, json } from '../shared/http';
 import { SESSION_TTL_SECONDS, readSession, writeSession } from '../shared/session';
 
@@ -72,7 +73,7 @@ export async function handler(
     return fail(400, `Unrecognised host: ${host || '(none)'}`);
   }
 
-  let body: { sessionId?: unknown } = {};
+  let body: { sessionId?: unknown; premisesId?: unknown; tenantId?: unknown } = {};
   if (event.body) {
     try {
       body = JSON.parse(event.body);
@@ -105,16 +106,37 @@ export async function handler(
 
   const expiresAt = now + SESSION_TTL_SECONDS;
 
-  // A viewer restricted to a single site gets a policy scoped to it; everyone
-  // else gets the tenant-wide wildcard. Thing names are
-  // `<tenant>--<premises>--<device>` and ids may not contain `--`, so neither
-  // wildcard can reach across a boundary.
+  // The cookie is scoped to the site being watched, not to everything the
+  // account may reach. Thing names are `<tenant>--<premises>--<device>` and ids
+  // may not contain `--`, so no wildcard can reach across a boundary.
+  //
+  // The claim is still the authority — naming a site only ever narrows within
+  // it. A cookie is a bearer token for video, and one that grants a hundred
+  // sites is one that leaks a hundred sites if it is taken.
   const premisesClaim = claims['custom:premises'];
   const premises =
     typeof premisesClaim === 'string' && premisesClaim.trim().length > 0
       ? premisesClaim.split(',').map((id) => id.trim()).filter(isValidId)
       : undefined;
-  const resource = cookieResource(`https://${host}`, tenantId, premises);
+  const watching = isValidId(body.premisesId) ? body.premisesId : undefined;
+
+  // Whose segments the cookie has to cover. Normally the caller's own customer,
+  // but the platform operator selects a customer in the console and its
+  // manifests live under that customer's prefix — a cookie cut from the
+  // operator's own tenant would match none of them, and every tile would stall
+  // with a refusal it could not explain.
+  // The caller is resolved with the same parser every other route uses. The
+  // groups claim is an array in an ID token and a bracketed string once it has
+  // been through the HTTP API authorizer, and a second reading of it here got
+  // that wrong — quietly, by never matching, so the operator kept their own
+  // tenant's cookie and every tile stalled.
+  const caller = identify(event);
+  const forTenant = caller ? targetTenant(caller, body.tenantId) : null;
+  if (!forTenant) {
+    return fail(403, 'Not permitted to act on that tenant');
+  }
+
+  const resource = cookieResource(`https://${host}`, forTenant, premises, watching);
 
   const policy = JSON.stringify({
     Statement: [

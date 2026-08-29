@@ -9,6 +9,7 @@ import { nextTick } from 'vue';
 
 const cameraCalls: Record<string, unknown>[] = [];
 const watchCalls: Record<string, unknown>[] = [];
+const sessionCalls: { sessionId?: string; premisesId?: string }[] = [];
 let registered: { cameraId: string; displayName: string; assignedTo: string }[] = [];
 /** Cameras an agent has actually reported — a subset, often a strict one. */
 let reported: string[] = [];
@@ -46,6 +47,18 @@ vi.mock('@/api', () => ({
         },
       })),
     ),
+    // Re-cutting the video cookie to the site being watched, which the store
+    // does before it hands any manifest to a player.
+    session: (sessionId?: string, premisesId?: string) => {
+      sessionCalls.push({ sessionId, premisesId });
+      return Promise.resolve({
+        sessionId: 'sess-1', tenantId: 'acme', expiresAt: 0,
+        refreshInSeconds: 240, displacedPreviousSession: false, scope: '',
+      });
+    },
+    me: () => Promise.resolve({
+      sub: 's', email: 'a@b.c', tenantId: 'acme', role: 'admin', premises: [],
+    }),
     watch: (body: Record<string, unknown>) => {
       watchCalls.push(body);
       return Promise.resolve({ keepaliveInSeconds: 30, desired: [] });
@@ -83,6 +96,7 @@ beforeEach(() => {
   setActivePinia(createPinia());
   cameraCalls.length = 0;
   watchCalls.length = 0;
+  sessionCalls.length = 0;
   registered = Array.from({ length: 30 }, (_, i) => camera(i + 1));
   reported = registered.map((c) => c.cameraId);
   localStorage.clear();
@@ -285,5 +299,35 @@ describe('changing the tile count', () => {
     await settled();
     expect(live.tiles).toBe(12);
     expect(live.entries).toHaveLength(12);
+  });
+});
+
+describe('the cookies that authorise the video', () => {
+  it('cuts them to the site being watched, before any manifest is played', async () => {
+    // A CloudFront cookie is a bearer token for video. One scoped to a whole
+    // customer is one that leaks a whole customer, so it is re-cut to the site
+    // on screen — and re-cut before a player is handed a URL, or the fetch is
+    // refused and the tile stalls with nothing to explain it.
+    const live = useLiveStore();
+    live.tiles = 4;
+    await live.first();
+    await settled();
+
+    expect(sessionCalls.at(-1)).toMatchObject({ premisesId: 'hq' });
+  });
+
+  it('still shows the estate when the cookie cannot be re-cut', async () => {
+    // Video will not play, but an empty page tells the operator nothing. The
+    // list loads and says why the video will not.
+    const session = useSessionStore();
+    session.watch = () => Promise.reject(new Error('network down'));
+
+    const live = useLiveStore();
+    live.tiles = 4;
+    await live.first();
+    await settled();
+
+    expect(live.entries).toHaveLength(4);
+    expect(live.error).toContain('Could not authorise video');
   });
 });
