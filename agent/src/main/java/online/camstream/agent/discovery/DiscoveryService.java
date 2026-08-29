@@ -152,9 +152,20 @@ public final class DiscoveryService implements CameraSource {
         // all it knows at the time, but every consumer looks a camera up by the
         // identity assigned afterwards — an approved camera resolved to nothing
         // while these disagreed.
+        //
+        // A recorder becomes several entries here: it is one address holding
+        // eight or sixteen cameras, and an operator approves the cameras, not
+        // the box they are wired into.
         Map<String, DiscoveredCamera> byIdentity = new LinkedHashMap<>();
         for (DiscoveredCamera camera : found.values()) {
-            byIdentity.put(camera.id, camera);
+            List<DiscoveredCamera> channels = expandChannels(camera);
+            if (channels.isEmpty()) {
+                byIdentity.put(camera.id, camera);
+            } else {
+                for (DiscoveredCamera channel : channels) {
+                    byIdentity.put(channel.id, channel);
+                }
+            }
         }
         lastScan = byIdentity;
 
@@ -309,6 +320,81 @@ public final class DiscoveryService implements CameraSource {
         }
     }
 
+    /**
+     * Turns a recorder into the cameras behind it.
+     *
+     * An NVR is one address serving many channels, and every consumer of this
+     * — approval, assignment, the live grid — deals in cameras. Left as one
+     * entry, an operator could approve "the recorder" and get channel one.
+     *
+     * Only attempted where the vendor's numbering scheme is known and the
+     * device answered on more than one channel. A single-channel answer is an
+     * ordinary camera and is left exactly as it was, so nothing changes for
+     * the common case.
+     *
+     * @return one camera per live channel, or empty when this is not a recorder
+     */
+    private List<DiscoveredCamera> expandChannels(DiscoveredCamera camera) {
+        VendorDirectory.Vendor vendor = identifyVendor(camera);
+        if (vendor == null || !vendor.enumeratesChannels() || camera.rtspPorts.isEmpty()) {
+            return List.of();
+        }
+
+        List<Credential> usable = credentials.apply(camera.id);
+        if (usable.isEmpty()) {
+            return List.of();
+        }
+
+        int port = camera.rtspPorts.get(0);
+        Map<Integer, Map<String, DiscoveredCamera.DiscoveredProfile>> byChannel =
+                pathGuesser.walkChannels(camera.ipAddress, port, usable.get(0), vendor);
+
+        // One channel is a camera, not a recorder, and re-labelling it would
+        // change the identity of something already approved.
+        if (byChannel.size() < 2) {
+            return List.of();
+        }
+
+        List<DiscoveredCamera> cameras = new ArrayList<>();
+        for (Map.Entry<Integer, Map<String, DiscoveredCamera.DiscoveredProfile>> entry
+                : byChannel.entrySet()) {
+            DiscoveredCamera channel = camera.copy();
+            // Derived from the recorder's own identity, so it is as stable as
+            // the recorder is and survives a change of address.
+            channel.id = camera.id + "-ch" + entry.getKey();
+            channel.identityStable = camera.identityStable;
+            channel.alternateIds = List.of();
+            channel.profiles.clear();
+            channel.profiles.putAll(entry.getValue());
+            channel.model = (camera.model == null ? vendor.name() : camera.model)
+                    + " channel " + entry.getKey();
+            channel.authState = DiscoveredCamera.AuthState.AUTHENTICATED;
+            channel.note = "channel " + entry.getKey() + " of a recorder at " + camera.ipAddress;
+            cameras.add(channel);
+        }
+        log.info("{} is a recorder: {} channels became cameras", camera.ipAddress, cameras.size());
+        return cameras;
+    }
+
+    /**
+     * The manufacturer, from the hardware address or from what ONVIF said.
+     *
+     * The address is preferred: a device that answered ONVIF has usually named
+     * itself already, and the ones that need this most are the ones that
+     * answered nothing at all.
+     */
+    private static VendorDirectory.Vendor identifyVendor(DiscoveredCamera camera) {
+        VendorDirectory.Vendor vendor = VendorDirectory.forMac(camera.macAddress);
+        if (vendor == null) {
+            vendor = VendorDirectory.byName(camera.manufacturer);
+        }
+        if (vendor != null && (camera.manufacturer == null || camera.manufacturer.isBlank())) {
+            // Give the operator a name to recognise in a list of numbers.
+            camera.manufacturer = vendor.name();
+        }
+        return vendor;
+    }
+
     /** Last resort for cameras without a usable ONVIF media service. */
     private void guessStreams(DiscoveredCamera camera) {
         if (camera.rtspPorts.isEmpty()) {
@@ -318,8 +404,14 @@ public final class DiscoveryService implements CameraSource {
             }
             return;
         }
-        Map<String, DiscoveredCamera.DiscoveredProfile> guessed =
-                pathGuesser.guess(camera.ipAddress, camera.rtspPorts, credentials.apply(camera.id));
+        // Who made it, from the three bytes the IEEE gave its maker. This is
+        // worth more than a label: the vendor's own paths go first, which turns
+        // a walk through two dozen candidates - each miss a timeout - into a
+        // walk through four.
+        VendorDirectory.Vendor vendor = identifyVendor(camera);
+
+        Map<String, DiscoveredCamera.DiscoveredProfile> guessed = pathGuesser.guess(
+                camera.ipAddress, camera.rtspPorts, credentials.apply(camera.id), vendor);
         if (guessed.isEmpty()) {
             camera.authState = DiscoveredCamera.AuthState.NEEDS_CREDENTIALS;
             camera.note = "RTSP port open but no known stream path responded";
