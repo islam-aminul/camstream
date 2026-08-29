@@ -374,9 +374,13 @@ ${identity}
     Copy-Item "$Dependencies\\*" "$Work\\dependencies\\" -Force -ErrorAction SilentlyContinue
   }
 
-  $args = @{ IdentityPath = "$Work\\identity.json" }
-  if ($AllowSystemTools) { $args['AllowSystemTools'] = $true }
-  & "$Work\\install.ps1" @args
+  # Not $args: that is one of PowerShell's automatic variables, and
+  # shadowing it inside a script that also takes parameters is a trap for
+  # whoever edits this next.
+  $installArgs = @{ IdentityPath = "$Work\\identity.json" }
+  if ($AllowSystemTools) { $installArgs['AllowSystemTools'] = $true }
+  if ($Replace)          { $installArgs['Replace'] = $true }
+  & "$Work\\install.ps1" @installArgs
 } finally {
   Remove-Item -Recurse -Force $Work -ErrorAction SilentlyContinue
 }
