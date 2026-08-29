@@ -124,6 +124,7 @@ const isSelf = (user: User) => user.email === session.me?.email;
         aria-label="Role"
       />
       <Button
+        v-tooltip.top="'Send an invitation. They set their own password on first sign-in.'"
         type="submit" label="Invite" size="small"
         :loading="busy" :disabled="!email.includes('@')"
       />
@@ -185,6 +186,7 @@ const isSelf = (user: User) => user.email === session.me?.email;
               @click="setEnabled(data, !data.enabled)"
             />
             <Button
+              v-tooltip.top="'Delete this account'"
               size="small" text severity="danger" icon="pi pi-trash"
               :aria-label="`Delete ${data.email}`"
               @click="remove(data)"

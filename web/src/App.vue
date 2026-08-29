@@ -4,6 +4,7 @@ import { useRoute } from 'vue-router';
 import Message from 'primevue/message';
 import ProgressSpinner from 'primevue/progressspinner';
 import SelectionRail from './components/SelectionRail.vue';
+import BrandMark from './components/BrandMark.vue';
 import LoginView from './views/LoginView.vue';
 import { useSessionStore } from './stores/session';
 import { useSelectionStore } from './stores/selection';
@@ -12,13 +13,27 @@ const session = useSessionStore();
 const selection = useSelectionStore();
 const route = useRoute();
 
+/**
+ * The pages, each with the sentence that explains it on hover.
+ *
+ * "Add cameras" was the wrong name for what that page does. Adding is the last
+ * of four steps - enrol an agent, give it credentials, scan the network,
+ * approve what comes back - and somebody who has not done it before reads
+ * "Add cameras" and looks for a form with a camera's address in it.
+ */
 const pages = [
-  { name: 'live', label: 'Live', icon: 'pi-video' },
-  { name: 'cameras', label: 'Cameras', icon: 'pi-camera' },
-  { name: 'add', label: 'Add cameras', icon: 'pi-plus-circle' },
-  { name: 'agents', label: 'Agents', icon: 'pi-server' },
-  { name: 'premises', label: 'Premises', icon: 'pi-building' },
-  { name: 'users', label: 'Users', icon: 'pi-users' },
+  { name: 'live', label: 'Live', icon: 'pi-video',
+    hint: 'Watch cameras at the selected site' },
+  { name: 'cameras', label: 'Cameras', icon: 'pi-camera',
+    hint: 'Every camera in service: rename, check and watch' },
+  { name: 'add', label: 'Set up', icon: 'pi-compass',
+    hint: 'Enrol an agent, scan its network, and approve the cameras it finds' },
+  { name: 'agents', label: 'Agents', icon: 'pi-server',
+    hint: 'The machines that publish streams, and what each can carry' },
+  { name: 'premises', label: 'Premises', icon: 'pi-building',
+    hint: 'Sites, and the agents that belong to them' },
+  { name: 'users', label: 'Users', icon: 'pi-users',
+    hint: 'Who may sign in, and what they may see' },
 ];
 
 async function begin() {
@@ -44,10 +59,14 @@ watch(() => session.me, (me) => { if (me) void selection.loadCustomers(); });
 
   <div v-else class="shell">
     <header class="topbar">
-      <span class="brand">CamStream</span>
+      <span class="brand">
+        <BrandMark label="CamStream" />
+        CamStream
+      </span>
       <nav>
         <RouterLink
           v-for="page in pages" :key="page.name"
+          v-tooltip.bottom="page.hint"
           :to="{ name: page.name, query: $route.query }"
           class="topbar__link"
         >
@@ -58,11 +77,21 @@ watch(() => session.me, (me) => { if (me) void selection.loadCustomers(); });
       <div class="topbar__who">
         <span>{{ session.me.email }}</span>
         <span class="topbar__role">{{ session.me.role }}</span>
-        <button type="button" class="topbar__out" @click="session.end(null)">Sign out</button>
+        <button
+          v-tooltip.bottom="'End this session on this browser'"
+          type="button" class="topbar__out" @click="session.end(null)"
+        >Sign out</button>
       </div>
     </header>
 
-    <Message v-if="session.notice" severity="warn" class="notice" :closable="false">
+    <!-- Dismissable. This is usually "your previous session was signed out",
+         which is information about something that has already happened; left
+         undismissable it sat across the top of the console for the rest of the
+         visit with no way to acknowledge it. -->
+    <Message
+      v-if="session.notice" severity="warn" class="notice" closable
+      @close="session.clearNotice()"
+    >
       {{ session.notice }}
     </Message>
 
@@ -98,8 +127,12 @@ watch(() => session.me, (me) => { if (me) void selection.loadCustomers(); });
 }
 
 .brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
   font-weight: 700;
   letter-spacing: -0.01em;
+  color: var(--p-primary-color);
 }
 
 .topbar nav {

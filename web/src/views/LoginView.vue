@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import BrandMark from '@/components/BrandMark.vue';
 import { ref } from 'vue';
 import InputText from 'primevue/inputtext';
 import Password from 'primevue/password';
@@ -44,7 +45,7 @@ async function submit() {
 <template>
   <div class="centre">
     <form class="card" @submit.prevent="submit">
-      <h1>CamStream</h1>
+      <h1><BrandMark label="CamStream" /> CamStream</h1>
 
       <Message v-if="notice" severity="warn" size="small" variant="simple">{{ notice }}</Message>
       <Message v-if="error" severity="error" size="small" variant="simple">{{ error }}</Message>
@@ -111,5 +112,13 @@ label {
   margin: 0;
   font-size: 0.85rem;
   color: var(--p-text-muted-color);
+}
+
+h1 {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  color: var(--p-primary-color);
 }
 </style>

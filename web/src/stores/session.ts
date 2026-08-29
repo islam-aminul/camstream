@@ -107,5 +107,10 @@ export const useSessionStore = defineStore('session', () => {
     schedule();
   }
 
-  return { me, info, notice, ready, watching, watchingTenant, start, end, watch };
+  /** Acknowledges a notice. It reports something that already happened. */
+  function clearNotice() {
+    notice.value = null;
+  }
+
+  return { me, info, notice, ready, watching, watchingTenant, start, end, watch, clearNotice };
 });
