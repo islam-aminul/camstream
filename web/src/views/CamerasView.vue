@@ -91,6 +91,10 @@ async function saveRename() {
     });
     renaming.value = null;
     reloadKey.value += 1;
+    // The rail holds its own copy of the camera list and labels the dropdown
+    // from it, so without this the name changes in the table and the sidebar
+    // goes on showing the hardware address until the next reload.
+    await selection.loadCameras();
   } catch (err) {
     failed.value = (err as Error).message;
   } finally {
