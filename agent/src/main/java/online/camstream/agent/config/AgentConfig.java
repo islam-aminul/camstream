@@ -239,7 +239,7 @@ public final class AgentConfig {
      */
     public static AgentConfig loadRaw(Path path) throws IOException {
         ObjectMapper mapper = new ObjectMapper(new YAMLFactory());
-        return mapper.readValue(Files.readString(path), AgentConfig.class);
+        return mapper.readValue(TextFiles.read(path), AgentConfig.class);
     }
 
     public String thingName() {
