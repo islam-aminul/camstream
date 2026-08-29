@@ -10,7 +10,7 @@ import { SSMClient, GetParameterCommand } from '@aws-sdk/client-ssm';
 import {
   CognitoIdentityProviderClient, ListUsersCommand, AdminCreateUserCommand, AdminDeleteUserCommand, AdminGetUserCommand,
   AdminAddUserToGroupCommand, AdminListGroupsForUserCommand, AdminRemoveUserFromGroupCommand,
-  AdminUpdateUserAttributesCommand,
+  AdminUpdateUserAttributesCommand, AdminEnableUserCommand, AdminDisableUserCommand,
 } from '@aws-sdk/client-cognito-identity-provider';
 import type { APIGatewayProxyEventV2WithJWTAuthorizer, APIGatewayProxyStructuredResultV2 } from 'aws-lambda';
 import { isValidId, isValidDisplayName, idFrom, parseThingName, thingName as buildThingName, isThingName } from '../shared/tenant';
@@ -105,7 +105,7 @@ export async function handler(
         return await removeCredential(caller, event.queryStringParameters?.thingName,
           event.queryStringParameters?.scope);
       case 'POST /api/admin/scan':       return await triggerScan(caller, event.body);
-      case 'GET /api/admin/users':       return await listUsers(caller);
+      case 'GET /api/admin/users':       return await listUsers(caller, event.queryStringParameters);
       case 'POST /api/admin/users':      return await createUser(caller, event.body);
       case 'PATCH /api/admin/users/{username}':
         return await updateUser(caller, event.pathParameters?.username, event.body);
@@ -429,13 +429,25 @@ async function listAgents(
   if (site.refusal) return site.refusal;
   // Health arrives on its own item, written directly by an IoT rule, so it is
   // read alongside the registration rather than being part of it.
-  const [devices, health] = await Promise.all([
+  const [devices, health, cameras] = await Promise.all([
     queryPrefix<Record<string, unknown>>(site.pk, 'DEVICE#'),
     // Health stays partitioned by customer: the IoT rule that writes it builds
     // its key in SQL and cannot cut a thing name at the second separator.
     queryPrefix<Record<string, unknown>>(key.tenant(forTenant), 'HEALTH#'),
+    // Assignments, which is what capacity is actually measured against.
+    queryPrefix<CameraRecord>(site.pk, 'CAMERA#'),
   ]);
   const healthOf = new Map(health.map((h) => [String(h.thingName), h]));
+
+  // How many cameras each agent has been given, as opposed to how many it has
+  // got round to telling us about. An agent that has never connected reports
+  // nothing, so reading its own figure showed an agent carrying three hundred
+  // cameras as empty — and the console uses this to warn before the ceiling.
+  const assigned = new Map<string, number>();
+  for (const camera of cameras) {
+    const owner = String(camera.assignedTo ?? '');
+    assigned.set(owner, (assigned.get(owner) ?? 0) + 1);
+  }
   const page = paginate(devices.filter((d) => visible(caller, d.premisesId as string | undefined)), {
     q: query?.q,
     sortBy: (d) => String(d.siteName ?? d.thingName ?? ''),
@@ -451,7 +463,11 @@ async function listAgents(
         premisesId: device.premisesId,
         siteName: device.siteName,
         agentVersion: device.agentVersion,
-        cameraCount: device.cameraCount ?? 0,
+        cameraCount: assigned.get(String(device.thingName)) ?? 0,
+        // What the agent itself last said it was handling. Differs from the
+        // assignment while it is catching up, and staying different while it
+        // is connected is the interesting case.
+        reportedCameras: Number(device.cameraCount ?? 0),
         lastSeen: device.lastSeen,
         // Liveness comes from IoT presence events, not a poll, so this is the
         // connection's actual state rather than "seen within N seconds".
@@ -1117,7 +1133,7 @@ async function pushConfig(tenantId: string, thing: string): Promise<void> {
 
 // ------------------------------------------------------------------- users
 
-async function listUsers(caller: Caller) {
+async function listUsers(caller: Caller, query: Record<string, string | undefined> | undefined) {
   if (!can(caller, 'manageUsers')) return fail(403, 'Not permitted to manage users');
 
   // Every page, not the first sixty. The cap was applied before the tenant
@@ -1133,25 +1149,42 @@ async function listUsers(caller: Caller) {
     token = page.PaginationToken;
   } while (token && found.length < 5000);
 
-  const users = await Promise.all(found.map(async (user) => {
-    const attributes = Object.fromEntries((user.Attributes ?? []).map((a) => [a.Name, a.Value]));
+  const rows = found
+    .map((user) => {
+      const attributes = Object.fromEntries((user.Attributes ?? []).map((a) => [a.Name, a.Value]));
+      return {
+        username: user.Username!,
+        email: attributes.email ?? '',
+        tenantId: attributes['custom:tenantId'],
+        premises: attributes['custom:premises'] ?? '',
+        status: user.UserStatus,
+        enabled: user.Enabled,
+      };
+    })
+    .filter((u) => can(caller, 'crossTenant') || u.tenantId === caller.tenantId);
+
+  const page = paginate(rows as unknown as Record<string, unknown>[], {
+    q: query?.q,
+    sortBy: (u) => String(u.email ?? u.username ?? ''),
+    cursor: query?.cursor,
+    limit: query?.limit,
+  });
+
+  // Roles are read for the page, not the pool. Each one is its own Cognito
+  // call, and at the five hundred users this is sold for, asking for all of
+  // them at once put five hundred parallel requests into a quota measured in
+  // tens per second — the list got slower the more it had to show, which is
+  // exactly backwards.
+  const users = await Promise.all(page.items.map(async (row) => {
     const groups = await cognito.send(new AdminListGroupsForUserCommand({
-      UserPoolId: USER_POOL_ID, Username: user.Username!,
+      UserPoolId: USER_POOL_ID, Username: String(row.username),
     }));
     const held = (groups.Groups ?? []).map((g) => g.GroupName).filter((g): g is Role =>
       (ROLES as readonly string[]).includes(g ?? ''));
-    return {
-      username: user.Username, email: attributes.email,
-      tenantId: attributes['custom:tenantId'],
-      premises: attributes['custom:premises'] ?? '',
-      role: held[0] ?? 'viewer',
-      status: user.UserStatus, enabled: user.Enabled,
-    };
+    return { ...row, role: held[0] ?? 'viewer' };
   }));
 
-  return json(200, {
-    users: users.filter((u) => can(caller, 'crossTenant') || u.tenantId === caller.tenantId),
-  });
+  return json(200, { total: page.total, cursor: page.cursor, users });
 }
 
 async function createUser(caller: Caller, rawBody: string | undefined) {
@@ -1228,7 +1261,7 @@ async function updateUser(caller: Caller, username: string | undefined, rawBody:
   if (!can(caller, 'manageUsers')) return fail(403, 'Not permitted to manage users');
   if (!username) return fail(400, 'Username is required');
 
-  let body: { role?: unknown; premises?: unknown };
+  let body: { role?: unknown; premises?: unknown; enabled?: unknown };
   try {
     body = JSON.parse(rawBody ?? '{}');
   } catch {
@@ -1306,8 +1339,21 @@ async function updateUser(caller: Caller, username: string | undefined, rawBody:
     changed.premises = requested;
   }
 
+  if (body.enabled !== undefined) {
+    const enabled = body.enabled === true;
+    // Locking yourself out of the console you administer is not something to
+    // discover after the fact, and there may be no one else who can undo it.
+    if (!enabled && username === caller.sub) {
+      return fail(400, 'You cannot disable your own account');
+    }
+    await cognito.send(enabled
+      ? new AdminEnableUserCommand({ UserPoolId: USER_POOL_ID, Username: username })
+      : new AdminDisableUserCommand({ UserPoolId: USER_POOL_ID, Username: username }));
+    changed.enabled = enabled;
+  }
+
   if (Object.keys(changed).length === 0) {
-    return fail(400, 'Nothing to change — supply role, premises, or both');
+    return fail(400, 'Nothing to change — supply role, premises or enabled');
   }
   return json(200, { updated: username, ...changed });
 }

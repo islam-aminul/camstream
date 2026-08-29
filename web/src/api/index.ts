@@ -1,4 +1,4 @@
-import { get, post } from './client';
+import { get, post, patch, del } from './client';
 
 export type Role = 'superadmin' | 'admin' | 'operator' | 'viewer';
 
@@ -12,6 +12,17 @@ export interface Me {
 }
 
 export interface Customer { tenantId: string; displayName: string; createdAt: number }
+
+export interface User {
+  username: string;
+  email: string;
+  tenantId?: string;
+  /** Sites this account may see; empty means every site in its customer. */
+  premises: string;
+  role: Role;
+  status?: string;
+  enabled?: boolean;
+}
 export interface Premises { premisesId: string; displayName: string; address?: string }
 
 export interface Agent {
@@ -19,7 +30,10 @@ export interface Agent {
   premisesId?: string;
   siteName?: string;
   agentVersion?: string;
+  /** Cameras assigned to this agent — what its capacity is measured against. */
   cameraCount: number;
+  /** What the agent itself last reported handling; 0 until it connects. */
+  reportedCameras?: number;
   online: boolean;
   enrolled: boolean;
   credentialPublicKey: string | null;
@@ -107,6 +121,31 @@ export const api = {
   }) =>
     get<{ total: number; cursor?: string; cameras: Camera[] }>('/api/admin/cameras', p)
       .then((r): Page<Camera> => ({ total: r.total, cursor: r.cursor, items: r.cameras })),
+
+  users: (p: { q?: string; cursor?: string; limit?: number } = {}) =>
+    get<{ total: number; cursor?: string; users: User[] }>('/api/admin/users', p)
+      .then((r): Page<User> => ({ total: r.total, cursor: r.cursor, items: r.users })),
+
+  updateUser: (username: string, body: { role?: Role; premises?: string[]; enabled?: boolean }) =>
+    patch<{ ok: true }>(`/api/admin/users/${encodeURIComponent(username)}`, body),
+
+  createUser: (body: { email: string; role: Role; tenantId?: string; premises?: string }) =>
+    post<{ username: string }>('/api/admin/users', body),
+
+  deleteUser: (username: string) =>
+    del<{ ok: true }>(`/api/admin/users/${encodeURIComponent(username)}`),
+
+  createPremises: (body: { displayName: string; address?: string; tenantId?: string }) =>
+    post<Premises>('/api/admin/premises', body),
+
+  deletePremises: (premisesId: string) =>
+    del<{ ok: true }>(`/api/admin/premises/${encodeURIComponent(premisesId)}`),
+
+  createAgent: (body: { displayName: string; premisesId: string; tenantId?: string }) =>
+    post<{ thingName: string }>('/api/admin/agents', body),
+
+  deleteAgent: (thingName: string) =>
+    del<{ ok: true }>(`/api/admin/agents/${encodeURIComponent(thingName)}`),
 
   counts: (p: { tenantId?: string; premisesId?: string }) =>
     get<{ agents?: number; cameras?: number; discovered?: number; premises?: number }>(

@@ -1,6 +1,7 @@
 import { createApp } from 'vue';
 import { createPinia } from 'pinia';
 import PrimeVue from 'primevue/config';
+import ConfirmationService from 'primevue/confirmationservice';
 import Aura from '@primeuix/themes/aura';
 import 'primeicons/primeicons.css';
 import App from './App.vue';
@@ -10,6 +11,9 @@ import './styles.css';
 createApp(App)
   .use(createPinia())
   .use(router)
+  // Deleting a site or an account asks first, and the dialog needs its
+  // service registered here rather than per page.
+  .use(ConfirmationService)
   .use(PrimeVue, {
     theme: {
       preset: Aura,
