@@ -5,6 +5,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -68,11 +69,17 @@ public final class CredentialStore {
             // deliberately leaves the local ones alone.
             relayedSiteWide.clear();
             relayedPerCamera.clear();
-            for (Map.Entry<String, String> entry : ciphertextByCamera.entrySet()) {
+            // Site-wide credentials are tried in the order the site set them,
+            // so the scopes are sorted rather than taken as the map hands them
+            // over. A site may hold several - the first that a camera accepts
+            // wins, and the order is the installer's judgement about which is
+            // most likely.
+            List<String> scopes = new ArrayList<>(ciphertextByCamera.keySet());
+            scopes.sort(Comparator.nullsFirst(Comparator.naturalOrder()));
+            for (String scope : scopes) {
                 try {
-                    Credential credential = envelope.open(entry.getValue());
-                    String scope = entry.getKey();
-                    if (scope == null || scope.isBlank() || scope.equals("*")) {
+                    Credential credential = envelope.open(ciphertextByCamera.get(scope));
+                    if (isSiteWide(scope)) {
                         if (!relayedSiteWide.contains(credential)) {
                             relayedSiteWide.add(credential);
                         }
@@ -80,12 +87,23 @@ public final class CredentialStore {
                         relayedPerCamera.put(scope, credential);
                     }
                 } catch (IllegalArgumentException e) {
-                    log.warn("could not open the credential for \"{}\": {}", entry.getKey(), e.getMessage());
+                    log.warn("could not open the credential for \"{}\": {}", scope, e.getMessage());
                 }
             }
         } finally {
             lock.writeLock().unlock();
         }
+    }
+
+    /**
+     * Whether a scope names every camera at the site rather than one of them.
+     *
+     * "*" is the first such slot and "*-2" onwards are the rest, which is what
+     * lets a site hold several and keeps them in a defined order: "*" sorts
+     * before "*-2" because it is a prefix of it.
+     */
+    private static boolean isSiteWide(String scope) {
+        return scope == null || scope.isBlank() || scope.charAt(0) == '*';
     }
 
     /** Everything worth trying, most specific first. */

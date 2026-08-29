@@ -285,6 +285,8 @@ public final class DiscoveryService implements CameraSource {
                 camera.authState = DiscoveredCamera.AuthState.AUTHENTICATED;
                 return;
             } catch (OnvifClient.AuthenticationFailed e) {
+                // Refused. The next credential is worth a try - that is the
+                // only reason to have more than one.
                 camera.authState = DiscoveredCamera.AuthState.NEEDS_CREDENTIALS;
             } catch (Exception e) {
                 log.debug("ONVIF interrogation of {} failed: {}", camera.ipAddress, e.toString());
@@ -292,6 +294,11 @@ public final class DiscoveryService implements CameraSource {
                     camera.authState = DiscoveredCamera.AuthState.UNSUPPORTED;
                     camera.note = e.getMessage();
                 }
+                // Not a refusal: the device is not answering ONVIF, is not
+                // reachable, or spoke something unintelligible. It will do the
+                // same for every other password on the list, so trying them
+                // costs a timeout each and tells us nothing new.
+                break;
             }
         }
 

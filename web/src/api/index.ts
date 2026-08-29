@@ -130,6 +130,18 @@ export interface Discovered {
 
 export type Platform = 'linux' | 'windows' | 'macos';
 
+/**
+ * A credential as the console may see it: which slot, whose account, when set.
+ * Never the password — no route returns one.
+ */
+export interface StoredCredential {
+  scope: string;
+  username: string | null;
+  storedAt: number | null;
+  storedBy: string | null;
+  siteWide: boolean;
+}
+
 /** A page, plus how many matched and where to resume. */
 export interface Page<T> { total: number; cursor?: string; items: T[] }
 
@@ -283,8 +295,13 @@ export const api = {
    * so the plaintext never reaches the network and no part of this system but
    * that agent can open it.
    */
-  storeCredential: (body: { thingName: string; scope: string; ciphertext: string }) =>
-    post<{ stored: string }>('/api/admin/credentials', body),
+  credentials: (thingName: string) =>
+    get<{ credentials: StoredCredential[]; maxSiteCredentials: number }>(
+      '/api/admin/credentials', { thingName }),
+
+  storeCredential: (body: {
+    thingName: string; scope: string; ciphertext: string; username: string;
+  }) => post<{ stored: string }>('/api/admin/credentials', body),
 
   removeCredential: (thingName: string, scope: string) =>
     del<{ ok: true }>('/api/admin/credentials', { thingName, scope }),
