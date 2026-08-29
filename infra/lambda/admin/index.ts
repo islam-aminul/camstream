@@ -27,7 +27,7 @@ class Refused extends Error {
   }
 }
 import { key, slugFor, DEFAULT_MAX_TRANSCODES, queryAllPages, encodeCursor, decodeCursor, REGISTRY_PK, type CameraRecord, type CustomerRecord, type DiscoveredRecord, type PremisesRecord } from '../shared/registry';
-import { buildInstaller, isPlatform, PLATFORMS } from './installer';
+import { buildInstaller, buildInstallerArchive, isPlatform, PLATFORMS } from './installer';
 
 const TABLE = process.env.REGISTRY_TABLE!;
 const USER_POOL_ID = process.env.USER_POOL_ID!;
@@ -93,7 +93,7 @@ export async function handler(
         return await agentIdentity(caller, event.pathParameters?.thingName);
       case 'GET /api/admin/agents/{thingName}/installer':
         return await agentInstaller(caller, event.pathParameters?.thingName,
-          event.queryStringParameters?.platform);
+          event.queryStringParameters?.platform, event.queryStringParameters);
       case 'GET /api/admin/discovered':  return await listDiscovered(caller,
           event.queryStringParameters?.premisesId);
       case 'POST /api/admin/cameras':    return await approveCamera(caller, event.body);
@@ -828,7 +828,12 @@ async function agentIdentity(caller: Caller, thing: string | undefined) {
  * a few kilobytes and leaves the 30MB binary cacheable and identical for every
  * customer.
  */
-async function agentInstaller(caller: Caller, thing: string | undefined, platform: unknown) {
+async function agentInstaller(
+  caller: Caller,
+  thing: string | undefined,
+  platform: unknown,
+  query?: Record<string, string | undefined>,
+) {
   if (!isPlatform(platform)) {
     return fail(400, `platform must be one of ${PLATFORMS.join(', ')}`);
   }
@@ -837,8 +842,29 @@ async function agentInstaller(caller: Caller, thing: string | undefined, platfor
     return identity;
   }
 
-  const installer = await buildInstaller(
-    platform, JSON.parse(identity.body ?? '{}'), LIVE_BUCKET, AGENT_VERSION);
+  const parsed = JSON.parse(identity.body ?? '{}');
+
+  // A folder by default. A bare script is awkward to carry to a machine: it
+  // cannot be double-clicked, the execution policy is against it, and it says
+  // nothing about the runtime archives the operator still has to supply. The
+  // raw form stays available for anyone driving this from a script.
+  if (query?.format !== 'raw') {
+    const archive = await buildInstallerArchive(platform, parsed, LIVE_BUCKET, AGENT_VERSION);
+    return {
+      statusCode: 200,
+      headers: {
+        'content-type': archive.contentType,
+        'content-disposition': `attachment; filename="${archive.filename}"`,
+        'cache-control': 'no-store',
+      },
+      // Binary has to travel base64 and be decoded by API Gateway; sending it
+      // as a string would corrupt every byte above 127 in the archive.
+      isBase64Encoded: true,
+      body: archive.body.toString('base64'),
+    };
+  }
+
+  const installer = await buildInstaller(platform, parsed, LIVE_BUCKET, AGENT_VERSION);
 
   return {
     statusCode: 200,

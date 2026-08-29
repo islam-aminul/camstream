@@ -291,12 +291,14 @@ export const api = {
   /**
    * Downloads an agent installer carrying a one-use enrolment token.
    *
-   * Fetched rather than linked: the route is authorised by a header, which a
-   * plain link does not send, so a link would save a 401 to disk.
+   * A zip: the script, a launcher that does not need the execution policy
+   * changed, and the note describing the runtime archives the operator has to
+   * supply. Fetched rather than linked, because the route is authorised by a
+   * header a plain link does not send — a link would save a 401 to disk.
    */
   installer: (thingName: string, platform: Platform) =>
     download(
       `/api/admin/agents/${encodeURIComponent(thingName)}/installer?platform=${platform}`,
-      `install-${thingName}.${platform === 'windows' ? 'ps1' : 'sh'}`,
+      `camstream-agent-${thingName}-${platform}.zip`,
     ),
 };

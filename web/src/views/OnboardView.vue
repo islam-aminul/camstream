@@ -83,8 +83,9 @@ async function downloadInstaller() {
   error.value = null;
   try {
     await api.installer(agent.value, platform.value);
-    notice.value = 'Installer downloaded. Its enrolment token is one-use — '
-      + 'download a fresh one if you need to install again.';
+    notice.value = 'Downloaded. Unzip it on the agent machine and run the launcher — '
+      + 'the folder also holds the note describing the Java and FFmpeg archives to supply. '
+      + 'Its enrolment token is one-use.';
   } catch (err) {
     error.value = (err as Error).message;
   } finally {
@@ -207,8 +208,10 @@ onMounted(() => {
         <li>
           <h2>1 — Install the agent</h2>
           <p class="steps__note">
-            The installer carries a one-use enrolment token, so download it when you are at the
-            machine. Create the agent on the Agents page first if it is not listed here.
+            A zip holding the installer, a launcher you can double-click, and a note listing
+            the Java and FFmpeg archives to put beside it. It carries a one-use enrolment
+            token, so download it when you are ready to install. Create the agent on the
+            Agents page first if it is not listed here.
           </p>
           <div class="row">
             <Select

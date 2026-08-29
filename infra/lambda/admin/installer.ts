@@ -1,5 +1,6 @@
 import { S3Client, GetObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import { makeZip, type ZipEntry } from './zip';
 
 const s3 = new S3Client({});
 
@@ -62,6 +63,111 @@ export async function buildInstaller(
     contentType: 'text/x-shellscript; charset=utf-8',
     body: posixScript(thing, json, url, version, platform),
   };
+}
+
+/**
+ * The same installer, packaged for someone who has to carry it to a machine.
+ *
+ * A bare .ps1 is awkward to hand over: it cannot be double-clicked, it arrives
+ * with the execution policy against it, and it says nothing about the runtime
+ * archives the operator has to supply. A folder answers all three — a launcher
+ * that sets the policy for that one invocation, the script itself, and the
+ * note explaining what else is needed, next to the empty directory it goes in.
+ */
+export async function buildInstallerArchive(
+  platform: Platform,
+  identity: Record<string, unknown>,
+  bucket: string,
+  version: string,
+): Promise<{ filename: string; contentType: string; body: Buffer }> {
+  const script = await buildInstaller(platform, identity, bucket, version);
+  const thing = String(identity.thingName);
+
+  const entries: ZipEntry[] = [
+    {
+      name: script.filename,
+      data: Buffer.from(script.body, 'utf8'),
+      executable: platform !== 'windows',
+    },
+    { name: 'dependencies/README.txt', data: Buffer.from(dependenciesNote(platform), 'utf8') },
+  ];
+
+  if (platform === 'windows') {
+    // CRLF: a .cmd with bare newlines is read by cmd.exe one byte at a time
+    // and misbehaves in ways that are hard to see.
+    entries.unshift({
+      name: `install-${thing}.cmd`,
+      data: Buffer.from(
+        windowsLauncher(script.filename).replace(/\n/g, '\r\n'), 'utf8'),
+    });
+  }
+
+  return {
+    filename: `camstream-agent-${thing}-${platform}.zip`,
+    contentType: 'application/zip',
+    body: makeZip(entries),
+  };
+}
+
+/**
+ * A double-clickable launcher.
+ *
+ * -ExecutionPolicy Bypass applies to this one invocation only; it changes
+ * nothing on the machine. %~dp0 is the folder the launcher is in, so the pair
+ * can be extracted anywhere. The pause is there because a double-clicked
+ * window closes the instant the script ends, taking the result with it.
+ */
+function windowsLauncher(scriptName: string): string {
+  return `@echo off
+REM CamStream agent installer.
+REM
+REM Double-click this, or run it from a prompt. It asks for administrator if it
+REM does not already have it. Arguments are passed through, so to use tools
+REM already on this machine rather than supplying your own:
+REM
+REM   install.cmd -AllowSystemTools
+REM
+setlocal
+PowerShell -NoProfile -ExecutionPolicy Bypass -File "%~dp0${scriptName}" %*
+echo.
+pause
+`;
+}
+
+/** What has to be put in dependencies/, and why it is not shipped. */
+function dependenciesNote(platform: Platform): string {
+  const archives = platform === 'windows'
+    ? 'a Java 21 runtime (.zip) and an FFmpeg build (.zip or .7z)'
+    : 'a Java 21 runtime (.tar.gz) and an FFmpeg build (.tar.gz or .tar.xz)';
+  const flag = platform === 'windows' ? '-AllowSystemTools' : '--allow-system-tools';
+  const run = platform === 'windows' ? 'install.cmd' : './install-*.sh';
+
+  return `CamStream agent - dependencies
+==============================
+
+Put ${archives} in this directory, then run the installer again.
+
+The agent does not ship with either. Both carry licences you should choose
+deliberately rather than inherit from us: FFmpeg builds differ in whether they
+include GPL or non-free components, and Java runtimes differ in their support
+and redistribution terms. Picking them yourself is the point, not an oversight.
+
+The installer extracts whatever it finds here into the installation and pins
+the agent to those exact binaries. Nothing is taken from PATH.
+
+Where to get them
+-----------------
+  Java 21   Eclipse Temurin, Amazon Corretto, Azul Zulu, or your distribution
+  FFmpeg    ffmpeg.org, or your distribution's package
+
+If you would rather use tools already installed on this machine:
+
+  ${run} ${flag}
+
+Be aware that the service then depends on the PATH of the account it runs as,
+which is not the PATH you see in your own shell - and that a later change to
+those tools changes the agent's behaviour without anybody redeploying it.
+`;
 }
 
 function posixScript(thing: string, identity: string, url: string, version: string, platform: Platform): string {
