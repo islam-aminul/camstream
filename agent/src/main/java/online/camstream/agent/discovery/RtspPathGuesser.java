@@ -59,11 +59,15 @@ final class RtspPathGuesser {
     }
 
     /**
-     * Tries each path against each credential until streams are found.
+     * Tries the known paths, moving to the next credential only when the camera
+     * refused the one before it.
      *
-     * Stops at the first credential that yields anything: continuing would
-     * multiply attempts against a camera that may lock out on repeated auth
-     * failures, and a second credential is unlikely to expose more paths.
+     * The distinction is the whole point. A camera that answers 401 has the
+     * path and dislikes the password, so another password is worth trying. A
+     * camera that answers "no such path" will answer that to every password
+     * there is, and marching a site's whole credential list past it multiplies
+     * the scan by five for nothing - on devices that often lock an account out
+     * after a handful of failures.
      *
      * @return profiles keyed by a synthetic token, empty if nothing decoded
      */
@@ -76,26 +80,36 @@ final class RtspPathGuesser {
 
         for (int port : rtspPorts) {
             for (Credential credential : toTry) {
-                Map<String, DiscoveredCamera.DiscoveredProfile> found =
-                        tryPaths(host, port, credential);
-                if (!found.isEmpty()) {
+                Attempt attempt = tryPaths(host, port, credential);
+                if (!attempt.found().isEmpty()) {
                     log.info("guessed {} stream(s) on {}:{} as \"{}\"",
-                            found.size(), host, port,
+                            attempt.found().size(), host, port,
                             credential.username().isEmpty() ? "<anonymous>" : credential.username());
-                    return found;
+                    return attempt.found();
+                }
+                if (!attempt.refused()) {
+                    // Nothing here refused us; it simply has none of these
+                    // paths. A different password cannot conjure one.
+                    break;
                 }
             }
         }
         return Map.of();
     }
 
-    private Map<String, DiscoveredCamera.DiscoveredProfile> tryPaths(
-            String host, int port, Credential credential) {
+    /** What one credential achieved against one port, and whether it was refused. */
+    private record Attempt(Map<String, DiscoveredCamera.DiscoveredProfile> found, boolean refused) {}
 
+    private Attempt tryPaths(String host, int port, Credential credential) {
         Map<String, DiscoveredCamera.DiscoveredProfile> found = new LinkedHashMap<>();
+        boolean refused = false;
         for (String path : paths) {
             String url = buildUrl(host, port, path, credential);
-            RtspProbe.Result result = probe.probe(url, transport);
+            RtspProbe.Outcome outcome = probe.attempt(url, transport);
+            if (outcome.unauthorized()) {
+                refused = true;
+            }
+            RtspProbe.Result result = outcome.stream();
             if (result == null || result.codec() == null) {
                 continue;
             }
@@ -114,7 +128,7 @@ final class RtspPathGuesser {
                 break;
             }
         }
-        return found;
+        return new Attempt(found, refused);
     }
 
     private static String buildUrl(String host, int port, String path, Credential credential) {

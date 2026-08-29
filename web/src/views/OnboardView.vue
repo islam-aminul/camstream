@@ -10,7 +10,7 @@ import Password from 'primevue/password';
 import Message from 'primevue/message';
 import Dialog from 'primevue/dialog';
 import { useSelectionStore } from '@/stores/selection';
-import { api, type Discovered, type Platform } from '@/api';
+import { api, type Discovered, type Platform, type StoredCredential } from '@/api';
 import { sealCredential, cryptoAvailable } from '@/crypto';
 import { idFrom, isValidDisplayName, nameComplaint } from '@/naming';
 
@@ -46,6 +46,58 @@ const username = ref('admin');
 const password = ref('');
 const scope = ref('*');
 const sealing = ref(false);
+
+/** What is already filed against this agent, so it can be reviewed and corrected. */
+const credentials = ref<StoredCredential[]>([]);
+const maxSiteCredentials = ref(5);
+const siteWide = computed(() => credentials.value.filter((c) => c.siteWide));
+const canAddAnother = computed(() => siteWide.value.length < maxSiteCredentials.value);
+
+async function loadCredentials() {
+  if (!agent.value) { credentials.value = []; return; }
+  try {
+    const result = await api.credentials(agent.value);
+    credentials.value = result.credentials;
+    maxSiteCredentials.value = result.maxSiteCredentials;
+  } catch (err) {
+    error.value = (err as Error).message;
+  }
+}
+
+/**
+ * The next free site-wide slot.
+ *
+ * "*" first, then "*-2" upward. The order is what the agent tries them in, so
+ * a new one is appended: the existing order is the installer's judgement about
+ * which is most likely to work, and adding should not disturb it.
+ */
+function nextFreeSlot(): string | null {
+  const taken = new Set(siteWide.value.map((c) => c.scope));
+  for (const slot of ['*', '*-2', '*-3', '*-4', '*-5']) {
+    if (!taken.has(slot)) return slot;
+  }
+  return null;
+}
+
+/** Where a credential sits in the order the agent will try them. */
+function slotLabel(s: string): string {
+  if (!s.startsWith('*')) return `this camera only`;
+  const n = s === '*' ? 1 : Number(s.slice(2));
+  return `tried ${['first', 'second', 'third', 'fourth', 'fifth'][n - 1] ?? `${n}th`}`;
+}
+
+async function removeCredential(entry: StoredCredential) {
+  if (!agent.value) return;
+  error.value = null;
+  try {
+    await api.removeCredential(agent.value, entry.scope);
+    notice.value = `Removed the ${entry.username ?? 'stored'} credential.`;
+    await loadCredentials();
+  } catch (err) {
+    error.value = (err as Error).message;
+  }
+}
+
 
 const downloading = ref(false);
 const approving = ref<Discovered | null>(null);
@@ -110,13 +162,18 @@ async function scan() {
   }
 }
 
-function openCredential(camera: Discovered | null) {
-  credentialOpen.value = true;
-  username.value = 'admin';
+/**
+ * Opens the dialog to add a credential, edit one, or set one for a camera.
+ *
+ * Editing re-enters the password rather than showing it: nothing in this
+ * system can read one back, which is the point of sealing them in the browser.
+ */
+function openCredential(target: { camera?: Discovered; edit?: StoredCredential } = {}) {
+  const existing = target.edit;
+  scope.value = existing?.scope ?? target.camera?.identity ?? nextFreeSlot() ?? '*';
+  username.value = existing?.username || 'admin';
   password.value = '';
-  // A camera-specific credential is scoped to its identity; the default is the
-  // site-wide one, which is what most installs actually use.
-  scope.value = camera?.identity ?? '*';
+  credentialOpen.value = true;
 }
 
 async function saveCredential() {
@@ -128,7 +185,10 @@ async function saveCredential() {
     // Sealed here, in this browser, against that one agent's public key. The
     // control plane stores ciphertext it has no key to open.
     const ciphertext = await sealCredential(key, username.value, password.value);
-    await api.storeCredential({ thingName: agent.value, scope: scope.value, ciphertext });
+    await api.storeCredential({
+      thingName: agent.value, scope: scope.value, ciphertext, username: username.value,
+    });
+    await loadCredentials();
     notice.value = scope.value === '*'
       ? 'Credential stored for every camera this agent probes.'
       : `Credential stored for ${scope.value}.`;
@@ -192,11 +252,15 @@ function authState(camera: Discovered): { label: string; severity: string } {
 watch(() => [selection.premisesId, selection.agentId], () => {
   agent.value = selection.agentId ?? agentOptions.value[0]?.value ?? null;
   void refresh();
+  void loadCredentials();
 });
+
+watch(agent, () => { void loadCredentials(); });
 
 onMounted(() => {
   agent.value = selection.agentId ?? agentOptions.value[0]?.value ?? null;
   void refresh();
+  void loadCredentials();
 });
 </script>
 
@@ -240,14 +304,40 @@ onMounted(() => {
           <h2>2 — Give it the camera credentials</h2>
           <p class="steps__note">
             Sealed in this browser against that agent's own key. The plaintext never reaches
-            the network, and nothing in the cloud can read it.
+            the network, and nothing in the cloud can read it. A site may hold up to five,
+            tried in the order shown — the agent moves to the next only when a camera
+            refuses the one before it.
           </p>
+          <ul v-if="credentials.length" class="creds">
+            <li v-for="entry in credentials" :key="entry.scope" class="creds__row">
+              <span class="creds__who">{{ entry.username || '(account not recorded)' }}</span>
+              <span class="creds__slot">{{ slotLabel(entry.scope) }}</span>
+              <span class="creds__actions">
+                <Button
+                  size="small" text label="Change"
+                  :disabled="!chosen?.credentialPublicKey"
+                  @click="openCredential({ edit: entry })"
+                />
+                <Button
+                  size="small" text severity="danger" icon="pi pi-trash"
+                  :aria-label="`Remove the ${entry.username} credential`"
+                  @click="removeCredential(entry)"
+                />
+              </span>
+            </li>
+          </ul>
+
           <div class="row">
             <Button
-              label="Set a site-wide credential" size="small" severity="secondary"
-              :disabled="!chosen?.credentialPublicKey"
-              @click="openCredential(null)"
+              :label="credentials.length ? 'Add another' : 'Set a site-wide credential'"
+              size="small" severity="secondary"
+              :disabled="!chosen?.credentialPublicKey || !canAddAnother"
+              @click="openCredential()"
             />
+            <span v-if="!canAddAnother" class="steps__note">
+              Five is the limit. Each one a camera refuses is another failed sign-in against
+              it, and many lock an account out after a handful.
+            </span>
             <span v-if="!cryptoAvailable()" class="steps__note steps__note--warn">
               This browser cannot encrypt here — WebCrypto needs a secure origin.
             </span>
@@ -301,7 +391,7 @@ onMounted(() => {
               <Button
                 size="small" text severity="secondary" label="Credentials"
                 :disabled="!chosen?.credentialPublicKey"
-                @click="openCredential(data)"
+                @click="openCredential({ camera: data })"
               />
             </span>
           </template>
@@ -319,8 +409,9 @@ onMounted(() => {
       modal header="Camera credentials" :style="{ width: '26rem' }"
     >
       <p class="sub">
-        Sealed in this browser against
-        <code>{{ agent }}</code>. It is stored as ciphertext the cloud cannot open.
+        Sealed in this browser against <code>{{ agent }}</code> and stored as ciphertext the
+        cloud cannot open — which is also why an existing password cannot be shown back to
+        you, only replaced.
       </p>
       <div class="stack">
         <label for="cred-scope">Applies to</label>
@@ -415,6 +506,37 @@ onMounted(() => {
   flex-wrap: wrap;
 }
 
+.creds {
+  margin: 0 0 0.5rem;
+  padding: 0;
+  list-style: none;
+  max-width: 34rem;
+}
+
+.creds__row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.15rem 0;
+  border-bottom: 1px solid var(--p-content-border-color);
+}
+
+.creds__who {
+  font-size: 0.85rem;
+}
+
+.creds__slot {
+  font-size: 0.72rem;
+  color: var(--p-text-muted-color);
+}
+
+.creds__actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 0.1rem;
+}
+
 .grow {
   flex: 1 1 14rem;
   max-width: 22rem;
@@ -439,3 +561,4 @@ code {
   font-size: 0.74rem;
 }
 </style>
+

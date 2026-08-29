@@ -100,6 +100,8 @@ export async function handler(
       case 'DELETE /api/admin/cameras/{identity}':
         return await removeCamera(caller, event.pathParameters?.identity,
           event.queryStringParameters?.premisesId, event.queryStringParameters?.tenantId);
+      case 'GET /api/admin/credentials': return await listCredentials(caller,
+          event.queryStringParameters?.thingName);
       case 'POST /api/admin/credentials':return await storeCredential(caller, event.body);
       case 'DELETE /api/admin/credentials':
         return await removeCredential(caller, event.queryStringParameters?.thingName,
@@ -643,7 +645,7 @@ async function removeCredential(caller: Caller, thingName: unknown, scope: unkno
 
   const outOfScope = refuseOutOfScope(caller, thing);
   if (outOfScope) return outOfScope;
-  if (target !== '*' && !CAMERA_IDENTITY.test(target)) return fail(400, 'Invalid scope');
+  if (!isCredentialScope(target)) return fail(400, 'Invalid scope');
 
   const existing = await getRecord<Record<string, unknown>>(
     siteOfThing(thing), key.credential(thing, target));
@@ -1148,6 +1150,56 @@ async function removeCamera(
   return json(200, { removed: identity });
 }
 
+/**
+ * The scopes a credential may be filed under.
+ *
+ * "*" is the first site-wide slot and "*-2" to "*-5" are the rest: a site
+ * commonly has more than one account in use across its cameras, and the
+ * installer's ordering is a judgement about which is most likely to work. Five
+ * is a cap on how many refusals a scan will provoke before giving up, which
+ * matters on devices that lock an account out after a handful.
+ *
+ * Anything else names a single camera by its identity.
+ */
+const SITE_WIDE_SCOPE = /^\*(-[2-5])?$/;
+
+export const MAX_SITE_CREDENTIALS = 5;
+
+function isCredentialScope(scope: string): boolean {
+  return SITE_WIDE_SCOPE.test(scope) || /^[A-Za-z0-9._-]{3,64}$/.test(scope);
+}
+
+/**
+ * What is filed against an agent, without any of the secrets.
+ *
+ * Returns the account names and when they were set, never the ciphertext: the
+ * console needs to show what is configured so it can be corrected, and nothing
+ * here needs the password to do that.
+ */
+async function listCredentials(caller: Caller, thingName: string | undefined) {
+  if (!can(caller, 'manageCredentials')) return fail(403, 'Not permitted to manage credentials');
+  const thing = String(thingName ?? '');
+  const outOfScope = refuseOutOfScope(caller, thing);
+  if (outOfScope) return outOfScope;
+
+  const rows = await queryPrefix<Record<string, unknown>>(
+    siteOfThing(thing), `CREDENTIAL#${thing}#`);
+
+  return json(200, {
+    thingName: thing,
+    maxSiteCredentials: MAX_SITE_CREDENTIALS,
+    credentials: rows
+      .map((row) => ({
+        scope: String(row.scope ?? '*'),
+        username: typeof row.username === 'string' ? row.username : null,
+        storedAt: row.storedAt ?? null,
+        storedBy: row.storedBy ?? null,
+        siteWide: SITE_WIDE_SCOPE.test(String(row.scope ?? '*')),
+      }))
+      .sort((a, b) => a.scope.localeCompare(b.scope)),
+  });
+}
+
 async function storeCredential(caller: Caller, rawBody: string | undefined) {
   if (!can(caller, 'manageCredentials')) return fail(403, 'Not permitted to set credentials');
   const body = JSON.parse(rawBody ?? '{}') as Record<string, unknown>;
@@ -1158,7 +1210,13 @@ async function storeCredential(caller: Caller, rawBody: string | undefined) {
   const outOfScope = refuseOutOfScope(caller, thing);
   if (outOfScope) return outOfScope;
   if (!/^[A-Za-z0-9+/=]{64,2048}$/.test(ciphertext)) return fail(400, 'Ciphertext must be base64 of plausible RSA size');
-  if (scope !== '*' && !/^[A-Za-z0-9._-]{3,64}$/.test(scope)) return fail(400, 'Invalid scope');
+  if (!isCredentialScope(scope)) return fail(400, 'Invalid scope');
+
+  // The account name travels in the clear, on purpose. It is not the secret -
+  // the password is - and without it the console can only offer "a credential
+  // is set", which cannot be reviewed, corrected or told apart from the other
+  // four.
+  const username = typeof body.username === 'string' ? body.username.trim().slice(0, 64) : '';
 
   // There is deliberately no route that returns a credential: this API is a
   // courier for ciphertext it has no key to open.
@@ -1166,7 +1224,7 @@ async function storeCredential(caller: Caller, rawBody: string | undefined) {
     TableName: TABLE,
     Item: {
       pk: siteOfThing(thing), sk: key.credential(thing, scope),
-      thingName: thing, scope, ciphertext,
+      thingName: thing, scope, ciphertext, username,
       storedAt: Math.floor(Date.now() / 1000), storedBy: caller.email,
     },
   }));
