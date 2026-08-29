@@ -145,8 +145,16 @@ export interface SessionInfo {
 export const api = {
   me: () => get<Me>('/api/admin/me'),
 
-  session: (sessionId?: string) =>
-    post<SessionInfo>('/api/session', sessionId ? { sessionId } : {}),
+  /**
+   * Starts or refreshes the session, and with it the cookies that authorise
+   * video. Naming the site being watched narrows those cookies to it.
+   */
+  session: (sessionId?: string, premisesId?: string, tenantId?: string) =>
+    post<SessionInfo>('/api/session', {
+      ...(sessionId ? { sessionId } : {}),
+      ...(premisesId ? { premisesId } : {}),
+      ...(tenantId ? { tenantId } : {}),
+    }),
 
   customers: () =>
     get<{ customers: Customer[] }>('/api/admin/customers').then((r) => r.customers),

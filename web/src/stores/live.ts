@@ -140,7 +140,21 @@ export const useLiveStore = defineStore('live', () => {
     if (!selection.premisesId) { cameras.value = []; streams.value = []; return; }
     const ticket = latest.begin('page');
     loading.value = true;
+    // Cleared here rather than on success: a problem found part way through —
+    // the video cookie failing to re-cut, say — must survive the rest of the
+    // load rather than being wiped by it.
+    error.value = null;
     try {
+      // Before any manifest reaches a player. The video cookies are cut to one
+      // site, so a player started against the old cookie would be refused by
+      // CloudFront and show a stall with no way to explain itself.
+      //
+      // Reported rather than fatal: if the cookie cannot be re-cut the video
+      // will not play, but the operator should still see the estate and the
+      // reason, not an empty page.
+      await session.watch(selection.premisesId, selection.tenantParam).catch((err: Error) => {
+        error.value = `Could not authorise video for this site: ${err.message}`;
+      });
       // A camera chosen in the rail — including by searching for its name — is
       // shown on its own. Paging to it would need a cursor nobody holds, and
       // somebody who just searched for one name is asking to see that camera,
@@ -178,7 +192,6 @@ export const useLiveStore = defineStore('live', () => {
         : [];
       if (!latest.current('page', ticket)) return;
       streams.value = manifests;
-      error.value = null;
       await declare();
     } catch (err) {
       if (latest.current('page', ticket)) error.value = (err as Error).message;

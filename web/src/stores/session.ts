@@ -15,6 +15,21 @@ import { SessionSuperseded } from '@/api/client';
 export const useSessionStore = defineStore('session', () => {
   const me = ref<Me | null>(null);
   const info = ref<SessionInfo | null>(null);
+  /**
+   * The site the cookies are currently cut to.
+   *
+   * Held here because every refresh has to re-assert it: a refresh that forgot
+   * would silently widen the cookie back out, or narrow it to the wrong site
+   * and stop the video.
+   */
+  const watching = ref<string | null>(null);
+  /**
+   * The customer whose video the cookies cover.
+   *
+   * Only ever different from the account's own for the platform operator, who
+   * selects a customer in the console; the server ignores it for anyone else.
+   */
+  const watchingTenant = ref<string | null>(null);
   const notice = ref<string | null>(null);
   const ready = ref(false);
 
@@ -24,7 +39,8 @@ export const useSessionStore = defineStore('session', () => {
     const existing = await currentSession();
     if (!existing) { ready.value = true; return false; }
 
-    info.value = await api.session();
+    info.value = await api.session(
+      undefined, watching.value ?? undefined, watchingTenant.value ?? undefined);
     me.value = await api.me();
     notice.value = info.value.displacedPreviousSession
       ? 'Your previous session was signed out.'
@@ -44,7 +60,8 @@ export const useSessionStore = defineStore('session', () => {
     if (timer) clearInterval(timer);
     const seconds = info.value?.refreshInSeconds ?? 240;
     timer = setInterval(() => {
-      void api.session(info.value?.sessionId)
+      void api.session(
+        info.value?.sessionId, watching.value ?? undefined, watchingTenant.value ?? undefined)
         .then((next) => { info.value = next; })
         .catch((err) => {
           if (err instanceof SessionSuperseded) {
@@ -63,5 +80,24 @@ export const useSessionStore = defineStore('session', () => {
     notice.value = message;
   }
 
-  return { me, info, notice, ready, start, end };
+  /**
+   * Re-cuts the cookies to a different site.
+   *
+   * Called when the rail changes premises, and awaited before anything tries to
+   * play: the previous cookie does not cover the new site, so a player that
+   * started first would be refused by CloudFront and show a stall it could not
+   * explain.
+   */
+  async function watch(premisesId: string | null, tenantId?: string | null) {
+    const tenant = tenantId ?? null;
+    if (watching.value === premisesId && watchingTenant.value === tenant) return;
+    watching.value = premisesId;
+    watchingTenant.value = tenant;
+    if (!info.value) return;
+    info.value = await api.session(
+      info.value.sessionId, premisesId ?? undefined, tenant ?? undefined);
+    schedule();
+  }
+
+  return { me, info, notice, ready, watching, watchingTenant, start, end, watch };
 });
