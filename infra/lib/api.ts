@@ -403,6 +403,10 @@ export class Api extends Construct {
           'cognito-idp:AdminRemoveUserFromGroup',
           // Needed to report each user's role, which is group membership.
           'cognito-idp:AdminListGroupsForUser',
+          // Suspending an account rather than deleting it: the reversible
+          // option, and the one the console recommends before deletion.
+          'cognito-idp:AdminEnableUser',
+          'cognito-idp:AdminDisableUser',
         ],
         resources: [userPool.userPoolArn],
       }),
