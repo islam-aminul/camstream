@@ -163,7 +163,7 @@ function windowsScript(thing: string, identity: string, url: string, version: st
 
   With no -Dependencies, a "dependencies" folder beside this script is used.
   Either way the binaries are extracted into the installation and the agent is
-  pinned to them — nothing is taken from PATH.
+  pinned to them - nothing is taken from PATH.
 
   Administrator rights are needed to install the service. Run it without them
   and it asks for elevation rather than failing.
@@ -191,7 +191,7 @@ if (-not (New-Object Security.Principal.WindowsPrincipal($identity)).IsInRole(
       [Security.Principal.WindowsBuiltInRole]::Administrator)) {
   # Only a person can answer a UAC prompt. In automation there is nobody to
   # ask, and delegating would let this script return success having installed
-  # nothing — so there it fails as loudly as it used to.
+  # nothing - so there it fails as loudly as it used to.
   if (-not [Environment]::UserInteractive) {
     throw 'This installs a system service and needs administrator. Run it from an elevated prompt.'
   }
