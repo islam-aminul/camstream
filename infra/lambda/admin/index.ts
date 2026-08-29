@@ -95,11 +95,11 @@ export async function handler(
         return await agentInstaller(caller, event.pathParameters?.thingName,
           event.queryStringParameters?.platform, event.queryStringParameters);
       case 'GET /api/admin/discovered':  return await listDiscovered(caller,
-          event.queryStringParameters?.premisesId);
+          event.queryStringParameters?.premisesId, event.queryStringParameters?.tenantId);
       case 'POST /api/admin/cameras':    return await approveCamera(caller, event.body);
       case 'DELETE /api/admin/cameras/{identity}':
         return await removeCamera(caller, event.pathParameters?.identity,
-          event.queryStringParameters?.premisesId);
+          event.queryStringParameters?.premisesId, event.queryStringParameters?.tenantId);
       case 'POST /api/admin/credentials':return await storeCredential(caller, event.body);
       case 'DELETE /api/admin/credentials':
         return await removeCredential(caller, event.queryStringParameters?.thingName,
@@ -544,7 +544,7 @@ async function updateAgent(caller: Caller, thingName: string | undefined, rawBod
     UpdateExpression: 'SET maxConcurrentTranscodes = :cap',
     ExpressionAttributeValues: { ':cap': cap },
   }));
-  await pushConfig(caller.tenantId, thing);
+  await pushConfig(thing);
 
   return json(200, { thingName: thing, maxConcurrentTranscodes: cap });
 }
@@ -654,7 +654,7 @@ async function removeCredential(caller: Caller, thingName: unknown, scope: unkno
   }));
   // The agent replaces its whole relayed set from the config it fetches, so
   // bumping the version is what actually revokes this on the edge box.
-  await pushConfig(caller.tenantId, thing);
+  await pushConfig(thing);
   return json(200, { removed: target, thingName: thing });
 }
 
@@ -1026,9 +1026,15 @@ async function search(caller: Caller, query: Record<string, string | undefined> 
 
 // ----------------------------------------------------------------- cameras
 
-async function listDiscovered(caller: Caller, premisesId?: string) {
+async function listDiscovered(caller: Caller, premisesId?: string, requestedTenant?: string) {
   if (!can(caller, 'manageEstate')) return fail(403, 'Not permitted to list discovered cameras');
-  const site = siteOf(caller, caller.tenantId, premisesId);
+  // The caller's own tenant is not the tenant being looked at. The platform
+  // operator selects a customer in the console, and reading their own instead
+  // queried an empty partition: cameras were found, written and waiting, and
+  // the page said nothing had been found yet.
+  const forTenant = readTenant(caller, requestedTenant);
+  if (!forTenant) return fail(403, 'Not permitted to act on that tenant');
+  const site = siteOf(caller, forTenant, premisesId);
   if (site.refusal) return site.refusal;
   const [discovered, approved, agents] = await Promise.all([
     queryPrefix<DiscoveredRecord>(site.pk, 'DISCOVERED#'),
@@ -1100,21 +1106,28 @@ async function approveCamera(caller: Caller, rawBody: string | undefined) {
   const previousOwner = (await getRecord<CameraRecord>(siteOfThing(assignedTo), key.camera(identity)))?.assignedTo;
 
   await ddb.send(new PutCommand({ TableName: TABLE, Item: camera }));
-  await pushConfig(caller.tenantId, assignedTo);
+  await pushConfig(assignedTo);
   // Reassignment used to tell the new owner and nobody else. The old agent's
   // configVersion never moved, so it never refetched, never learned the camera
   // had been taken away, and went on publishing into the same S3 prefix the
   // new one now writes — two agents interleaving segments under one key, which
   // is the exact outcome single ownership exists to prevent.
   if (previousOwner && previousOwner !== assignedTo) {
-    await pushConfig(caller.tenantId, previousOwner);
+    await pushConfig(previousOwner);
   }
   return json(200, { approved: camera.cameraId, assignedTo, reassignedFrom: previousOwner ?? null });
 }
 
-async function removeCamera(caller: Caller, identity: string | undefined, premisesId?: string) {
+async function removeCamera(
+  caller: Caller,
+  identity: string | undefined,
+  premisesId?: string,
+  requestedTenant?: string,
+) {
   if (!can(caller, 'manageEstate')) return fail(403, 'Not permitted');
-  const site = siteOf(caller, caller.tenantId, premisesId);
+  const forTenant = readTenant(caller, requestedTenant);
+  if (!forTenant) return fail(403, 'Not permitted to act on that tenant');
+  const site = siteOf(caller, forTenant, premisesId);
   if (site.refusal) return site.refusal;
   // Shaped like the identity approveCamera accepts. Without this an unbounded
   // path parameter reached a key expression unchecked.
@@ -1131,7 +1144,7 @@ async function removeCamera(caller: Caller, identity: string | undefined, premis
   await ddb.send(new DeleteCommand({
     TableName: TABLE, Key: { pk: site.pk, sk: key.camera(identity) },
   }));
-  if (existing.assignedTo) await pushConfig(caller.tenantId, existing.assignedTo);
+  if (existing.assignedTo) await pushConfig(existing.assignedTo);
   return json(200, { removed: identity });
 }
 
@@ -1157,7 +1170,7 @@ async function storeCredential(caller: Caller, rawBody: string | undefined) {
       storedAt: Math.floor(Date.now() / 1000), storedBy: caller.email,
     },
   }));
-  await pushConfig(caller.tenantId, thing);
+  await pushConfig(thing);
   return json(200, { stored: scope, thingName: thing });
 }
 
@@ -1182,7 +1195,16 @@ async function triggerScan(caller: Caller, rawBody: string | undefined) {
  * keeps a large site's credentials and assignments clear of the 128KB message
  * limit while still making the change arrive in under a second.
  */
-async function pushConfig(tenantId: string, thing: string): Promise<void> {
+/**
+ * Bumps an agent's config version and tells it.
+ *
+ * Takes only the thing name, which already encodes the tenant and premises.
+ * It used to take a tenant as well and ignore it, which meant five call sites
+ * passing `caller.tenantId` into a parameter that did nothing - and reading as
+ * though the caller's own tenant were the right answer, which elsewhere in
+ * this file it was not.
+ */
+async function pushConfig(thing: string): Promise<void> {
   const updated = await ddb.send(new UpdateCommand({
     TableName: TABLE,
     Key: { pk: siteOfThing(thing), sk: key.device(thing) },

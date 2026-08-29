@@ -253,9 +253,8 @@ export const api = {
    * Not paged: this is a working queue, emptied as an installer walks a site,
    * and it is bounded by what is physically on one network.
    */
-  discovered: (premisesId: string) =>
-    get<{ cameras: Discovered[] }>('/api/admin/discovered', { premisesId })
-      .then((r) => r.cameras),
+  discovered: (p: { tenantId?: string; premisesId: string }) =>
+    get<{ cameras: Discovered[] }>('/api/admin/discovered', p).then((r) => r.cameras),
 
   /** Brings a discovered camera into the estate, on one named agent. */
   approveCamera: (body: {
@@ -268,8 +267,10 @@ export const api = {
     sourceCodec?: string;
   }) => post<{ approved: string }>('/api/admin/cameras', body),
 
-  removeCamera: (identity: string, assignedTo: string) =>
-    del<{ ok: true }>(`/api/admin/cameras/${encodeURIComponent(identity)}`, { assignedTo }),
+  removeCamera: (p: { identity: string; premisesId: string; tenantId?: string }) =>
+    del<{ ok: true }>(`/api/admin/cameras/${encodeURIComponent(p.identity)}`, {
+      premisesId: p.premisesId, tenantId: p.tenantId,
+    }),
 
   /** Asks one agent to sweep its network now, rather than waiting for its cycle. */
   scan: (thingName: string) =>

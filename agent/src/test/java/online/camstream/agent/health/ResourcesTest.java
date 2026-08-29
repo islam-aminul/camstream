@@ -57,8 +57,26 @@ class ResourcesTest {
         Verdict verdict = assess(new Snapshot(0.2, 0.94, 300L << 20, 40L << 30, 8_000_000, 400, 0));
 
         assertEquals(Constraint.MEMORY, verdict.constraint());
-        assertTrue(verdict.message().contains("94%"), verdict.message());
         assertTrue(verdict.message().contains("300 MB"), verdict.message());
+        assertTrue(verdict.message().contains("94%"), verdict.message());
+    }
+
+    @Test
+    @DisplayName("a high percentage with room to spare is not pressure")
+    void aFullLookingLargeMachineIsFine() {
+        // The case that cried wolf: a workstation at 95% with the better part
+        // of a gigabyte free. A percentage says nothing about whether another
+        // encode will fit; the bytes do.
+        Verdict verdict = assess(new Snapshot(0.2, 0.95, 815L << 20, 40L << 30, 8_000_000, 400, 0));
+        assertEquals(Constraint.NONE, verdict.constraint());
+    }
+
+    @Test
+    @DisplayName("a low percentage on a tiny machine still is")
+    void aSmallMachineWithNothingLeftIsPressure() {
+        // The mirror of it: 80% used, but of very little.
+        Verdict verdict = assess(new Snapshot(0.2, 0.80, 200L << 20, 40L << 30, 8_000_000, 400, 0));
+        assertEquals(Constraint.MEMORY, verdict.constraint());
     }
 
     @Test
@@ -128,9 +146,9 @@ class ResourcesTest {
     }
 
     @Test
-    @DisplayName("gigabytes read as gigabytes")
-    void largeFiguresAreReadable() {
-        Verdict verdict = assess(new Snapshot(0.2, 0.94, 2L << 30, 40L << 30, 8_000_000, 400, 0));
-        assertTrue(verdict.message().contains("2.0 GB"), verdict.message());
+    @DisplayName("figures read the way a person would say them")
+    void figuresAreReadable() {
+        Verdict verdict = assess(new Snapshot(0.2, 0.94, 400L << 20, 40L << 30, 8_000_000, 400, 0));
+        assertTrue(verdict.message().contains("400 MB"), verdict.message());
     }
 }
