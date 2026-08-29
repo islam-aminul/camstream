@@ -77,13 +77,31 @@ function posixScript(thing: string, identity: string, url: string, version: stri
 # The agent ships without a Java runtime or FFmpeg, so that you choose those
 # builds and their licences. Put both archives in a directory and pass it:
 #
-#   sudo ./install-${thing}.sh --dependencies ~/camstream-deps
+#   ./install-${thing}.sh --dependencies ~/camstream-deps
+#
+# Root is needed to install the service; run it without and it re-runs itself
+# under sudo rather than failing.
 #
 # With no --dependencies, a "dependencies" directory beside this script is
 # used. Either way the binaries are extracted into the installation and the
 # agent is pinned to them — nothing is taken from PATH.
 #
 set -euo pipefail
+
+# Installing a service needs root. Rather than refusing and making the operator
+# retype the line, ask for it — and before parsing arguments, so the
+# re-executed copy is handed exactly what was typed. An absolute path is used
+# because sudo does not promise to keep the working directory.
+SELF="$(cd "$(dirname "\${BASH_SOURCE[0]}")" && pwd)/$(basename "\${BASH_SOURCE[0]}")"
+if [ "$(id -u)" -ne 0 ]; then
+  if command -v sudo >/dev/null 2>&1; then
+    echo "This installs a system service and needs root; re-running with sudo."
+    exec sudo -- "$SELF" "$@"
+  fi
+  echo "This installs a system service and must be run as root." >&2
+  echo "  su -c '$SELF $*'" >&2
+  exit 1
+fi
 
 THING="${thing}"
 HERE="$(cd "$(dirname "\${BASH_SOURCE[0]}")" && pwd)"
@@ -100,8 +118,6 @@ done
 BUNDLE_URL="${url}"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
-
-[ "$(id -u)" -eq 0 ] || { echo "Run this with sudo." >&2; exit 1; }
 
 echo "Fetching the CamStream agent (${version}, ${platform})..."
 if command -v curl >/dev/null 2>&1; then
@@ -149,7 +165,8 @@ function windowsScript(thing: string, identity: string, url: string, version: st
   Either way the binaries are extracted into the installation and the agent is
   pinned to them — nothing is taken from PATH.
 
-  Run from an elevated PowerShell prompt.
+  Administrator rights are needed to install the service. Run it without them
+  and it asks for elevation rather than failing.
 #>
 [CmdletBinding()]
 param(
@@ -164,10 +181,31 @@ $Work      = Join-Path $env:TEMP ("camstream-" + [guid]::NewGuid())
 $Here      = Split-Path -Parent $MyInvocation.MyCommand.Path
 if (-not $Dependencies) { $Dependencies = Join-Path $Here 'dependencies' }
 
+# Installing a service needs administrator. Rather than refusing and making the
+# operator go and find an elevated prompt, ask for one through UAC and hand the
+# new window the same arguments. -NoExit keeps that window open: it is where
+# the output goes, and a window that closes on completion takes the result with
+# it.
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 if (-not (New-Object Security.Principal.WindowsPrincipal($identity)).IsInRole(
       [Security.Principal.WindowsBuiltInRole]::Administrator)) {
-  throw 'Run this from an elevated PowerShell prompt.'
+  # Only a person can answer a UAC prompt. In automation there is nobody to
+  # ask, and delegating would let this script return success having installed
+  # nothing — so there it fails as loudly as it used to.
+  if (-not [Environment]::UserInteractive) {
+    throw 'This installs a system service and needs administrator. Run it from an elevated prompt.'
+  }
+  Write-Host 'This installs a system service and needs administrator; asking for elevation.'
+  $relaunch = @('-NoExit', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $PSCommandPath + '"'))
+  if ($Dependencies)     { $relaunch += @('-Dependencies', ('"' + $Dependencies + '"')) }
+  if ($AllowSystemTools) { $relaunch += '-AllowSystemTools' }
+  try {
+    Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList $relaunch | Out-Null
+  } catch {
+    throw 'Elevation was declined. Re-run this from an elevated PowerShell prompt.'
+  }
+  Write-Host 'Continuing in the elevated window.'
+  return
 }
 
 New-Item -ItemType Directory -Force -Path $Work | Out-Null
