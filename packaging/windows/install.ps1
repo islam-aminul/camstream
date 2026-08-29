@@ -146,6 +146,31 @@ Looked in: $RuntimeDir
 "@
 }
 
+<#
+  Runs a bundled tool and returns everything it printed, stdout and stderr
+  alike, as plain strings.
+
+  Windows PowerShell wraps a native command's stderr in ErrorRecords whenever
+  it is redirected, and with $ErrorActionPreference = 'Stop' the first of those
+  ends the script. `java -version` writes the version to stderr, so the check
+  that this is Java 21 was itself fatal - on the shell that ships with Windows
+  and that most operators will use.
+
+  PowerShell 7 does not do this, which is why every automated run of this file
+  passed while every hand run failed.
+
+  The preference is lowered inside this function only, so a genuine failure
+  anywhere else still stops the install.
+#>
+function Invoke-Tool {
+  param([Parameter(Mandatory)][string]$Exe, [string[]]$Arguments = @())
+  $ErrorActionPreference = 'Continue'
+  $output = & $Exe @Arguments 2>&1
+  return @($output | ForEach-Object {
+    if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.ToString() } else { $_ }
+  })
+}
+
 function Assert-Runtime {
   Write-Host 'Preparing the bundled runtime...'
   $archives = Expand-Dependencies
@@ -171,7 +196,7 @@ see in this window.
   Write-Host "  ffmpeg:  $script:FfmpegBin"
   Write-Host "  ffprobe: $script:FfprobeBin"
 
-  $versionLine = (& $script:JavaBin -version 2>&1 | Select-Object -First 1)
+  $versionLine = (Invoke-Tool $script:JavaBin @('-version')) | Select-Object -First 1
   if ($versionLine -match 'version "(\d+)') {
     if ([int]$Matches[1] -lt 21) { throw "Java 21 or newer is required (found $($Matches[1]))." }
   }
@@ -179,7 +204,7 @@ see in this window.
   # What matters is the JVM's architecture, not the machine's: AWS CRT ships no
   # native for Windows on ARM64, but an x64 JVM running under Windows 11's
   # emulation reports x86_64 and loads the x64 library perfectly well.
-  $props = (& $script:JavaBin -XshowSettings:properties -version 2>&1) -join "`n"
+  $props = (Invoke-Tool $script:JavaBin @('-XshowSettings:properties', '-version')) -join "`n"
   $jvmArch = if ($props -match 'os\.arch\s*=\s*(\S+)') { $Matches[1] } else { 'unknown' }
   Write-Host "  jvm architecture: $jvmArch"
 
@@ -197,7 +222,7 @@ binaries under emulation, and the agent works normally that way.
   }
 
   # CamStream stream-copies and needs no GPL codec. Warn, do not block.
-  $config = (& $script:FfmpegBin -hide_banner -version 2>&1) -join ' '
+  $config = (Invoke-Tool $script:FfmpegBin @('-hide_banner', '-version')) -join ' '
   if ($config -match '--enable-gpl|--enable-nonfree') {
     Write-Warning 'This ffmpeg build is GPL/non-free. Fine for evaluation; do not redistribute it. See LICENSING.md.'
   }

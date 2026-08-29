@@ -270,8 +270,14 @@ jobs:
       # path for a platform the product explicitly ships to, and it carries the
       # ARM64 JVM guard that is the difference between a clear refusal and an
       # UnsatisfiedLinkError at first start.
+      # Windows PowerShell, not pwsh. They differ in ways that matter to this
+      # script: 5.1 wraps a native command's redirected stderr in ErrorRecords,
+      # so `java -version 2>&1` under `$ErrorActionPreference = 'Stop'` ends
+      # the install. Running this job on 7 meant the exact line an operator
+      # tripped over was green here every time. 5.1 is what ships with Windows
+      # and is what most operators will use, so it is what this must prove.
       - name: Install as a scheduled task
-        shell: pwsh
+        shell: powershell
         run: |
           New-Item -ItemType Directory -Force -Path dist-test | Out-Null
           Copy-Item agent/target/camstream-agent.jar dist-test/
@@ -313,7 +319,7 @@ jobs:
           }
 
       - name: Uninstall cleanly
-        shell: pwsh
+        shell: powershell
         run: |
           ./dist-test/uninstall.ps1 -Purge
           if (Get-ScheduledTask -TaskName 'camstream-agent' -ErrorAction SilentlyContinue) {
