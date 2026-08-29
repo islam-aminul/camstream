@@ -1,4 +1,4 @@
-import { Duration, RemovalPolicy } from 'aws-cdk-lib';
+import { Duration, RemovalPolicy, Stack } from 'aws-cdk-lib';
 import * as acm from 'aws-cdk-lib/aws-certificatemanager';
 import * as cloudfront from 'aws-cdk-lib/aws-cloudfront';
 import * as origins from 'aws-cdk-lib/aws-cloudfront-origins';
@@ -100,7 +100,17 @@ export class Edge extends Construct {
             "style-src 'self' 'unsafe-inline'",
             "img-src 'self' data: blob:",
             "media-src 'self' blob:",
-            "connect-src 'self'",
+            // Sign-in talks to Cognito directly from the browser: the SRP
+            // exchange is several round trips against the user pool endpoint,
+            // and it is not proxied through this origin. Without it here the
+            // policy blocks the very first request of the very first page and
+            // nobody can sign in at all — which is exactly what it did.
+            //
+            // Named to the one regional host rather than a wildcard, so this
+            // stays a policy that would still contain an XSS in the console —
+            // the one page that holds credential plaintext in memory before
+            // sealing it.
+            `connect-src 'self' https://cognito-idp.${Stack.of(this).region}.amazonaws.com`,
             "font-src 'self'",
             "object-src 'none'",
             "base-uri 'none'",
