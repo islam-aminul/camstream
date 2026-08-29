@@ -52,7 +52,12 @@ aws s3 cp dist/config.json "s3://$BUCKET/config.json" --region "$REGION" \
   --cache-control "no-cache" --content-type "application/json"
 
 echo "Invalidating CloudFront..."
-aws cloudfront create-invalidation --distribution-id "$DISTRIBUTION" \
+# MSYS_NO_PATHCONV stops Git Bash on Windows rewriting a leading "/" into a
+# Windows path before the argument reaches the CLI: "/index.html" arrives as
+# "C:/Program Files/Git/index.html" and CloudFront rejects it as an invalid
+# invalidation path. Harmless elsewhere, and this is the script an operator
+# on Windows is most likely to run.
+MSYS_NO_PATHCONV=1 aws cloudfront create-invalidation --distribution-id "$DISTRIBUTION" \
   --paths "/index.html" "/config.json" --query 'Invalidation.Id' --output text
 
 echo "Done — $SITE"
