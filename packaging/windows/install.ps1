@@ -403,7 +403,9 @@ REM Written by install.ps1. Runs the agent, swapping in a staged update first.
 setlocal
 set JAR=$InstallDir\camstream-agent.jar
 if exist "%JAR%.new" (
-  echo Applying staged update...
+  REM Timestamped, because this line is the only record of when a build was
+  REM swapped in, and it lands in a different file from the agent's own log.
+  echo [%DATE% %TIME%] Applying staged update...
   if exist "%JAR%" copy /Y "%JAR%" "%JAR%.previous" >nul
   move /Y "%JAR%.new" "%JAR%" >nul
 )
