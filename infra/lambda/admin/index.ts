@@ -27,7 +27,7 @@ class Refused extends Error {
   }
 }
 import { key, slugFor, DEFAULT_MAX_TRANSCODES, queryAllPages, encodeCursor, decodeCursor, REGISTRY_PK, type CameraRecord, type CustomerRecord, type DiscoveredRecord, type PremisesRecord } from '../shared/registry';
-import { buildInstaller, buildInstallerArchive, isPlatform, PLATFORMS } from './installer';
+import { buildInstaller, buildInstallerArchive, bundleUrl, isPlatform, PLATFORMS } from './installer';
 
 const TABLE = process.env.REGISTRY_TABLE!;
 const USER_POOL_ID = process.env.USER_POOL_ID!;
@@ -107,6 +107,8 @@ export async function handler(
         return await removeCredential(caller, event.queryStringParameters?.thingName,
           event.queryStringParameters?.scope);
       case 'POST /api/admin/scan':       return await triggerScan(caller, event.body);
+      case 'POST /api/admin/agents/{thingName}/update':
+        return await upgradeAgent(caller, event.pathParameters?.thingName, event.body);
       case 'GET /api/admin/users':       return await listUsers(caller, event.queryStringParameters);
       case 'POST /api/admin/users':      return await createUser(caller, event.body);
       case 'PATCH /api/admin/users/{username}':
@@ -791,11 +793,28 @@ async function agentIdentity(caller: Caller, thing: string | undefined) {
 
   const tokens = await queryPrefix<Record<string, unknown>>(key.tenant(tenantId), 'ENROLLMENT#');
   const now = Math.floor(Date.now() / 1000);
-  const usable = tokens
+  let usable = tokens
     .filter((t) => t.thingName === thing && !t.usedAt && Number(t.expiresAt) > now)
     .sort((a, b) => Number(b.issuedAt) - Number(a.issuedAt))[0];
   if (!usable) {
-    return fail(404, 'No unused enrollment token for this agent — create it again to issue a new one');
+    // The installer *is* the enrolment: asking for one is asking for a token,
+    // and refusing because the last one was spent told an administrator to go
+    // and perform, by hand, the thing they had just asked for. A token is
+    // one-use and short-lived, so issuing a fresh one here is the same act as
+    // issuing the first.
+    const token = randomBytes(32).toString('base64url');
+    const issuedAt = Math.floor(Date.now() / 1000);
+    await ddb.send(new PutCommand({
+      TableName: TABLE,
+      Item: {
+        pk: key.tenant(tenantId), sk: key.enrollment(token),
+        token, thingName: thing, premisesId,
+        issuedAt, issuedBy: caller.email,
+        expiresAt: issuedAt + ENROLLMENT_TTL_SECONDS,
+      },
+    }));
+    usable = { token, thingName: thing, premisesId, issuedAt,
+      expiresAt: issuedAt + ENROLLMENT_TTL_SECONDS } as Record<string, unknown>;
   }
 
   const claim = await ssm.send(new GetParameterCommand({ Name: CLAIM_PARAM, WithDecryption: true }));
@@ -1230,6 +1249,45 @@ async function storeCredential(caller: Caller, rawBody: string | undefined) {
   }));
   await pushConfig(thing);
   return json(200, { stored: scope, thingName: thing });
+}
+
+/**
+ * Tells an agent to install a build and restart into it.
+ *
+ * The alternative is walking to every site, which stops scaling at the second
+ * one. The instruction carries a presigned link rather than a bare version so
+ * the agent needs no credentials of its own to fetch it, and the link expires
+ * — an instruction replayed a week later reaches a URL that no longer works.
+ *
+ * The agent decides whether to act: it refuses a version it is already
+ * running, a version that is not a version, and a URL that is not this
+ * bucket. Sending the instruction is not the same as it being obeyed, which
+ * is the right way round for something that replaces a program.
+ */
+async function upgradeAgent(caller: Caller, thing: string | undefined, rawBody: string | undefined) {
+  if (!can(caller, 'manageEstate')) return fail(403, 'Not permitted');
+  if (!isThingName(thing)) return fail(400, 'Invalid agent name');
+  const outOfScope = refuseOutOfScope(caller, thing);
+  if (outOfScope) return outOfScope;
+
+  const body = JSON.parse(rawBody ?? '{}') as Record<string, unknown>;
+  const platform = typeof body.platform === 'string' ? body.platform : 'linux';
+  if (!isPlatform(platform)) {
+    return fail(400, `platform must be one of ${PLATFORMS.join(', ')}`);
+  }
+  // The version this control plane is currently publishing. Naming it in the
+  // instruction is what lets the agent refuse to reinstall what it is running.
+  const version = typeof body.version === 'string' && body.version ? body.version : AGENT_VERSION;
+
+  const url = await bundleUrl(LIVE_BUCKET, platform, version);
+
+  await iot.send(new PublishCommand({
+    topic: `camstream/${thing}/command`, qos: 1,
+    payload: Buffer.from(JSON.stringify({
+      action: 'update', version, url, issuedAt: Math.floor(Date.now() / 1000),
+    })),
+  }));
+  return json(200, { requested: 'update', thingName: thing, version });
 }
 
 async function triggerScan(caller: Caller, rawBody: string | undefined) {

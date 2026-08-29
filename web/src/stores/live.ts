@@ -226,6 +226,7 @@ export const useLiveStore = defineStore('live', () => {
     try {
       const response = await api.watch({
         sessionId,
+        tenantId: selection.tenantParam,
         premisesId: selection.premisesId,
         visible: visible.value,
         main: main.value ?? undefined,
@@ -260,6 +261,7 @@ export const useLiveStore = defineStore('live', () => {
     if (!sessionId || !selection.premisesId) return;
     await api.watch({
       sessionId,
+      tenantId: selection.tenantParam,
       premisesId: selection.premisesId,
       visible: [],
       codecs,

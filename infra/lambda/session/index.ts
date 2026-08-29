@@ -51,7 +51,11 @@ export async function handler(
   event: APIGatewayProxyEventV2WithJWTAuthorizer,
 ): Promise<APIGatewayProxyStructuredResultV2> {
   const claims = event.requestContext.authorizer?.jwt?.claims ?? {};
-  const tenantId = claims['custom:tenantId'];
+  // The account's own tenant, which is what a session belongs to - distinct
+  // from `forTenant` below, the customer whose video the cookie will cover.
+  // Read through the shared resolver so the claim is parsed in one place.
+  const identified = identify(event);
+  const tenantId = identified?.tenantId;
   const userSub = claims.sub;
 
   if (typeof userSub !== 'string' || userSub.length === 0) {
@@ -130,8 +134,7 @@ export async function handler(
   // been through the HTTP API authorizer, and a second reading of it here got
   // that wrong — quietly, by never matching, so the operator kept their own
   // tenant's cookie and every tile stalled.
-  const caller = identify(event);
-  const forTenant = caller ? targetTenant(caller, body.tenantId) : null;
+  const forTenant = identified ? targetTenant(identified, body.tenantId) : null;
   if (!forTenant) {
     return fail(403, 'Not permitted to act on that tenant');
   }

@@ -252,6 +252,8 @@ export const api = {
    */
   watch: (body: {
     sessionId: string;
+    /** The customer being watched; the server ignores it unless you may cross. */
+    tenantId?: string;
     premisesId: string;
     visible: string[];
     main?: { thingName: string; cameraId: string };
@@ -283,6 +285,17 @@ export const api = {
     del<{ ok: true }>(`/api/admin/cameras/${encodeURIComponent(p.identity)}`, {
       premisesId: p.premisesId, tenantId: p.tenantId,
     }),
+
+  /**
+   * Tells an agent to install the current build and restart into it.
+   *
+   * The agent decides whether to obey: it refuses a version it is already
+   * running. Sending is not the same as being obeyed, which is the right way
+   * round for something that replaces a program.
+   */
+  upgradeAgent: (thingName: string, platform: Platform) =>
+    post<{ requested: string; version: string }>(
+      `/api/admin/agents/${encodeURIComponent(thingName)}/update`, { platform }),
 
   /** Asks one agent to sweep its network now, rather than waiting for its cycle. */
   scan: (thingName: string) =>

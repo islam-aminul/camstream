@@ -25,6 +25,7 @@ import software.amazon.awssdk.services.s3.S3Client;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import online.camstream.agent.health.ResourceMonitor;
+import online.camstream.agent.update.Updater;
 import online.camstream.agent.health.Resources;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -207,14 +208,25 @@ public final class Main {
                 }
 
                 @Override
-                public void onCommand(String action) {
-                    if ("scan".equals(action)) {
-                        log.info("scan requested by the control plane");
-                        discovery.scan();
-                        registry.refresh();
-                        device.report(true);
-                    } else {
-                        log.warn("ignoring unknown command \"{}\"", action);
+                public void onCommand(String action, com.fasterxml.jackson.databind.JsonNode command) {
+                    switch (action) {
+                        case "scan" -> {
+                            log.info("scan requested by the control plane");
+                            discovery.scan();
+                            registry.refresh();
+                            device.report(true);
+                        }
+                        case "update" -> {
+                            // Runs on the command worker, which is not the MQTT
+                            // event loop: a download of tens of megabytes must
+                            // not hold the connection open and silent long
+                            // enough to miss a keepalive.
+                            new Updater(Path.of(config.agentJarPath()))
+                                    .apply(DeviceClient.version(),
+                                            command.path("version").asText(null),
+                                            command.path("url").asText(null));
+                        }
+                        default -> log.warn("ignoring unknown command \"{}\"", action);
                     }
                 }
 

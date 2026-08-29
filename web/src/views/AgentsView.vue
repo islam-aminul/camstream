@@ -4,10 +4,11 @@ import Column from 'primevue/column';
 import Tag from 'primevue/tag';
 import Button from 'primevue/button';
 import InputText from 'primevue/inputtext';
+import Select from 'primevue/select';
 import Message from 'primevue/message';
 import PagedTable from '@/components/PagedTable.vue';
 import { useSelectionStore } from '@/stores/selection';
-import { api, type Agent } from '@/api';
+import { api, type Agent, type Platform } from '@/api';
 import { isValidDisplayName, nameComplaint } from '@/naming';
 import { AGENT_STREAM_CEILING } from '@/player/tile-state';
 
@@ -26,6 +27,30 @@ const selection = useSelectionStore();
 const table = ref<{ refresh: () => Promise<void> } | null>(null);
 
 const newName = ref('');
+const upgrading = ref<string | null>(null);
+
+/**
+ * Tells an agent to fetch the current build and restart into it.
+ *
+ * The platform is the agent's, not this browser's; it is not recorded, so it
+ * is asked for. A wrong answer is refused by the agent rather than installed.
+ */
+async function upgrade(agent: Agent, platform: Platform) {
+  upgrading.value = agent.thingName;
+  createError.value = null;
+  try {
+    const result = await api.upgradeAgent(agent.thingName, platform);
+    notice.value = `Asked ${agent.siteName || agent.thingName} to install ${result.version}. `
+      + 'It restarts itself, and reappears here within a minute or two.';
+  } catch (err) {
+    createError.value = (err as Error).message;
+  } finally {
+    upgrading.value = null;
+  }
+}
+
+const notice = ref<string | null>(null);
+const platform = ref<Platform>('windows');
 const creating = ref(false);
 const createError = ref<string | null>(null);
 
@@ -153,11 +178,21 @@ async function create() {
           :loading="creating" :disabled="!isValidDisplayName(newName)"
         />
         <span v-if="complaint" class="create__hint">{{ complaint }}</span>
+
+        <Select
+          v-model="platform" :options="['linux', 'windows', 'macos']"
+          size="small" aria-label="Agent platform"
+        />
+        <span class="create__hint">
+          The platform "Update" installs for. It is not recorded per agent, and an agent
+          refuses a build that is not its own.
+        </span>
       </form>
 
       <Message v-if="createError" severity="error" size="small" variant="simple">
         {{ createError }}
       </Message>
+      <Message v-if="notice" severity="info" size="small" variant="simple">{{ notice }}</Message>
 
       <PagedTable
         ref="table"
@@ -193,6 +228,18 @@ async function create() {
         </Column>
         <Column field="agentVersion" header="Version">
           <template #body="{ data }">{{ data.agentVersion ?? '—' }}</template>
+        </Column>
+        <Column header="" style="width: 8rem">
+          <template #body="{ data }">
+            <Button
+              size="small" text severity="secondary" label="Update"
+              :loading="upgrading === data.thingName"
+              :disabled="!data.online"
+              :title="data.online ? 'Install the current build and restart'
+                : 'The agent must be connected to be told'"
+              @click="upgrade(data, platform)"
+            />
+          </template>
         </Column>
         <Column header="Health">
           <template #body="{ data }">

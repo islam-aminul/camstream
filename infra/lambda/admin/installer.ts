@@ -22,7 +22,7 @@ export function isPlatform(value: unknown): value is Platform {
  * maps to, so it is reachable only through a link signed here — the binary is
  * not a secret, but it should not be anonymously enumerable either.
  */
-async function bundleUrl(bucket: string, platform: Platform, version: string): Promise<string> {
+export async function bundleUrl(bucket: string, platform: Platform, version: string): Promise<string> {
   const extension = platform === 'windows' ? 'zip' : 'tar.gz';
   return getSignedUrl(
     s3,
