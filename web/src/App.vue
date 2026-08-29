@@ -15,6 +15,7 @@ const route = useRoute();
 const pages = [
   { name: 'live', label: 'Live', icon: 'pi-video' },
   { name: 'cameras', label: 'Cameras', icon: 'pi-camera' },
+  { name: 'add', label: 'Add cameras', icon: 'pi-plus-circle' },
   { name: 'agents', label: 'Agents', icon: 'pi-server' },
   { name: 'premises', label: 'Premises', icon: 'pi-building' },
   { name: 'users', label: 'Users', icon: 'pi-users' },

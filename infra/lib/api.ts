@@ -197,6 +197,14 @@ export class Api extends Construct {
           'topic(2) AS thingName,',
           'agentVersion, uptimeSeconds, publishing, camerasConfigured,',
           'healthy, failingTasks,',
+          // What the machine has left, and which part of it is binding. The
+          // 128-stream ceiling is a hard limit and never the real one: an
+          // agent runs out of processor, memory, disk or uplink long before
+          // it runs out of that, and an operator told "128 maximum" while
+          // video stutters at thirty has been told nothing useful.
+          'constraint, constraintMessage, maxConcurrentTranscodes,',
+          'cpuLoad, memoryUsedFraction, memoryFreeBytes, diskFreeBytes,',
+          'uploadBytesPerSecond, uploadMillisPerSegment,',
           'floor(timestamp() / 1000) AS heartbeatAt,',
           // Health is only ever read as "the latest"; a record nobody replaced
           // in three days describes an agent that is long gone.

@@ -494,6 +494,9 @@ async function listAgents(
         // A connected agent whose heartbeat has stopped is the case presence
         // events cannot see: the socket is up and the agent is stuck.
         health: heartbeat(healthOf.get(String(device.thingName))),
+        // What the agent was configured to allow. What it is actually
+        // honouring can be lower, and comes back on the health record — a
+        // machine under pressure lowers its own cap.
         maxConcurrentTranscodes: Number(device.maxConcurrentTranscodes ?? DEFAULT_MAX_TRANSCODES),
       })),
   });
@@ -675,7 +678,32 @@ function heartbeat(record: Record<string, unknown> | undefined) {
     uptimeSeconds: record.uptimeSeconds ?? null,
     camerasConfigured: record.camerasConfigured ?? null,
     agentVersion: record.agentVersion ?? null,
+    /**
+     * Which resource is binding, and what to do about it.
+     *
+     * The agent decides this, because it is the only thing that can see the
+     * machine. It arrives as a sentence rather than a set of thresholds so the
+     * console does not have to re-derive a judgement the agent already made
+     * with better information.
+     */
+    constraint: typeof record.constraint === 'string' ? record.constraint : 'none',
+    constraintMessage:
+      typeof record.constraintMessage === 'string' ? record.constraintMessage : null,
+    /** The numbers behind it, so a healthy agent's headroom is visible too. */
+    resources: {
+      cpuLoad: numberOrNull(record.cpuLoad),
+      memoryUsedFraction: numberOrNull(record.memoryUsedFraction),
+      memoryFreeBytes: numberOrNull(record.memoryFreeBytes),
+      diskFreeBytes: numberOrNull(record.diskFreeBytes),
+      uploadBytesPerSecond: numberOrNull(record.uploadBytesPerSecond),
+      uploadMillisPerSegment: numberOrNull(record.uploadMillisPerSegment),
+    },
   };
+}
+
+/** A reading the agent omitted stays absent rather than becoming a zero. */
+function numberOrNull(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
 /**
