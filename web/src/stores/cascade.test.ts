@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { settleLevel, levelStatus } from './cascade';
+import { settleLevel, levelStatus, createLatest } from './cascade';
 
 describe('what a level does with its options', () => {
   it('selects the only option there is, and admits it chose', () => {
@@ -67,5 +67,25 @@ describe('what a level says about itself', () => {
     // what the user has to act on.
     expect(levelStatus({ blockedBy: 'customer', loading: true, options: 9, selected: true }))
       .toBe('Choose a customer first');
+  });
+});
+
+describe('which answer is allowed to win', () => {
+  it('lets the newest request write and silences the ones it replaced', () => {
+    const latest = createLatest();
+    const first = latest.begin('camera');
+    const second = latest.begin('camera');
+
+    expect(latest.current('camera', second)).toBe(true);
+    expect(latest.current('camera', first)).toBe(false);
+  });
+
+  it('keeps levels independent of each other', () => {
+    const latest = createLatest();
+    const camera = latest.begin('camera');
+    latest.begin('agent');
+
+    // Reloading agents must not discard a camera response that is still wanted.
+    expect(latest.current('camera', camera)).toBe(true);
   });
 });

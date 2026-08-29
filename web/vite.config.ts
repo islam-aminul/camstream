@@ -1,3 +1,4 @@
+import { fileURLToPath, URL } from 'node:url';
 import { defineConfig } from 'vite';
 import vue from '@vitejs/plugin-vue';
 
@@ -16,6 +17,9 @@ export default defineConfig({
 
   resolve: {
     alias: {
+      // Declared here rather than left to the bundler's tsconfig-path support,
+      // which the test runner does not share.
+      '@': fileURLToPath(new URL('./src', import.meta.url)),
       // The SRP maths operates on Buffers; the browser shim is a real
       // implementation, not a stub.
       buffer: 'buffer/',

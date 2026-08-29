@@ -54,3 +54,30 @@ export function levelStatus(state: {
   if (!state.selected) return `${state.options} to choose from`;
   return `${state.options} available`;
 }
+
+/**
+ * Guards a level against a slow answer to a question nobody is asking any more.
+ *
+ * Selecting a premises and then an agent puts two camera queries in flight at
+ * once, and the wider one is the slower one precisely because it returns more
+ * rows. Without this, that abandoned answer lands last and wins, and an
+ * operator who selected one agent is shown another agent's cameras — a real
+ * failure at ten thousand cameras, and invisible at three.
+ *
+ * Each request takes a ticket; only the newest ticket for a level may write.
+ */
+export function createLatest() {
+  const issued = new Map<string, number>();
+  return {
+    /** Claims a level for a new request, invalidating any still in flight. */
+    begin(level: string): number {
+      const next = (issued.get(level) ?? 0) + 1;
+      issued.set(level, next);
+      return next;
+    },
+    /** Whether this request is still the one whose answer matters. */
+    current(level: string, ticket: number): boolean {
+      return issued.get(level) === ticket;
+    },
+  };
+}
