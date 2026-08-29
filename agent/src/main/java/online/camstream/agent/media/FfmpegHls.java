@@ -54,6 +54,29 @@ public final class FfmpegHls implements AutoCloseable {
      */
     private final String runId;
 
+    /**
+     * Runs ffmpeg with the segment directory as its working directory.
+     *
+     * Everything else here is an absolute path, but the initialisation segment
+     * cannot be: ffmpeg copies `hls_fmp4_init_filename` verbatim into the
+     * playlist as the EXT-X-MAP URI, so an absolute path there would send every
+     * viewer to a URL under the local disk. It has to stay a bare name, and a
+     * bare name is resolved against the working directory - which was wherever
+     * the agent happened to be started from.
+     *
+     * So the segments were uploaded, the playlist was uploaded, the playlist
+     * named an initialisation segment, and that one file was written next to
+     * the service instead. Every viewer fetched it, got 403 because it was
+     * never in the bucket, and stalled at readyState 0 with a complete stream
+     * behind it. On this machine eleven of them had piled up in C:\ProgramData.
+     *
+     * Pointing the working directory at the output makes the bare name land
+     * where the uploader is looking, and leaves the URI relative.
+     */
+    static ProcessBuilder processIn(List<String> command, Path outputDir) {
+        return new ProcessBuilder(command).directory(outputDir.toFile());
+    }
+
     public FfmpegHls(AgentConfig config, CameraConfig camera, Rendition rendition, Path outputDir)
             throws IOException {
         StreamProfile profile = rendition.profile();
@@ -90,7 +113,7 @@ public final class FfmpegHls implements AutoCloseable {
                 outputDir.resolve("index.m3u8").toString()));
 
         log.info("[{}] starting ffmpeg ({})", label, encoder.isTranscode() ? encoder.key() : "stream copy");
-        ProcessBuilder builder = new ProcessBuilder(command);
+        ProcessBuilder builder = processIn(command, outputDir);
         builder.redirectErrorStream(true);
         this.process = builder.start();
 
