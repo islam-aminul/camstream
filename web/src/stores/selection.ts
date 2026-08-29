@@ -2,7 +2,7 @@ import { defineStore } from 'pinia';
 import { ref, computed, watch } from 'vue';
 import { api, type Agent, type Camera, type Customer, type Premises } from '@/api';
 import { useSessionStore } from './session';
-import { settleLevel } from './cascade';
+import { settleLevel, createLatest } from './cascade';
 
 /**
  * The selection rail's state: customer, then premises, then agent, then camera.
@@ -25,9 +25,15 @@ import { settleLevel } from './cascade';
  *    everyone but the platform operator. That is the same rule as
  *    auto-select-when-single, taken one step further: an administrator with
  *    one possible answer should not be shown the question.
+ *
+ * Two things here are about ordering rather than rules, and both were real
+ * failures before they were guarded: an answer to a superseded request must
+ * never write (see `createLatest`), and restoring a link must not wake the
+ * watchers whose work it is already doing.
  */
 export const useSelectionStore = defineStore('selection', () => {
   const session = useSessionStore();
+  const latest = createLatest();
 
   const customers = ref<Customer[]>([]);
   const premises = ref<Premises[]>([]);
@@ -45,6 +51,13 @@ export const useSelectionStore = defineStore('selection', () => {
   const error = ref<string | null>(null);
 
   /**
+   * True while `restore` is driving the levels itself. The watchers below
+   * exist to cascade a user's change; during a restore they would re-issue
+   * every query restore is already making, and the duplicates race.
+   */
+  let restoring = false;
+
+  /**
    * Only the platform operator picks a customer; everyone else's token names
    * one, so the level is answered before it is asked.
    */
@@ -54,11 +67,28 @@ export const useSelectionStore = defineStore('selection', () => {
   const tenantParam = computed(() =>
     customerIsPinned.value ? undefined : (customerId.value ?? undefined));
 
-  function busy<T>(level: string, work: () => Promise<T>): Promise<T | undefined> {
+  /**
+   * Runs a level's query and applies it only if it is still the current one.
+   *
+   * The ticket is taken before the request goes out and checked after it comes
+   * back; everything in between — the write, the error, the spinner — belongs
+   * to whichever request holds the level now.
+   */
+  async function load<T>(level: string, work: () => Promise<T>, apply: (value: T) => void) {
+    const ticket = latest.begin(level);
     loading.value = { ...loading.value, [level]: true };
-    return work()
-      .catch((err: Error) => { error.value = err.message; return undefined; })
-      .finally(() => { loading.value = { ...loading.value, [level]: false }; });
+    try {
+      const value = await work();
+      if (!latest.current(level, ticket)) return;
+      apply(value);
+    } catch (err) {
+      if (latest.current(level, ticket)) error.value = (err as Error).message;
+    } finally {
+      // A superseded request must not clear a spinner it no longer owns.
+      if (latest.current(level, ticket)) {
+        loading.value = { ...loading.value, [level]: false };
+      }
+    }
   }
 
   /** Applies the shared cascade rules, and records whether this level chose. */
@@ -73,71 +103,117 @@ export const useSelectionStore = defineStore('selection', () => {
       customerId.value = session.me?.tenantId ?? null;
       return;
     }
-    const list = await busy('customer', () => api.customers());
-    customers.value = list ?? [];
-    customerId.value = settle('customer', customerId.value, customers.value.map((c) => c.tenantId));
+    await load('customer', () => api.customers(), (list) => {
+      customers.value = list;
+      customerId.value = settle('customer', customerId.value, list.map((c) => c.tenantId));
+    });
   }
 
   async function loadPremises() {
     if (!customerId.value) { premises.value = []; premisesId.value = null; return; }
-    const list = await busy('premises', () => api.premises(tenantParam.value));
-    premises.value = list ?? [];
-    premisesId.value = settle('premises', premisesId.value, premises.value.map((p) => p.premisesId));
+    await load('premises', () => api.premises(tenantParam.value), (list) => {
+      premises.value = list;
+      premisesId.value = settle('premises', premisesId.value, list.map((p) => p.premisesId));
+    });
   }
 
   async function loadAgents() {
     if (!premisesId.value) { agents.value = []; agentId.value = null; return; }
-    const page = await busy('agent', () => api.agents({
+    await load('agent', () => api.agents({
       tenantId: tenantParam.value, premisesId: premisesId.value!, limit: 200,
-    }));
-    agents.value = page?.items ?? [];
-    agentId.value = settle('agent', agentId.value, agents.value.map((a) => a.thingName));
+    }), (page) => {
+      agents.value = page.items;
+      agentId.value = settle('agent', agentId.value, page.items.map((a) => a.thingName));
+    });
   }
 
   async function loadCameras() {
     if (!premisesId.value) { cameras.value = []; cameraId.value = null; return; }
-    const page = await busy('camera', () => api.cameras({
+    await load('camera', () => api.cameras({
       tenantId: tenantParam.value,
       premisesId: premisesId.value!,
       agentId: agentId.value ?? undefined,
       limit: 200,
-    }));
-    cameras.value = page?.items ?? [];
-    // Deliberately never auto-selected. A camera is what the user came to
-    // choose, and picking one for them starts a stream they did not ask for.
-    if (cameraId.value && !cameras.value.some((c) => c.cameraId === cameraId.value)) {
-      cameraId.value = null;
-    }
+    }), (page) => {
+      cameras.value = page.items;
+      // Deliberately never auto-selected. A camera is what the user came to
+      // choose, and picking one for them starts a stream they did not ask for.
+      if (cameraId.value && !page.items.some((c) => c.cameraId === cameraId.value)) {
+        cameraId.value = null;
+      }
+    });
   }
 
-  // Each level clears what depends on it, then reloads. Doing this with
-  // watchers rather than inside the setters means a selection arriving from a
-  // URL settles the same way as one arriving from a click.
+  /**
+   * Cameras are worth loading only once the agent level has settled.
+   *
+   * Loading them alongside the agents means fetching every camera at the site
+   * and then, a moment later, fetching the one agent's cameras instead —
+   * paying for a page of rows nobody will ever see.
+   */
+  async function loadAgentsThenCameras() {
+    await loadAgents();
+    // If an agent settled, its own watcher has already asked for its cameras.
+    if (agentId.value === null) await loadCameras();
+  }
+
+  // Each level clears what depends on it, then reloads. These run on `sync`
+  // flush so a cascade completes within the assignment that caused it: a
+  // half-applied selection must never be observable, and `restoring` has to
+  // still be true when the watcher would otherwise fire.
   watch(customerId, () => {
+    if (restoring) return;
     premisesId.value = null; agentId.value = null; cameraId.value = null;
     agents.value = []; cameras.value = [];
     void loadPremises();
-  });
+  }, { flush: 'sync' });
+
   watch(premisesId, () => {
+    if (restoring) return;
     agentId.value = null; cameraId.value = null;
-    void loadAgents();
-    void loadCameras();
-  });
+    void loadAgentsThenCameras();
+  }, { flush: 'sync' });
+
   watch(agentId, () => {
+    if (restoring) return;
     cameraId.value = null;
     void loadCameras();
-  });
+  }, { flush: 'sync' });
 
-  /** Restores a selection from a link, top down, so each level settles in turn. */
+  /**
+   * Restores a selection from a link, top down, so each level settles in turn.
+   *
+   * The watchers are held off for the duration: restore is doing their job
+   * already, and letting both run issued every query twice and let the loser
+   * of the race write last.
+   *
+   * Each value from the link is applied only if it is really there, so a link
+   * to a camera that has since been removed degrades to its premises rather
+   * than to an empty page.
+   */
   async function restore(from: { customer?: string; premises?: string; agent?: string; camera?: string }) {
-    await loadCustomers();
-    if (from.customer && !customerIsPinned.value) customerId.value = from.customer;
-    await loadPremises();
-    if (from.premises) premisesId.value = from.premises;
-    await loadAgents();
-    if (from.agent) agentId.value = from.agent;
-    await loadCameras();
-    if (from.camera) cameraId.value = from.camera;
+    restoring = true;
+    try {
+      await loadCustomers();
+      if (from.customer && !customerIsPinned.value) customerId.value = from.customer;
+
+      await loadPremises();
+      if (from.premises && premises.value.some((p) => p.premisesId === from.premises)) {
+        premisesId.value = from.premises;
+      }
+
+      await loadAgents();
+      if (from.agent && agents.value.some((a) => a.thingName === from.agent)) {
+        agentId.value = from.agent;
+      }
+
+      await loadCameras();
+      if (from.camera && cameras.value.some((c) => c.cameraId === from.camera)) {
+        cameraId.value = from.camera;
+      }
+    } finally {
+      restoring = false;
+    }
   }
 
   const ready = computed(() => Boolean(customerId.value && premisesId.value));
