@@ -4,28 +4,55 @@ import {
   AuthenticationDetails,
   type CognitoUserSession,
 } from 'amazon-cognito-identity-js';
-import { loadConfig } from './config';
+
+/**
+ * Runtime configuration, fetched rather than baked in at build time so that a
+ * redeploy of the infrastructure does not require rebuilding the bundle.
+ * `scripts/deploy-web.sh` writes this file from the CloudFormation outputs.
+ */
+export interface RuntimeConfig {
+  userPoolId: string;
+  userPoolClientId: string;
+  region: string;
+}
+
+let configPromise: Promise<RuntimeConfig> | undefined;
+
+export function loadConfig(): Promise<RuntimeConfig> {
+  configPromise ??= fetch('/config.json', { cache: 'no-store' })
+    .then((res) => {
+      if (!res.ok) throw new Error(`config.json returned ${res.status}`);
+      return res.json() as Promise<RuntimeConfig>;
+    })
+    .then((config) => {
+      if (!config.userPoolId || config.userPoolId.startsWith('REPLACED')) {
+        throw new Error('Deployment is missing its Cognito configuration');
+      }
+      return config;
+    })
+    .catch((err) => {
+      configPromise = undefined;
+      throw err;
+    });
+  return configPromise;
+}
 
 let poolPromise: Promise<CognitoUserPool> | undefined;
 
 function getPool(): Promise<CognitoUserPool> {
   poolPromise ??= loadConfig().then(
-    (config) =>
-      new CognitoUserPool({
-        UserPoolId: config.userPoolId,
-        ClientId: config.userPoolClientId,
-      }),
+    (config) => new CognitoUserPool({
+      UserPoolId: config.userPoolId,
+      ClientId: config.userPoolClientId,
+    }),
   );
   return poolPromise;
 }
 
 export class NewPasswordRequired extends Error {
-  readonly user: CognitoUser;
-
-  constructor(user: CognitoUser) {
+  constructor(readonly user: CognitoUser) {
     super('A new password is required');
     this.name = 'NewPasswordRequired';
-    this.user = user;
   }
 }
 
@@ -37,19 +64,22 @@ export async function signIn(email: string, password: string): Promise<CognitoUs
     user.authenticateUser(new AuthenticationDetails({ Username: email, Password: password }), {
       onSuccess: resolve,
       onFailure: reject,
-      // Admin-created users land here on first sign-in.
+      // Admin-created accounts land here on first sign-in.
       newPasswordRequired: () => reject(new NewPasswordRequired(user)),
     });
   });
 }
 
-export function completeNewPassword(user: CognitoUser, password: string): Promise<CognitoUserSession> {
+export function completeNewPassword(
+  user: CognitoUser,
+  password: string,
+): Promise<CognitoUserSession> {
   return new Promise((resolve, reject) => {
     user.completeNewPasswordChallenge(password, {}, { onSuccess: resolve, onFailure: reject });
   });
 }
 
-/** Returns a valid session, refreshing the ID token if it has expired. */
+/** A valid session, refreshing the ID token if it has expired. */
 export async function currentSession(): Promise<CognitoUserSession | null> {
   const pool = await getPool();
   const user = pool.getCurrentUser();
