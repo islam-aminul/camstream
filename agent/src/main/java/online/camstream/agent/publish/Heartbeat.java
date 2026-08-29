@@ -2,6 +2,7 @@ package online.camstream.agent.publish;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import online.camstream.agent.health.Resources;
 import online.camstream.agent.supervise.Supervisor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -45,6 +46,19 @@ public final class Heartbeat {
         int camerasConfigured();
 
         List<Supervisor.TaskHealth> taskHealth();
+
+        /**
+         * What the machine has left, and what that means for how much it
+         * should be asked to do.
+         *
+         * Carried on the heartbeat rather than polled, because it is the same
+         * question the heartbeat already answers — is this agent well — and a
+         * second channel would be a second thing to keep alive.
+         */
+        Resources.Verdict resources();
+
+        /** The sample the verdict was drawn from, for the numbers themselves. */
+        Resources.Snapshot vitalSigns();
     }
 
     private final Publisher publisher;
@@ -118,10 +132,31 @@ public final class Heartbeat {
                 .filter(task -> !task.healthy())
                 .map(Supervisor.TaskHealth::name)
                 .toList();
-        body.put("healthy", failing.isEmpty());
+        Resources.Verdict resources = vitals.resources();
+        Resources.Snapshot signs = vitals.vitalSigns();
+
+        // A stuck task and an exhausted machine are both "unhealthy" to the
+        // console, and both need saying: a site can have a wedged encoder on a
+        // machine that is also out of disk.
+        body.put("healthy", failing.isEmpty() && resources.healthy());
         if (!failing.isEmpty()) {
             body.put("failingTasks", String.join(",", failing));
         }
+
+        // The constraint and its explanation travel together. The console shows
+        // the sentence; the numbers behind it are there so an operator can see
+        // how close to the edge a healthy agent is running.
+        body.put("constraint", resources.constraint().name().toLowerCase());
+        if (!resources.message().isEmpty()) {
+            body.put("constraintMessage", resources.message());
+        }
+        body.put("maxConcurrentTranscodes", resources.maxConcurrentTranscodes());
+        putIfKnown(body, "cpuLoad", signs.cpuLoad());
+        putIfKnown(body, "memoryUsedFraction", signs.memoryUsedFraction());
+        putIfKnown(body, "memoryFreeBytes", signs.memoryFreeBytes());
+        putIfKnown(body, "diskFreeBytes", signs.diskFreeBytes());
+        putIfKnown(body, "uploadBytesPerSecond", signs.uploadBytesPerSecond());
+        putIfKnown(body, "uploadMillisPerSegment", signs.uploadMillisPerSegment());
 
         try {
             publisher.publish("heartbeat", MAPPER.writeValueAsString(body));
@@ -130,6 +165,24 @@ public final class Heartbeat {
         } catch (Exception e) {
             // A failed publish must not stop the agent; the next tick retries.
             log.debug("could not publish heartbeat: {}", e.toString());
+        }
+    }
+
+    /**
+     * Omits a reading the platform would not give, rather than sending -1.
+     *
+     * A missing field is honestly absent; a -1 in the record would be rendered
+     * by something downstream as a real measurement.
+     */
+    private static void putIfKnown(ObjectNode body, String name, double value) {
+        if (value >= 0) {
+            body.put(name, value);
+        }
+    }
+
+    private static void putIfKnown(ObjectNode body, String name, long value) {
+        if (value >= 0) {
+            body.put(name, value);
         }
     }
 }

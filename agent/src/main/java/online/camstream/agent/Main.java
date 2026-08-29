@@ -24,6 +24,8 @@ import software.amazon.awssdk.services.s3.S3Client;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import online.camstream.agent.health.ResourceMonitor;
+import online.camstream.agent.health.Resources;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
@@ -118,6 +120,12 @@ public final class Main {
              StreamManager manager = new StreamManager(config, s3, registry);
              Supervisor supervisor = new Supervisor(3)) {
 
+            // Watches what the machine has left. The publisher feeds it upload
+            // timings, which is how the uplink gets measured under real load
+            // rather than by a speed test on an idle link.
+            ResourceMonitor resourceMonitor = new ResourceMonitor(Path.of(config.stateDir));
+            manager.meter(resourceMonitor);
+
             // The listener does not exist until its handlers do, and its
             // handlers need to reach it; this closes that loop.
             java.util.concurrent.atomic.AtomicReference<WatchListener> watch =
@@ -154,6 +162,34 @@ public final class Main {
                         public List<Supervisor.TaskHealth> taskHealth() {
                             return supervisor.health();
                         }
+
+                        /**
+                         * Sampled here, at the moment the heartbeat is sent, so
+                         * the reading describes the interval it is reporting on.
+                         *
+                         * The verdict is applied as well as reported: the cap it
+                         * returns becomes the agent's own limit, so a machine
+                         * that is out of headroom stops taking on conversions
+                         * rather than accepting them and stuttering.
+                         */
+                        @Override
+                        public Resources.Verdict resources() {
+                            lastSigns = resourceMonitor.sample();
+                            Resources.Verdict verdict = Resources.assess(
+                                    lastSigns,
+                                    config.maxConcurrentTranscodes,
+                                    manager.runningTranscodes(),
+                                    config.segmentDurationMs);
+                            config.resourceCap = verdict.maxConcurrentTranscodes();
+                            return verdict;
+                        }
+
+                        @Override
+                        public Resources.Snapshot vitalSigns() {
+                            return lastSigns;
+                        }
+
+                        private Resources.Snapshot lastSigns = Resources.Snapshot.unknown();
                     },
                     DeviceClient.version(),
                     Duration.ofMinutes(config.heartbeatActiveMinutes),

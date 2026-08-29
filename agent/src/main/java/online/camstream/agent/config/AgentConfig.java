@@ -164,6 +164,22 @@ public final class AgentConfig {
     public volatile int maxConcurrentTranscodes = 1;
 
     /**
+     * A ceiling the agent has imposed on itself because the machine cannot
+     * carry more.
+     *
+     * Kept apart from the configured value rather than overwriting it, so a
+     * machine that recovers goes back to what it was told to do. Overwriting
+     * would make every dip permanent, and a cloud config push would be the only
+     * way to undo it.
+     */
+    public volatile int resourceCap = Integer.MAX_VALUE;
+
+    /** What the agent may actually run: what it was told, or what it can bear. */
+    public int effectiveMaxConcurrentTranscodes() {
+        return Math.min(maxConcurrentTranscodes, resourceCap);
+    }
+
+    /**
      * Ceiling on addresses scanned per sweep. 0 means scan whatever the
      * interface netmask covers, which is the right answer on a normal site
      * network and the default.

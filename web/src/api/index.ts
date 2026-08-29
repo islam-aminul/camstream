@@ -1,4 +1,4 @@
-import { get, post, patch, del } from './client';
+import { get, post, patch, del, download } from './client';
 
 export type Role = 'superadmin' | 'admin' | 'operator' | 'viewer';
 
@@ -38,7 +38,29 @@ export interface Agent {
   enrolled: boolean;
   credentialPublicKey: string | null;
   maxConcurrentTranscodes: number;
-  health?: { at: number | null; healthy: boolean; failingTasks: string[]; publishing: number } | null;
+  health?: {
+    at: number | null;
+    healthy: boolean;
+    failingTasks: string[];
+    publishing: number;
+    uptimeSeconds?: number | null;
+    agentVersion?: string | null;
+    /**
+     * Which resource is running out on the machine, decided by the agent — the
+     * only thing that can see it. 'none' when it has headroom.
+     */
+    constraint?: 'none' | 'cpu' | 'memory' | 'disk' | 'uplink';
+    /** What to do about it, in a sentence, or null when there is nothing to do. */
+    constraintMessage?: string | null;
+    resources?: {
+      cpuLoad: number | null;
+      memoryUsedFraction: number | null;
+      memoryFreeBytes: number | null;
+      diskFreeBytes: number | null;
+      uploadBytesPerSecond: number | null;
+      uploadMillisPerSegment: number | null;
+    };
+  } | null;
 }
 
 export interface Camera {
@@ -81,6 +103,32 @@ export interface WatchResponse {
   keepaliveInSeconds: number;
   desired: DesiredState[];
 }
+
+
+/** A camera an agent has seen on the network but nobody has approved yet. */
+export interface Discovered {
+  identity: string;
+  identityStable: boolean;
+  macAddress?: string;
+  /** How the identity was derived, so it is visible rather than magic. */
+  identifiedBy: 'mac' | 'serial' | 'address';
+  manufacturer?: string;
+  model?: string;
+  lastSeen?: number;
+  /** Every agent that can currently reach it, and on what address. */
+  reachableBy: {
+    thingName: string;
+    premisesId?: string;
+    ipAddress?: string;
+    authState?: string;
+    lastSeen?: number;
+    profiles: { token: string; name?: string; width?: number; height?: number; codec?: string }[];
+  }[];
+  /** Set once approved, so the list can show what is already in the estate. */
+  approved: { cameraId: string; displayName: string; assignedTo: string } | null;
+}
+
+export type Platform = 'linux' | 'windows' | 'macos';
 
 /** A page, plus how many matched and where to resume. */
 export interface Page<T> { total: number; cursor?: string; items: T[] }
@@ -141,7 +189,11 @@ export const api = {
   deletePremises: (premisesId: string) =>
     del<{ ok: true }>(`/api/admin/premises/${encodeURIComponent(premisesId)}`),
 
-  createAgent: (body: { displayName: string; premisesId: string; tenantId?: string }) =>
+  /**
+   * Enrols an agent. The name is `siteName` because the route derives the
+   * device id from it, and the id becomes part of the IoT thing name.
+   */
+  createAgent: (body: { siteName: string; premisesId: string; tenantId?: string }) =>
     post<{ thingName: string }>('/api/admin/agents', body),
 
   deleteAgent: (thingName: string) =>
@@ -186,4 +238,57 @@ export const api = {
     codecs: string[];
     transcode: string[];
   }) => post<WatchResponse>('/api/watch', body),
+
+  /**
+   * Cameras the agents can see but nobody has approved.
+   *
+   * Not paged: this is a working queue, emptied as an installer walks a site,
+   * and it is bounded by what is physically on one network.
+   */
+  discovered: (premisesId: string) =>
+    get<{ cameras: Discovered[] }>('/api/admin/discovered', { premisesId })
+      .then((r) => r.cameras),
+
+  /** Brings a discovered camera into the estate, on one named agent. */
+  approveCamera: (body: {
+    identity: string;
+    assignedTo: string;
+    cameraId?: string;
+    displayName?: string;
+    subProfileToken?: string;
+    mainProfileToken?: string;
+    sourceCodec?: string;
+  }) => post<{ approved: string }>('/api/admin/cameras', body),
+
+  removeCamera: (identity: string, assignedTo: string) =>
+    del<{ ok: true }>(`/api/admin/cameras/${encodeURIComponent(identity)}`, { assignedTo }),
+
+  /** Asks one agent to sweep its network now, rather than waiting for its cycle. */
+  scan: (thingName: string) =>
+    post<{ requested: string }>('/api/admin/scan', { thingName }),
+
+  /**
+   * Hands the control plane ciphertext it cannot read.
+   *
+   * The credential is sealed in the browser against the agent's own public key,
+   * so the plaintext never reaches the network and no part of this system but
+   * that agent can open it.
+   */
+  storeCredential: (body: { thingName: string; scope: string; ciphertext: string }) =>
+    post<{ stored: string }>('/api/admin/credentials', body),
+
+  removeCredential: (thingName: string, scope: string) =>
+    del<{ ok: true }>('/api/admin/credentials', { thingName, scope }),
+
+  /**
+   * Downloads an agent installer carrying a one-use enrolment token.
+   *
+   * Fetched rather than linked: the route is authorised by a header, which a
+   * plain link does not send, so a link would save a 401 to disk.
+   */
+  installer: (thingName: string, platform: Platform) =>
+    download(
+      `/api/admin/agents/${encodeURIComponent(thingName)}/installer?platform=${platform}`,
+      `install-${thingName}.${platform === 'windows' ? 'ps1' : 'sh'}`,
+    ),
 };

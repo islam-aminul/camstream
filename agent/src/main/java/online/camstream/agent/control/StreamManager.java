@@ -3,6 +3,7 @@ package online.camstream.agent.control;
 import online.camstream.agent.config.AgentConfig;
 import online.camstream.agent.config.CameraConfig;
 import online.camstream.agent.media.FfmpegHls;
+import online.camstream.agent.health.ResourceMonitor;
 import online.camstream.agent.publish.HlsPublisher;
 import online.camstream.agent.publish.MasterPlaylist;
 import online.camstream.agent.supervise.Backoff;
@@ -111,7 +112,8 @@ public final class StreamManager implements AutoCloseable {
             start(rendition);
         }
 
-        Split split = withinCap(transcodes, runningTranscodes(), config.maxConcurrentTranscodes);
+        Split split = withinCap(transcodes, runningTranscodes(),
+                config.effectiveMaxConcurrentTranscodes());
         for (Rendition rendition : split.start()) {
             declined.remove(rendition);
             start(rendition);
@@ -119,7 +121,7 @@ public final class StreamManager implements AutoCloseable {
         for (Rendition rendition : split.refuse()) {
             if (declined.add(rendition)) {
                 log.warn("[{}] not transcoding: this agent allows {} at a time and they are all in use",
-                        rendition, config.maxConcurrentTranscodes);
+                        rendition, config.effectiveMaxConcurrentTranscodes());
             }
         }
         declined.retainAll(desired);
@@ -163,7 +165,14 @@ public final class StreamManager implements AutoCloseable {
         return camera != null && !camera.browserPlayable();
     }
 
-    private int runningTranscodes() {
+    /** Watches how well the uplink keeps up; attached before any stream starts. */
+    public void meter(ResourceMonitor monitor) {
+        this.monitor = monitor;
+    }
+
+    private ResourceMonitor monitor;
+
+    public int runningTranscodes() {
         return (int) active.keySet().stream().filter(this::needsEncoder).count();
     }
 
@@ -335,6 +344,11 @@ public final class StreamManager implements AutoCloseable {
             HlsPublisher publisher = new HlsPublisher(
                     s3, config.bucket, config.keyPrefix() + rendition.keySuffix(), directory,
                     rendition.toString(), config.playlistWindow);
+            // Every publisher feeds the same meter, so the throughput figure is
+            // the whole agent's upload rather than one stream's.
+            if (monitor != null) {
+                publisher.meter(monitor);
+            }
 
             if (restartedRenditions.remove(rendition)) {
                 publisher.encoderRestarted();

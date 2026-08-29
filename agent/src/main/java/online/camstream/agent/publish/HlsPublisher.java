@@ -3,6 +3,7 @@ package online.camstream.agent.publish;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import software.amazon.awssdk.core.sync.RequestBody;
+import online.camstream.agent.health.ResourceMonitor;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.PutObjectRequest;
 
@@ -61,6 +62,16 @@ public final class HlsPublisher {
 
     private byte[] lastPlaylist;
     private final PlaylistBuilder playlist;
+
+    /**
+     * Where upload throughput is recorded, when anyone is listening.
+     *
+     * Measured here because this is the one place bytes actually leave the
+     * building. Timing the uploads the agent is already doing costs nothing and
+     * measures the connection under its real load, which a speed test run on an
+     * idle link does not.
+     */
+    private ResourceMonitor monitor;
 
     public HlsPublisher(S3Client s3, String bucket, String keyPrefix, Path directory, String label,
                         int windowSize) {
@@ -177,14 +188,30 @@ public final class HlsPublisher {
         lastPlaylist = content;
     }
 
+    /** Attaches the meter that watches how well the uplink is keeping up. */
+    public void meter(ResourceMonitor monitor) {
+        this.monitor = monitor;
+    }
+
     private void put(String name, byte[] content, String contentType, String cacheControl) {
-        s3.putObject(
-                PutObjectRequest.builder()
-                        .bucket(bucket)
-                        .key(keyPrefix + name)
-                        .contentType(contentType)
-                        .cacheControl(cacheControl)
-                        .build(),
-                RequestBody.fromBytes(content));
+        long started = System.nanoTime();
+        try {
+            s3.putObject(
+                    PutObjectRequest.builder()
+                            .bucket(bucket)
+                            .key(keyPrefix + name)
+                            .contentType(contentType)
+                            .cacheControl(cacheControl)
+                            .build(),
+                    RequestBody.fromBytes(content));
+        } catch (RuntimeException e) {
+            if (monitor != null) {
+                monitor.recordUploadFailure();
+            }
+            throw e;
+        }
+        if (monitor != null) {
+            monitor.recordUpload(content.length, (System.nanoTime() - started) / 1_000_000);
+        }
     }
 }
