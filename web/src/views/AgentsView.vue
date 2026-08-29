@@ -186,7 +186,7 @@ async function create() {
             </span>
           </template>
         </Column>
-        <Column header="Converting">
+        <Column header="Transcoding">
           <template #body="{ data }">
             {{ data.maxConcurrentTranscodes }} at a time
           </template>

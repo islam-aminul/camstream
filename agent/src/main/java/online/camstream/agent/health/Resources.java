@@ -59,8 +59,19 @@ public final class Resources {
     /** Below this the disk cannot be trusted to hold a segment window. */
     static final long DISK_FLOOR_BYTES = 512L * 1024 * 1024;
 
-    /** Above this the machine is spending its time swapping rather than encoding. */
-    static final double MEMORY_CEILING = 0.92;
+    /**
+     * Memory that must stay free for the encodes already running.
+     *
+     * An absolute figure, not a percentage, because a percentage says nothing
+     * about whether another encode will fit: ninety-five percent of a large
+     * machine leaves gigabytes, and eighty percent of a small one leaves
+     * nothing. A 1080p H.264 encode holds a few hundred megabytes of frames,
+     * so this is roughly two of them plus room to breathe.
+     *
+     * Judging by the fraction reported a healthy workstation as constrained
+     * and shed conversions on a machine with most of a gigabyte to spare.
+     */
+    static final long MEMORY_FLOOR_BYTES = 512L * 1024 * 1024;
 
     static final double CPU_CEILING = 0.90;
 
@@ -94,11 +105,13 @@ public final class Resources {
                     0);
         }
 
-        if (now.memoryUsedFraction() >= 0 && now.memoryUsedFraction() >= MEMORY_CEILING) {
+        if (now.memoryFreeBytes() >= 0 && now.memoryFreeBytes() < MEMORY_FLOOR_BYTES) {
             return new Verdict(Constraint.MEMORY,
-                    "Memory is " + percent(now.memoryUsedFraction()) + " used, with only "
-                            + megabytes(now.memoryFreeBytes()) + " free. Converting fewer streams "
-                            + "at once, since each conversion holds frames in memory.",
+                    "Only " + megabytes(now.memoryFreeBytes()) + " of memory is free"
+                            + (now.memoryUsedFraction() >= 0
+                                    ? " (" + percent(now.memoryUsedFraction()) + " in use)" : "")
+                            + ". Converting fewer streams at once, since each conversion holds "
+                            + "frames in memory.",
                     shed);
         }
 

@@ -41,7 +41,8 @@ const platform = ref<Platform>('linux');
  * case — one credential for every camera the agent probes — has no camera.
  */
 const credentialOpen = ref(false);
-const username = ref('');
+/** The factory default on most cameras; still editable. */
+const username = ref('admin');
 const password = ref('');
 const scope = ref('*');
 const sealing = ref(false);
@@ -69,7 +70,9 @@ async function refresh() {
   loading.value = true;
   error.value = null;
   try {
-    rows.value = await api.discovered(selection.premisesId);
+    rows.value = await api.discovered({
+      tenantId: selection.tenantParam, premisesId: selection.premisesId,
+    });
   } catch (err) {
     error.value = (err as Error).message;
   } finally {
@@ -109,7 +112,7 @@ async function scan() {
 
 function openCredential(camera: Discovered | null) {
   credentialOpen.value = true;
-  username.value = '';
+  username.value = 'admin';
   password.value = '';
   // A camera-specific credential is scoped to its identity; the default is the
   // site-wide one, which is what most installs actually use.
