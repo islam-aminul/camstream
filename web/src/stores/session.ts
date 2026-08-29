@@ -91,11 +91,19 @@ export const useSessionStore = defineStore('session', () => {
   async function watch(premisesId: string | null, tenantId?: string | null) {
     const tenant = tenantId ?? null;
     if (watching.value === premisesId && watchingTenant.value === tenant) return;
-    watching.value = premisesId;
-    watchingTenant.value = tenant;
+
+    // Nothing is recorded until the cookie has actually been re-cut. Recording
+    // the intent first looked harmless and was not: the live view can ask for
+    // a site before the session exists, and the early return then left the
+    // request marked as done. Every later attempt matched the guard and
+    // returned, so the cookie stayed cut to the account's own tenant and every
+    // segment came back 403 - with the agent publishing perfectly well.
     if (!info.value) return;
+
     info.value = await api.session(
       info.value.sessionId, premisesId ?? undefined, tenant ?? undefined);
+    watching.value = premisesId;
+    watchingTenant.value = tenant;
     schedule();
   }
 

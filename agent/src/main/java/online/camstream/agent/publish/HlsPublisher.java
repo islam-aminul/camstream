@@ -61,6 +61,10 @@ public final class HlsPublisher {
     private final String label;
 
     private byte[] lastPlaylist;
+    /** Said once, not once a sweep, when falling back to our own segment list. */
+    private boolean synthesised;
+    /** Nominal segment length, used only when ffmpeg's durations are unavailable. */
+    private double segmentSeconds = 4.0;
     private final PlaylistBuilder playlist;
 
     /**
@@ -161,19 +165,42 @@ public final class HlsPublisher {
      */
     private void uploadPlaylistIfChanged() throws IOException {
         Path source = directory.resolve(PLAYLIST);
-        if (!Files.isRegularFile(source)) {
-            return;
+        String reported = Files.isRegularFile(source) ? Files.readString(source) : "";
+
+        List<PlaylistBuilder.Segment> observed = reported.isBlank()
+                ? List.of() : PlaylistBuilder.parse(reported);
+
+        if (observed.isEmpty()) {
+            // ffmpeg's own playlist could not be used - it is not there yet, it
+            // is mid-rename, or it holds nothing we recognise. That used to end
+            // the method, which meant segments were uploaded and no playlist
+            // ever named them: the stream existed in the bucket and no player
+            // could find it, and nothing said so because returning quietly is
+            // not an error.
+            //
+            // The playlist is ours to write. ffmpeg owns the exact durations,
+            // so they are preferred when available, but their absence is no
+            // reason to publish nothing when the segments are sitting here.
+            observed = segmentsOnDisk();
+            if (!observed.isEmpty() && !synthesised) {
+                synthesised = true;
+                log.info("[{}] ffmpeg's playlist is unreadable ({}); "
+                        + "building one from the {} segment(s) already published",
+                        label,
+                        Files.isRegularFile(source) ? "present but unparsed" : "absent",
+                        observed.size());
+            }
         }
-        String reported = Files.readString(source);
-        if (reported.isBlank()) {
+
+        if (observed.isEmpty()) {
             return;
         }
 
-        String init = PlaylistBuilder.parseInit(reported);
+        String init = reported.isBlank() ? initOnDisk() : PlaylistBuilder.parseInit(reported);
         if (init != null) {
             playlist.setInitSegment(init);
         }
-        playlist.observe(PlaylistBuilder.parse(reported));
+        playlist.observe(observed);
         if (playlist.isEmpty()) {
             return;
         }
@@ -186,6 +213,50 @@ public final class HlsPublisher {
         // simultaneous requests, it just may not serve a stale copy.
         put(PLAYLIST, content, "application/vnd.apple.mpegurl", "no-cache");
         lastPlaylist = content;
+    }
+
+    /**
+     * The segments actually written, for when ffmpeg's playlist cannot be read.
+     *
+     * Names are zero-padded, so lexical order is chronological. The duration is
+     * the configured segment length: ffmpeg's real figure is better and is used
+     * whenever its playlist is available, but a playlist naming the right
+     * segments with a nominal duration plays, and no playlist does not.
+     */
+    private List<PlaylistBuilder.Segment> segmentsOnDisk() throws IOException {
+        if (!Files.isDirectory(directory)) {
+            return List.of();
+        }
+        try (Stream<Path> entries = Files.list(directory)) {
+            return entries
+                    .filter(Files::isRegularFile)
+                    .map(path -> path.getFileName().toString())
+                    .filter(name -> name.endsWith(".m4s"))
+                    .sorted()
+                    .map(name -> new PlaylistBuilder.Segment(name, segmentSeconds, false))
+                    .toList();
+        }
+    }
+
+    /** The init segment on disk, named by ffmpeg's own convention. */
+    private String initOnDisk() throws IOException {
+        if (!Files.isDirectory(directory)) {
+            return null;
+        }
+        try (Stream<Path> entries = Files.list(directory)) {
+            return entries
+                    .map(path -> path.getFileName().toString())
+                    .filter(name -> name.endsWith("_init.mp4"))
+                    .findFirst()
+                    .orElse(null);
+        }
+    }
+
+    /** The configured segment length, for a playlist built without ffmpeg's. */
+    public void segmentSeconds(double seconds) {
+        if (seconds > 0) {
+            this.segmentSeconds = seconds;
+        }
     }
 
     /** Attaches the meter that watches how well the uplink is keeping up. */
