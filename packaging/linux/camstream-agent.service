@@ -13,6 +13,11 @@ Type=simple
 User=camstream
 Group=camstream
 WorkingDirectory=/var/lib/camstream
+# A staged update is applied here, before the JVM opens the jar. The agent
+# cannot replace the file it is running from, so it writes .new beside it and
+# this is the moment nothing holds it open. The previous jar is kept: if a new
+# build will not start, that is the copy that did.
+ExecStartPre=/bin/sh -c 'j=/opt/camstream/camstream-agent.jar; [ -f "$j.new" ] || exit 0; cp -f "$j" "$j.previous"; mv -f "$j.new" "$j"'
 ExecStart=/usr/bin/java -XX:MaxRAMPercentage=50 -jar /opt/camstream/camstream-agent.jar /etc/camstream/agent.yaml
 
 # A camera outage must not become an agent outage. The agent already retries

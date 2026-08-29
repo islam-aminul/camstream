@@ -24,10 +24,17 @@ import java.util.zip.ZipFile;
  * back: if the new jar does not start, nothing is left running to notice, and
  * the cameras are dark until somebody drives out.
  *
+ * It does not replace the running jar, and cannot: Windows holds an open file
+ * against renaming, so the move failed with "access denied" and the agent
+ * stayed on the old build - correctly, but permanently. The jar is therefore
+ * staged as <name>.new and the service launcher swaps it in before the next
+ * JVM starts, when nothing has it open. That is also true on Linux, where the
+ * move would have worked: one mechanism is easier to reason about than two,
+ * and neither of them touches a file something is running from.
+ *
  * So the order is: fetch to a temporary file, prove the file is what it claims
- * to be, put the current jar somewhere recoverable, move the new one into
- * place, and only then exit for the service manager to restart. Nothing
- * touches the installed jar until the replacement has been opened and read.
+ * to be, stage it beside the installed jar, record the build, and exit for the
+ * service manager to restart into it.
  */
 public final class Updater {
 
@@ -102,24 +109,23 @@ public final class Updater {
             download(url, bundle);
             Path staged = extractJar(bundle, work);
 
-            // Kept, not deleted. If the new build turns out to be broken this
-            // is the only copy of the one that worked, and it is already on
-            // the machine that needs it.
-            Path previous = installedJar.resolveSibling(installedJar.getFileName() + ".previous");
-            Files.copy(installedJar, previous, StandardCopyOption.REPLACE_EXISTING);
+            // Beside the installed jar, not over it. The launcher moves it into
+            // place before the next JVM starts; nothing here touches a file
+            // that something is currently running from.
+            Path pending = installedJar.resolveSibling(installedJar.getFileName() + ".new");
+            Files.move(staged, pending, StandardCopyOption.REPLACE_EXISTING);
 
-            // Recorded before the swap. If the move succeeds and this did not,
-            // the agent would reinstall the same build on every instruction
-            // for ever; the other way round it merely reinstalls once.
+            // Recorded before the exit. If the agent restarted into the new
+            // build and had not recorded it, it would reinstall the same build
+            // on every instruction for ever; the other way round it merely
+            // declines one update it had already taken.
             if (wantedBuild != null && !wantedBuild.isBlank()) {
                 Files.createDirectories(buildMarker.getParent());
                 Files.writeString(buildMarker, wantedBuild);
             }
 
-            // Last, and as close to atomic as the platform allows: everything
-            // that could fail has already happened.
-            Files.move(staged, installedJar, StandardCopyOption.REPLACE_EXISTING);
-            log.info("installed {}; exiting for the service manager to start it", wantedVersion);
+            log.info("staged {} as {}; exiting for the service manager to start it",
+                    wantedVersion, pending.getFileName());
             exit.run();
         } catch (Exception e) {
             log.error("update to {} failed, staying on {}: {}", wantedVersion, runningVersion, e.toString());
