@@ -190,6 +190,14 @@ export const api = {
     get<{ total: number; cursor?: string; cameras: Camera[] }>('/api/admin/cameras', p)
       .then((r): Page<Camera> => ({ total: r.total, cursor: r.cursor, items: r.cameras })),
 
+  /**
+   * Renames one camera. The only thing about a camera an operator chooses,
+   * and until this existed it could only be chosen at approval time.
+   */
+  renameCamera: (identity: string, body: { displayName: string; premisesId: string; tenantId?: string }) =>
+    patch<{ identity: string; displayName: string }>(
+      `/api/admin/cameras/${encodeURIComponent(identity)}`, body),
+
   users: (p: { q?: string; cursor?: string; limit?: number } = {}) =>
     get<{ total: number; cursor?: string; users: User[] }>('/api/admin/users', p)
       .then((r): Page<User> => ({ total: r.total, cursor: r.cursor, items: r.users })),

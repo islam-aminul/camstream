@@ -26,8 +26,30 @@ const live = useLiveStore();
 
 const expanded = computed(() => live.main);
 
+/**
+ * What the wall shows.
+ *
+ * Expanding a camera shows that camera and nothing else. It used to leave the
+ * tile in its grid cell and merely change the frame's height, so "Open full
+ * size" produced a tile the same size as before - while quietly fetching the
+ * main-resolution stream, paying for it, and displaying it in a ninth of the
+ * page.
+ *
+ * The other cameras keep their demand while one is expanded. They are still
+ * the wall you were watching and you are one click from them; stopping and
+ * restarting an agent's ffmpeg for a few seconds of zoom costs more than it
+ * saves.
+ */
+const shown = computed(() => {
+  const one = live.main;
+  if (!one) return live.entries;
+  const found = live.entries.filter((entry) =>
+    entry.camera.cameraId === one.cameraId && entry.camera.assignedTo === one.thingName);
+  return found.length ? found : live.entries;
+});
+
 const style = computed(() => ({
-  gridTemplateColumns: gridTemplate(live.tiles),
+  gridTemplateColumns: expanded.value ? '1fr' : gridTemplate(live.tiles),
 }));
 
 const cost = computed(() => costNote(live.streams.length));
@@ -49,9 +71,10 @@ onBeforeUnmount(() => { void live.release(); });
       <h1>Live</h1>
 
       <div v-if="selection.ready" class="controls">
-        <div v-if="!live.pinnedToOne" class="tiles">
+        <div v-if="!live.pinnedToOne && !expanded" class="tiles">
           <label for="tiles">Tiles</label>
           <SelectButton
+            v-tooltip.bottom="'How many cameras this page may show at once. Each one is a stream somebody is paying for.'"
             :model-value="live.tiles"
             :options="[...TILE_CHOICES]"
             :allow-empty="false"
@@ -60,20 +83,23 @@ onBeforeUnmount(() => { void live.release(); });
           />
         </div>
 
-        <div v-if="!live.pinnedToOne" class="paging">
+        <div v-if="!live.pinnedToOne && !expanded" class="paging">
           <span class="paging__count">
             <template v-if="live.total">{{ live.from }}–{{ live.to }} of {{ live.total }}</template>
             <template v-else>No cameras</template>
           </span>
           <Button
+            v-tooltip.bottom="'First page'"
             icon="pi pi-angle-double-left" text severity="secondary" aria-label="First page"
             :disabled="!live.hasPrevious" @click="live.first()"
           />
           <Button
+            v-tooltip.bottom="'Previous page'"
             icon="pi pi-angle-left" text severity="secondary" aria-label="Previous page"
             :disabled="!live.hasPrevious" @click="live.previous()"
           />
           <Button
+            v-tooltip.bottom="'Next page'"
             icon="pi pi-angle-right" text severity="secondary" aria-label="Next page"
             :disabled="!live.hasNext" @click="live.next()"
           />
@@ -102,26 +128,36 @@ onBeforeUnmount(() => { void live.release(); });
         Nothing to show here. {{ selection.agentId ? 'This agent has no cameras.' : 'This site has no cameras yet.' }}
       </p>
 
-      <div v-else class="grid" :style="style">
-        <CameraTile
-          v-for="entry in live.entries"
-          :key="entry.key"
-          :class="{ 'tile--selected': highlighted === entry.camera.cameraId }"
-          :camera="entry.camera"
-          :stream="entry.stream"
-          :viewer-codecs="live.codecs"
-          :demanded="live.demandedFor.has(entry.key)"
-          :declined="live.declinedFor.has(entry.key)"
-          :max-concurrent-transcodes="live.declinedFor.get(entry.key)"
-          :transcode-requested="live.transcode.has(entry.key)"
-          :agent-streams="live.streamsPerAgent.get(entry.camera.assignedTo)"
-          :expanded="expanded?.cameraId === entry.camera.cameraId
-            && expanded?.thingName === entry.camera.assignedTo"
-          @transcode="live.requestTranscode($event)"
-          @stop-transcode="live.stopTranscode($event)"
-          @expand="expand"
-        />
-      </div>
+      <template v-else>
+        <p v-if="expanded" class="back">
+          <Button
+            v-tooltip.right="'Show every camera on this page again'"
+            size="small" text icon="pi pi-arrow-left" label="Back to the wall"
+            @click="expand(null)"
+          />
+        </p>
+
+        <div class="grid" :style="style">
+          <CameraTile
+            v-for="entry in shown"
+            :key="entry.key"
+            :class="{ 'tile--selected': highlighted === entry.camera.cameraId }"
+            :camera="entry.camera"
+            :stream="entry.stream"
+            :viewer-codecs="live.codecs"
+            :demanded="live.demandedFor.has(entry.key)"
+            :declined="live.declinedFor.has(entry.key)"
+            :max-concurrent-transcodes="live.declinedFor.get(entry.key)"
+            :transcode-requested="live.transcode.has(entry.key)"
+            :agent-streams="live.streamsPerAgent.get(entry.camera.assignedTo)"
+            :expanded="expanded?.cameraId === entry.camera.cameraId
+              && expanded?.thingName === entry.camera.assignedTo"
+            @transcode="live.requestTranscode($event)"
+            @stop-transcode="live.stopTranscode($event)"
+            @expand="expand"
+          />
+        </div>
+      </template>
     </template>
   </div>
 </template>
@@ -171,6 +207,10 @@ onBeforeUnmount(() => { void live.release(); });
 
 .thin {
   height: 3px;
+}
+
+.back {
+  margin: 0;
 }
 
 /* The camera chosen in the rail, so a search that lands here is visibly the

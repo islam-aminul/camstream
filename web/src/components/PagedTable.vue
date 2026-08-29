@@ -120,18 +120,22 @@ defineExpose({ refresh: first });
       </span>
 
       <Button
+        v-tooltip.top="'First page'"
         icon="pi pi-angle-double-left" text severity="secondary" aria-label="First page"
         :disabled="page === 0" @click="first()"
       />
       <Button
+        v-tooltip.top="'Previous page'"
         icon="pi pi-angle-left" text severity="secondary" aria-label="Previous page"
         :disabled="page === 0" @click="page -= 1; fetchPage()"
       />
       <Button
+        v-tooltip.top="'Next page'"
         icon="pi pi-angle-right" text severity="secondary" aria-label="Next page"
         :disabled="!nextCursor" @click="page += 1; fetchPage()"
       />
       <Button
+        v-tooltip.top="'Fetch this page again'"
         icon="pi pi-refresh" text severity="secondary" aria-label="Reload"
         @click="fetchPage()"
       />

@@ -97,6 +97,8 @@ export async function handler(
       case 'GET /api/admin/discovered':  return await listDiscovered(caller,
           event.queryStringParameters?.premisesId, event.queryStringParameters?.tenantId);
       case 'POST /api/admin/cameras':    return await approveCamera(caller, event.body);
+      case 'PATCH /api/admin/cameras/{identity}':
+        return await renameCamera(caller, event.pathParameters?.identity, event.body);
       case 'DELETE /api/admin/cameras/{identity}':
         return await removeCamera(caller, event.pathParameters?.identity,
           event.queryStringParameters?.premisesId, event.queryStringParameters?.tenantId);
@@ -1137,6 +1139,63 @@ async function approveCamera(caller: Caller, rawBody: string | undefined) {
     await pushConfig(previousOwner);
   }
   return json(200, { approved: camera.cameraId, assignedTo, reassignedFrom: previousOwner ?? null });
+}
+
+/**
+ * Renames a camera.
+ *
+ * The name is the only thing about a camera an operator chooses, and until
+ * this existed it could only be chosen once, at approval, from whatever the
+ * device happened to say about itself. A camera that said nothing was approved
+ * as its own MAC address and stayed that way, so a wall of tiles read
+ * "mac-2818fdf1e5be" where it should have read "Front Gate".
+ *
+ * Deliberately only the name. Identity, assignment and profiles are what the
+ * stream is built from; letting a rename touch them would make a typing
+ * mistake capable of stopping a camera.
+ */
+async function renameCamera(caller: Caller, identity: string | undefined, rawBody: string | undefined) {
+  if (!can(caller, 'manageEstate')) return fail(403, 'Not permitted to rename cameras');
+  if (!identity || !CAMERA_IDENTITY.test(identity)) return fail(400, 'Invalid camera identity');
+
+  let body: { displayName?: unknown; premisesId?: unknown; tenantId?: unknown };
+  try {
+    body = JSON.parse(rawBody ?? '{}');
+  } catch {
+    return fail(400, 'Body must be JSON');
+  }
+
+  const displayName = String(body.displayName ?? '').trim();
+  // The same rule as every other name in the system: no double hyphens, no
+  // double spaces. Thing names are built by joining on "--", so a name
+  // carrying one would produce an identifier that cannot be taken apart again.
+  if (!isValidDisplayName(displayName)) {
+    return fail(400,
+      'displayName must be 3-64 characters of letters, digits, single spaces and single hyphens, '
+      + 'with no double hyphens and no double spaces');
+  }
+
+  const forTenant = readTenant(caller, typeof body.tenantId === 'string' ? body.tenantId : undefined);
+  if (!forTenant) return fail(403, 'Not permitted to act on that tenant');
+  const site = siteOf(caller, forTenant, typeof body.premisesId === 'string' ? body.premisesId : undefined);
+  if (site.refusal) return site.refusal;
+
+  const existing = await getRecord<CameraRecord>(site.pk!, key.camera(identity));
+  if (!existing) return fail(404, 'No such camera');
+  const outOfScope = refuseOutOfScope(caller, existing.assignedTo);
+  if (outOfScope) return outOfScope;
+
+  await ddb.send(new UpdateCommand({
+    TableName: TABLE,
+    Key: { pk: site.pk!, sk: key.camera(identity) },
+    UpdateExpression: 'SET displayName = :name',
+    ExpressionAttributeValues: { ':name': displayName },
+  }));
+  // The agent labels its own logs and its ffmpeg processes with this, so it
+  // should hear about it rather than keep using the name it was given once.
+  await pushConfig(existing.assignedTo);
+
+  return json(200, { identity, displayName, assignedTo: existing.assignedTo });
 }
 
 async function removeCamera(

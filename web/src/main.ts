@@ -2,6 +2,7 @@ import { createApp } from 'vue';
 import { createPinia } from 'pinia';
 import PrimeVue from 'primevue/config';
 import ConfirmationService from 'primevue/confirmationservice';
+import Tooltip from 'primevue/tooltip';
 import Aura from '@primevue/themes/aura';
 import 'primeicons/primeicons.css';
 import App from './App.vue';
@@ -14,6 +15,10 @@ createApp(App)
   // Deleting a site or an account asks first, and the dialog needs its
   // service registered here rather than per page.
   .use(ConfirmationService)
+  // Every control that is an icon, and every control whose consequence is not
+  // obvious from its label, carries a sentence on hover. Registered globally
+  // because it is used on nearly every page.
+  .directive('tooltip', Tooltip)
   .use(PrimeVue, {
     theme: {
       preset: Aura,

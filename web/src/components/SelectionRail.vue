@@ -7,6 +7,7 @@ import InputIcon from 'primevue/inputicon';
 import Message from 'primevue/message';
 import CascadeLevel from './CascadeLevel.vue';
 import { useSelectionStore } from '@/stores/selection';
+import { showsLevel, searchKinds } from '@/rail';
 import { api } from '@/api';
 
 /**
@@ -21,9 +22,26 @@ const selection = useSelectionStore();
 const route = useRoute();
 const router = useRouter();
 
+/**
+ * What this page can actually use. A level that cannot affect the page in
+ * front of you invites a click that appears to do nothing, so it is not shown
+ * — see rail.ts. Nothing is cleared: the value survives, and applies again on
+ * a page that reads it.
+ */
+const page = computed(() => (route.name as string | undefined) ?? null);
+const shows = (level: 'customer' | 'premises' | 'agent' | 'camera') =>
+  showsLevel(page.value, level);
+const search = computed(() => searchKinds(page.value));
+
 const searchText = ref('');
 const searching = ref(false);
 const results = ref<Awaited<ReturnType<typeof api.search>> | null>(null);
+
+/** Whether anything the current page could act on came back. */
+const matched = computed(() =>
+  Boolean(results.value
+    && ((search.value.premises && results.value.premises.length)
+      || (search.value.cameras && results.value.cameras.length))));
 
 const customerOptions = computed(() =>
   selection.customers.map((c) => ({ value: c.tenantId, label: c.displayName, hint: c.tenantId })));
@@ -90,7 +108,7 @@ async function jumpTo(target: { premisesId: string; agentId?: string; cameraId?:
 
 <template>
   <aside class="rail">
-    <div class="rail__search">
+    <div v-if="search.any" class="rail__search">
       <label for="rail-search">Search everything</label>
       <IconField>
         <InputIcon :class="searching ? 'pi pi-spin pi-spinner' : 'pi pi-search'" />
@@ -107,7 +125,7 @@ async function jumpTo(target: { premisesId: string; agentId?: string; cameraId?:
       </p>
 
       <div v-if="results" class="results">
-        <template v-if="results.premises.length">
+        <template v-if="search.premises && results.premises.length">
           <p class="results__head">Premises</p>
           <button
             v-for="p in results.premises" :key="p.premisesId"
@@ -115,7 +133,7 @@ async function jumpTo(target: { premisesId: string; agentId?: string; cameraId?:
             @click="jumpTo({ premisesId: p.premisesId })"
           >{{ p.displayName }}</button>
         </template>
-        <template v-if="results.cameras.length">
+        <template v-if="search.cameras && results.cameras.length">
           <p class="results__head">Cameras</p>
           <button
             v-for="c in results.cameras" :key="c.identity"
@@ -125,14 +143,14 @@ async function jumpTo(target: { premisesId: string; agentId?: string; cameraId?:
             {{ c.displayName }}<span class="results__where">{{ c.premisesId }}</span>
           </button>
         </template>
-        <p v-if="!results.premises.length && !results.cameras.length" class="rail__hint">
+        <p v-if="!matched" class="rail__hint">
           Nothing matched in the {{ results.searchedSites }} site(s) searched.
         </p>
       </div>
     </div>
 
     <CascadeLevel
-      v-if="!selection.customerIsPinned"
+      v-if="!selection.customerIsPinned && shows('customer')"
       v-model="selection.customerId"
       label="Customer"
       :options="customerOptions"
@@ -140,6 +158,7 @@ async function jumpTo(target: { premisesId: string; agentId?: string; cameraId?:
     />
 
     <CascadeLevel
+      v-if="shows('premises')"
       v-model="selection.premisesId"
       label="Premises"
       :options="premisesOptions"
@@ -148,6 +167,7 @@ async function jumpTo(target: { premisesId: string; agentId?: string; cameraId?:
     />
 
     <CascadeLevel
+      v-if="shows('agent')"
       v-model="selection.agentId"
       label="Agent"
       :options="agentOptions"
@@ -156,6 +176,7 @@ async function jumpTo(target: { premisesId: string; agentId?: string; cameraId?:
     />
 
     <CascadeLevel
+      v-if="shows('camera')"
       v-model="selection.cameraId"
       label="Camera"
       :options="cameraOptions"

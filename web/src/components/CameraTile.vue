@@ -42,6 +42,16 @@ const name = computed(() => props.camera.displayName || props.camera.cameraId);
 const video = ref<HTMLVideoElement | null>(null);
 const playing = ref(false);
 const fatal = ref<string | null>(null);
+/**
+ * The size of the pictures arriving, as opposed to the size the registry
+ * recorded once.
+ *
+ * Switching to the main stream did work - the bytes changed, the decoder
+ * changed - and looked like it had done nothing, because the caption went on
+ * reporting the sub stream's resolution from the manifest. The only honest
+ * source for "what am I watching" is the element that is watching it.
+ */
+const shown = ref<string | null>(null);
 let player: Attachment | undefined;
 
 const key = computed(() => `${props.camera.assignedTo}/${props.camera.cameraId}`);
@@ -74,6 +84,19 @@ const url = computed(() => {
   return props.transcodeRequested ? m.subH264 : m.sub;
 });
 
+/** Which rung of the ladder this tile is asking for, said plainly. */
+const rendition = computed(() => (props.expanded ? 'main' : 'sub'));
+
+/** What the caption reports: what is playing, or failing that what was registered. */
+const dimensions = computed(() => shown.value ?? props.stream?.resolution ?? null);
+
+function noteSize() {
+  const element = video.value;
+  if (element && element.videoWidth > 0) {
+    shown.value = `${element.videoWidth}x${element.videoHeight}`;
+  }
+}
+
 /** Nothing is fetched until the stream is one this viewer could actually play. */
 const shouldPlay = computed(() =>
   url.value !== null && (props.stream?.online ?? false) && !props.declined
@@ -85,8 +108,11 @@ function start() {
   const source = url.value;
   if (!element || !source || !shouldPlay.value) return;
   fatal.value = null;
+  // Stale until the new rendition reports its own size, which is the moment
+  // the switch is real.
+  shown.value = null;
   player = attach(element, source, {
-    onPlaying: () => { playing.value = true; },
+    onPlaying: () => { playing.value = true; noteSize(); },
     onFatal: (message) => { fatal.value = message; playing.value = false; },
   });
 }
@@ -112,6 +138,8 @@ onBeforeUnmount(stop);
         muted
         playsinline
         autoplay
+        @loadedmetadata="noteSize"
+        @resize="noteSize"
       />
 
       <div v-if="!playing" class="tile__state">
@@ -131,15 +159,32 @@ onBeforeUnmount(stop);
     <figcaption class="tile__bar">
       <span class="tile__name" :title="name">{{ name }}</span>
       <span class="tile__meta">
-        <span v-if="transcodeRequested" class="tile__badge" title="Converted at the site">converted</span>
-        <span v-if="stream?.resolution" class="tile__dim">{{ stream.resolution }}</span>
+        <span
+          v-if="transcodeRequested"
+          v-tooltip.top="'The site is re-encoding this camera so your browser can play it'"
+          class="tile__badge"
+        >converted</span>
+        <!-- Which rung of the ladder, so the switch to main is visible as
+             something other than a button that appears to do nothing. -->
+        <span
+          v-if="stream"
+          v-tooltip.top="expanded
+            ? 'Full-resolution stream from the camera'
+            : 'Low-resolution stream, which is what a wall of tiles uses'"
+          class="tile__badge tile__badge--rung"
+        >{{ rendition }}</span>
+        <span v-if="dimensions" class="tile__dim">{{ dimensions }}</span>
         <Button
           v-if="transcodeRequested"
+          v-tooltip.top="'Stop converting, and free the slot for another camera'"
           size="small" text severity="secondary" icon="pi pi-times"
           aria-label="Stop converting"
           @click="emit('stopTranscode', key)"
         />
         <Button
+          v-tooltip.top="expanded
+            ? 'Back to the wall'
+            : 'Fill the page with this camera, at full resolution'"
           size="small" text severity="secondary"
           :icon="expanded ? 'pi pi-window-minimize' : 'pi pi-window-maximize'"
           :aria-label="expanded ? 'Back to the grid' : 'Open full size'"
@@ -247,8 +292,20 @@ onBeforeUnmount(stop);
   opacity: 0.72;
 }
 
+/* Expanded, the tile is the page rather than a cell in a grid, so the frame
+   takes the height available instead of a tile's 16:9. The grid it sits in
+   drops to a single column - see LiveView - because "full size" inside a
+   nine-column layout is not full size, which is what made the control look
+   broken even while it was fetching the larger stream. */
 .tile--expanded .tile__frame {
   aspect-ratio: auto;
-  height: min(72vh, 100%);
+  height: min(76vh, 100%);
+  min-height: 22rem;
+}
+
+.tile__badge--rung {
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  cursor: help;
 }
 </style>

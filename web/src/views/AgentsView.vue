@@ -174,6 +174,7 @@ async function create() {
           aria-label="New agent name"
         />
         <Button
+          v-tooltip.top="'Enrol a new agent at this site. You install it on the machine afterwards.'"
           type="submit" label="Add agent" size="small"
           :loading="creating" :disabled="!isValidDisplayName(newName)"
         />
@@ -232,6 +233,7 @@ async function create() {
         <Column header="" style="width: 8rem">
           <template #body="{ data }">
             <Button
+              v-tooltip.top="'Tell this agent to fetch the current build and restart into it'"
               size="small" text severity="secondary" label="Update"
               :loading="upgrading === data.thingName"
               :disabled="!data.online"

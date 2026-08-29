@@ -290,6 +290,7 @@ onMounted(() => {
               aria-label="Platform"
             />
             <Button
+              v-tooltip.top="'A folder to copy to the machine at the site and run there'"
               label="Download installer" icon="pi pi-download" size="small"
               :disabled="!agent" :loading="downloading" @click="downloadInstaller"
             />
@@ -314,11 +315,13 @@ onMounted(() => {
               <span class="creds__slot">{{ slotLabel(entry.scope) }}</span>
               <span class="creds__actions">
                 <Button
+                  v-tooltip.top="'Replace this credential. The camera is retried with the new one.'"
                   size="small" text label="Change"
                   :disabled="!chosen?.credentialPublicKey"
                   @click="openCredential({ edit: entry })"
                 />
                 <Button
+                  v-tooltip.top="'Remove this credential'"
                   size="small" text severity="danger" icon="pi pi-trash"
                   :aria-label="`Remove the ${entry.username} credential`"
                   @click="removeCredential(entry)"
@@ -348,10 +351,12 @@ onMounted(() => {
           <h2>3 — Find the cameras</h2>
           <div class="row">
             <Button
+              v-tooltip.top="'Ask the agent to sweep its network now, rather than waiting for the next scan'"
               label="Scan now" icon="pi pi-search" size="small" severity="secondary"
               :disabled="!agent" @click="scan"
             />
             <Button
+              v-tooltip.top="'Fetch what the agent has found so far'"
               label="Refresh" icon="pi pi-refresh" size="small" text severity="secondary"
               :loading="loading" @click="refresh"
             />
@@ -387,8 +392,12 @@ onMounted(() => {
               Added as {{ data.approved.displayName }}
             </span>
             <span v-else class="row">
-              <Button size="small" label="Approve" @click="openApprove(data)" />
               <Button
+                v-tooltip.top="'Put this camera into service and give it a name'"
+                size="small" label="Approve" @click="openApprove(data)"
+              />
+              <Button
+                v-tooltip.top="'Give this camera its own username and password, instead of the site-wide one'"
                 size="small" text severity="secondary" label="Credentials"
                 :disabled="!chosen?.credentialPublicKey"
                 @click="openCredential({ camera: data })"

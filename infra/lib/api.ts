@@ -443,6 +443,7 @@ export class Api extends Construct {
       [apigwv2.HttpMethod.POST, '/api/admin/agents/{thingName}/update'],
       [apigwv2.HttpMethod.GET, '/api/admin/discovered'],
       [apigwv2.HttpMethod.POST, '/api/admin/cameras'],
+      [apigwv2.HttpMethod.PATCH, '/api/admin/cameras/{identity}'],
       [apigwv2.HttpMethod.DELETE, '/api/admin/cameras/{identity}'],
       [apigwv2.HttpMethod.GET, '/api/admin/credentials'],
       [apigwv2.HttpMethod.POST, '/api/admin/credentials'],

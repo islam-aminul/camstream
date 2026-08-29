@@ -93,6 +93,7 @@ function remove(premisesId: string, name: string) {
         />
         <InputText v-model="address" placeholder="Address (optional)" aria-label="Address" />
         <Button
+          v-tooltip.top="'Create a site. Agents and cameras belong to one.'"
           type="submit" label="Add site" size="small"
           :loading="busy" :disabled="!isValidDisplayName(displayName)"
         />
@@ -113,6 +114,7 @@ function remove(premisesId: string, name: string) {
         <Column header="" style="width: 5rem">
           <template #body="{ data }">
             <Button
+              v-tooltip.top="'Delete this site, its agents and its cameras'"
               size="small" text severity="danger" icon="pi pi-trash"
               :aria-label="`Delete ${data.displayName}`"
               @click="remove(data.premisesId, data.displayName)"
