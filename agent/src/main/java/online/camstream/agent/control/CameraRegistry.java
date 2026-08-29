@@ -97,6 +97,23 @@ public final class CameraRegistry {
             CameraConfig camera = resolve(assignment, scan);
             if (camera != null) {
                 resolved.put(camera.id, camera);
+                continue;
+            }
+
+            // Not seen in the latest scan. That is not the same as gone, and
+            // treating it as gone is what made a restart take a working camera
+            // off the air: the configuration arrives before the first sweep
+            // finishes, the camera resolves to nothing, and the agent refuses
+            // the stream as an unknown camera until a scan it has not run yet
+            // completes - by which time the viewer's demand has expired.
+            //
+            // A camera this agent has already resolved is kept until a scan
+            // positively replaces it. The same reasoning is already written
+            // into resolve(), which honours a superseded identity rather than
+            // letting a camera go dark over a renaming.
+            CameraConfig previous = cameras.get(assignment.cameraId());
+            if (previous != null) {
+                resolved.put(previous.id, previous);
             }
         }
 

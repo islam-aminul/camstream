@@ -80,55 +80,18 @@ public final class DiscoveryService implements CameraSource {
         return profile == null ? null : profile.rtspUrl;
     }
 
-    /** One full sweep. Safe to run on a timer; takes tens of seconds on a busy LAN. */
-    public List<DiscoveredCamera> scan() {
-        Map<String, DiscoveredCamera> found = new LinkedHashMap<>();
-
-        // Multicast first: it is fast, needs no credentials, and yields the
-        // exact ONVIF service URL rather than a guess.
-        for (Map.Entry<String, String> entry : WsDiscovery.probe().entrySet()) {
-            DiscoveredCamera camera = new DiscoveredCamera();
-            camera.ipAddress = entry.getKey();
-            camera.onvifServiceUrl = entry.getValue();
-            camera.lastSeen = System.currentTimeMillis();
-            found.put(camera.ipAddress, camera);
-        }
-
-        // Then sweep for anything that ignored it.
-        for (Map.Entry<String, PortScanner.OpenPorts> entry : PortScanner.scan(maxHosts, extraNetworks).entrySet()) {
-            PortScanner.OpenPorts open = entry.getValue();
-            DiscoveredCamera camera = found.computeIfAbsent(entry.getKey(), host -> {
-                DiscoveredCamera fresh = new DiscoveredCamera();
-                fresh.ipAddress = host;
-                fresh.lastSeen = System.currentTimeMillis();
-                return fresh;
-            });
-            camera.onvifPorts = open.onvif();
-            camera.rtspPorts = open.rtsp();
-            if (camera.onvifServiceUrl == null && !open.onvif().isEmpty()) {
-                // The conventional ONVIF path; confirmed or refuted by the call below.
-                camera.onvifServiceUrl = "http://" + camera.ipAddress + ":" + open.onvif().get(0) + "/onvif/device_service";
-            }
-        }
-
-        // The ARP cache is only populated for hosts we have just spoken to,
-        // which is why this runs after the sweep rather than before it.
-        Map<String, String> arp = MacResolver.arpTable();
-        for (DiscoveredCamera camera : found.values()) {
-            String mac = arp.get(camera.ipAddress);
-            if (mac == null) {
-                MacResolver.prime(camera.ipAddress);
-                mac = MacResolver.arpTable().get(camera.ipAddress);
-            }
-            camera.macAddress = mac;
-        }
-
-        // A MAC seen at more than one address is not a camera's MAC. ARP only
-        // holds on-link entries, so this normally cannot happen — but proxy ARP
-        // and some consumer routers answer for hosts behind them, and every
-        // camera on the far side then reports the router's address. Left alone
-        // that would fold a dozen cameras into one identity, so the value is
-        // dropped and identity falls through to the serial.
+    /**
+     * Turns raw sightings into publishable cameras and makes them visible.
+     *
+     * Called twice in a scan, and that is the point. WS-Discovery answers in
+     * about a second; the port sweep walks thousands of addresses and takes
+     * minutes. Publishing only at the end meant an agent that had already found
+     * a camera by multicast refused to stream it - "unknown camera" - until the
+     * sweep it did not need had finished. After a restart that window is longer
+     * than the sixty seconds a viewer's demand lives, so the camera never
+     * started at all.
+     */
+    private void resolveAndPublish(Map<String, DiscoveredCamera> found) {
         discardSharedMacs(found.values());
 
         for (DiscoveredCamera camera : found.values()) {
@@ -168,6 +131,80 @@ public final class DiscoveryService implements CameraSource {
             }
         }
         lastScan = byIdentity;
+    }
+
+    /**
+     * Fills in hardware addresses from the ARP cache.
+     *
+     * The cache only holds hosts recently spoken to, which is why this runs
+     * after a device has been contacted rather than before.
+     */
+    private static void primeHardwareAddresses(Collection<DiscoveredCamera> cameras) {
+        Map<String, String> arp = MacResolver.arpTable();
+        for (DiscoveredCamera camera : cameras) {
+            if (camera.macAddress != null && !camera.macAddress.isBlank()) {
+                continue;
+            }
+            String mac = arp.get(camera.ipAddress);
+            if (mac == null) {
+                MacResolver.prime(camera.ipAddress);
+                mac = MacResolver.arpTable().get(camera.ipAddress);
+            }
+            camera.macAddress = mac;
+        }
+    }
+
+    /** One full sweep. Safe to run on a timer; takes tens of seconds on a busy LAN. */
+    public List<DiscoveredCamera> scan() {
+        Map<String, DiscoveredCamera> found = new LinkedHashMap<>();
+
+        // Multicast first: it is fast, needs no credentials, and yields the
+        // exact ONVIF service URL rather than a guess.
+        for (Map.Entry<String, String> entry : WsDiscovery.probe().entrySet()) {
+            DiscoveredCamera camera = new DiscoveredCamera();
+            camera.ipAddress = entry.getKey();
+            camera.onvifServiceUrl = entry.getValue();
+            camera.lastSeen = System.currentTimeMillis();
+            found.put(camera.ipAddress, camera);
+        }
+
+        // Anything multicast found is worth publishing before the sweep starts.
+        // The sweep is minutes of work that this camera does not need, and an
+        // agent that has just restarted is refusing streams for every one of
+        // them.
+        if (!found.isEmpty()) {
+            primeHardwareAddresses(found.values());
+            resolveAndPublish(found);
+            log.info("{} device(s) answered multicast and are usable now; "
+                    + "sweeping for the rest", found.size());
+        }
+
+        // Then sweep for anything that ignored it.
+        for (Map.Entry<String, PortScanner.OpenPorts> entry : PortScanner.scan(maxHosts, extraNetworks).entrySet()) {
+            PortScanner.OpenPorts open = entry.getValue();
+            DiscoveredCamera camera = found.computeIfAbsent(entry.getKey(), host -> {
+                DiscoveredCamera fresh = new DiscoveredCamera();
+                fresh.ipAddress = host;
+                fresh.lastSeen = System.currentTimeMillis();
+                return fresh;
+            });
+            camera.onvifPorts = open.onvif();
+            camera.rtspPorts = open.rtsp();
+            if (camera.onvifServiceUrl == null && !open.onvif().isEmpty()) {
+                // The conventional ONVIF path; confirmed or refuted by the call below.
+                camera.onvifServiceUrl = "http://" + camera.ipAddress + ":" + open.onvif().get(0) + "/onvif/device_service";
+            }
+        }
+
+        primeHardwareAddresses(found.values());
+
+        // A MAC seen at more than one address is not a camera's MAC. ARP only
+        // holds on-link entries, so this normally cannot happen — but proxy ARP
+        // and some consumer routers answer for hosts behind them, and every
+        // camera on the far side then reports the router's address. Left alone
+        // that would fold a dozen cameras into one identity, so the value is
+        // dropped and identity falls through to the serial.
+        resolveAndPublish(found);
 
         long usable = found.values().stream()
                 .filter(c -> c.authState == DiscoveredCamera.AuthState.AUTHENTICATED).count();
