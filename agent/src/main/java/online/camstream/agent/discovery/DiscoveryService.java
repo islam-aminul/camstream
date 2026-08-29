@@ -462,6 +462,7 @@ public final class DiscoveryService implements CameraSource {
                     ? vendor.name() : VendorDirectory.registrantFor(camera.macAddress);
             if (name != null && !name.isBlank()) {
                 camera.manufacturer = name;
+                log.debug("{} identified as {} from its hardware address", camera.ipAddress, name);
             }
         }
         return vendor;
