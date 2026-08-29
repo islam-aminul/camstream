@@ -331,7 +331,7 @@ ffprobePath: $script:FfprobeBin
 # the price per hour from this number.
 segmentDurationMs: 4000
 playlistWindow: 4
-idleShutdownSeconds: 30
+idleShutdownSeconds: 150
 
 discoveryEnabled: true
 discoveryIntervalMinutes: 30

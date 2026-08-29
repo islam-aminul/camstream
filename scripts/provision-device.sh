@@ -106,7 +106,7 @@ privateKeyPath: $OUT/device.key
 # bill for roughly double the delay.
 segmentDurationMs: 2000
 playlistWindow: 4
-idleShutdownSeconds: 30
+idleShutdownSeconds: 150
 
 cameras:
   - id: front-door

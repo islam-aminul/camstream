@@ -113,10 +113,18 @@ public final class AgentConfig {
     public int playlistWindow = 4;
 
     /**
-     * Stop publishing a rendition this long after the last viewer keepalive.
-     * Nothing is published — and nothing is billed — while no one is watching.
+     * Stop publishing a rendition after this long without a watch instruction.
+     * Nothing is published - and nothing is billed - while no one is watching.
+     *
+     * This is measured against the control plane's resend cadence, not against
+     * viewer keepalives, which the agent never sees. The control plane repeats
+     * an unchanged desired state every WATCH_RESEND_SECONDS; anything shorter
+     * than that here stops a stream somebody is actively watching. At 30
+     * against a 300-second resend, every stream stopped itself half a minute
+     * in. Keep several missed resends of headroom: a departing viewer costs
+     * this much trailing ffmpeg, a viewer still present costs nothing at all.
      */
-    public int idleShutdownSeconds = 30;
+    public int idleShutdownSeconds = 150;
 
     public String ffmpegPath = "ffmpeg";
     public String ffprobePath = "ffprobe";
