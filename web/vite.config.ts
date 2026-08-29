@@ -40,7 +40,7 @@ export default defineConfig({
           groups: [
             { name: 'cognito', test: /node_modules\/(amazon-cognito-identity-js|buffer|crypto-js)/ },
             { name: 'hls', test: /node_modules\/hls\.js/ },
-            { name: 'primevue', test: /node_modules\/(primevue|@primeuix|primeicons)/ },
+            { name: 'primevue', test: /node_modules\/(primevue|@primevue|primeicons)/ },
           ],
         },
       },
