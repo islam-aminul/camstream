@@ -3,6 +3,7 @@ package online.camstream.agent.publish;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import software.amazon.awssdk.core.sync.RequestBody;
+import online.camstream.agent.health.ResourceMonitor;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.PutObjectRequest;
 
@@ -32,8 +33,26 @@ public final class HlsPublisher {
 
     private static final String PLAYLIST = "index.m3u8";
 
-    /** By name: ffmpeg never rewrites a segment once it is closed. */
-    private final Set<String> uploaded = new HashSet<>();
+    /**
+     * By name: ffmpeg never rewrites a segment once it is closed.
+     *
+     * Bounded, because this used to be a plain HashSet that was only ever
+     * added to. At two-second segments a stable camera adds some forty
+     * thousand names a day, and stable is the normal case — a pipeline only
+     * restarts when its camera drops. ffmpeg has already deleted anything
+     * older than the playlist window, so remembering a few multiples of it is
+     * ample to avoid re-uploading.
+     */
+    private final Set<String> uploaded = java.util.Collections.newSetFromMap(
+            new java.util.LinkedHashMap<>() {
+                @Override
+                protected boolean removeEldestEntry(java.util.Map.Entry<String, Boolean> eldest) {
+                    return size() > uploadedMemory;
+                }
+            });
+
+    /** How many segment names to remember. Set from the playlist window. */
+    private int uploadedMemory = 64;
 
     private final S3Client s3;
     private final String bucket;
@@ -42,11 +61,28 @@ public final class HlsPublisher {
     private final String label;
 
     private byte[] lastPlaylist;
+    /** Said once, not once a sweep, when falling back to our own segment list. */
+    private boolean synthesised;
+    /** Nominal segment length, used only when ffmpeg's durations are unavailable. */
+    private double segmentSeconds = 4.0;
     private final PlaylistBuilder playlist;
+
+    /**
+     * Where upload throughput is recorded, when anyone is listening.
+     *
+     * Measured here because this is the one place bytes actually leave the
+     * building. Timing the uploads the agent is already doing costs nothing and
+     * measures the connection under its real load, which a speed test run on an
+     * idle link does not.
+     */
+    private ResourceMonitor monitor;
 
     public HlsPublisher(S3Client s3, String bucket, String keyPrefix, Path directory, String label,
                         int windowSize) {
         this(s3, bucket, keyPrefix, directory, label, new PlaylistBuilder(windowSize));
+        // Several windows' worth: ffmpeg has already deleted anything older,
+        // so this only has to be long enough not to re-upload.
+        this.uploadedMemory = Math.max(32, windowSize * 8);
     }
 
     HlsPublisher(S3Client s3, String bucket, String keyPrefix, Path directory, String label,
@@ -58,6 +94,7 @@ public final class HlsPublisher {
         this.directory = directory;
         this.label = label;
     }
+
 
     /**
      * Signals that ffmpeg restarted, so the next segment carries a
@@ -128,19 +165,42 @@ public final class HlsPublisher {
      */
     private void uploadPlaylistIfChanged() throws IOException {
         Path source = directory.resolve(PLAYLIST);
-        if (!Files.isRegularFile(source)) {
-            return;
+        String reported = Files.isRegularFile(source) ? Files.readString(source) : "";
+
+        List<PlaylistBuilder.Segment> observed = reported.isBlank()
+                ? List.of() : PlaylistBuilder.parse(reported);
+
+        if (observed.isEmpty()) {
+            // ffmpeg's own playlist could not be used - it is not there yet, it
+            // is mid-rename, or it holds nothing we recognise. That used to end
+            // the method, which meant segments were uploaded and no playlist
+            // ever named them: the stream existed in the bucket and no player
+            // could find it, and nothing said so because returning quietly is
+            // not an error.
+            //
+            // The playlist is ours to write. ffmpeg owns the exact durations,
+            // so they are preferred when available, but their absence is no
+            // reason to publish nothing when the segments are sitting here.
+            observed = segmentsOnDisk();
+            if (!observed.isEmpty() && !synthesised) {
+                synthesised = true;
+                log.info("[{}] ffmpeg's playlist is unreadable ({}); "
+                        + "building one from the {} segment(s) already published",
+                        label,
+                        Files.isRegularFile(source) ? "present but unparsed" : "absent",
+                        observed.size());
+            }
         }
-        String reported = Files.readString(source);
-        if (reported.isBlank()) {
+
+        if (observed.isEmpty()) {
             return;
         }
 
-        String init = PlaylistBuilder.parseInit(reported);
+        String init = reported.isBlank() ? initOnDisk() : PlaylistBuilder.parseInit(reported);
         if (init != null) {
             playlist.setInitSegment(init);
         }
-        playlist.observe(PlaylistBuilder.parse(reported));
+        playlist.observe(observed);
         if (playlist.isEmpty()) {
             return;
         }
@@ -155,14 +215,74 @@ public final class HlsPublisher {
         lastPlaylist = content;
     }
 
+    /**
+     * The segments actually written, for when ffmpeg's playlist cannot be read.
+     *
+     * Names are zero-padded, so lexical order is chronological. The duration is
+     * the configured segment length: ffmpeg's real figure is better and is used
+     * whenever its playlist is available, but a playlist naming the right
+     * segments with a nominal duration plays, and no playlist does not.
+     */
+    private List<PlaylistBuilder.Segment> segmentsOnDisk() throws IOException {
+        if (!Files.isDirectory(directory)) {
+            return List.of();
+        }
+        try (Stream<Path> entries = Files.list(directory)) {
+            return entries
+                    .filter(Files::isRegularFile)
+                    .map(path -> path.getFileName().toString())
+                    .filter(name -> name.endsWith(".m4s"))
+                    .sorted()
+                    .map(name -> new PlaylistBuilder.Segment(name, segmentSeconds, false))
+                    .toList();
+        }
+    }
+
+    /** The init segment on disk, named by ffmpeg's own convention. */
+    private String initOnDisk() throws IOException {
+        if (!Files.isDirectory(directory)) {
+            return null;
+        }
+        try (Stream<Path> entries = Files.list(directory)) {
+            return entries
+                    .map(path -> path.getFileName().toString())
+                    .filter(name -> name.endsWith("_init.mp4"))
+                    .findFirst()
+                    .orElse(null);
+        }
+    }
+
+    /** The configured segment length, for a playlist built without ffmpeg's. */
+    public void segmentSeconds(double seconds) {
+        if (seconds > 0) {
+            this.segmentSeconds = seconds;
+        }
+    }
+
+    /** Attaches the meter that watches how well the uplink is keeping up. */
+    public void meter(ResourceMonitor monitor) {
+        this.monitor = monitor;
+    }
+
     private void put(String name, byte[] content, String contentType, String cacheControl) {
-        s3.putObject(
-                PutObjectRequest.builder()
-                        .bucket(bucket)
-                        .key(keyPrefix + name)
-                        .contentType(contentType)
-                        .cacheControl(cacheControl)
-                        .build(),
-                RequestBody.fromBytes(content));
+        long started = System.nanoTime();
+        try {
+            s3.putObject(
+                    PutObjectRequest.builder()
+                            .bucket(bucket)
+                            .key(keyPrefix + name)
+                            .contentType(contentType)
+                            .cacheControl(cacheControl)
+                            .build(),
+                    RequestBody.fromBytes(content));
+        } catch (RuntimeException e) {
+            if (monitor != null) {
+                monitor.recordUploadFailure();
+            }
+            throw e;
+        }
+        if (monitor != null) {
+            monitor.recordUpload(content.length, (System.nanoTime() - started) / 1_000_000);
+        }
     }
 }

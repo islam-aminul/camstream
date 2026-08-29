@@ -12,6 +12,12 @@ const THING = 'demo--site--box';
  * `visible` names the cameras actually on screen: demand follows what is being
  * shown, not the size of the estate.
  */
+/**
+ * Transcode demand is keyed "thingName/cameraId" — a bare camera id used to
+ * start an encode on every agent in the tenant that had a camera of that name.
+ */
+const at = (cameraId: string) => `${THING}/${cameraId}`;
+
 function viewer(sessionId: string, transcode: string[] = [], visible?: string[]) {
   const cameras = visible ?? ['one', 'two', 'three'];
   return {
@@ -19,7 +25,7 @@ function viewer(sessionId: string, transcode: string[] = [], visible?: string[])
     sessionId,
     visible: cameras.map((id) => `${THING}/${id}`),
     codecs: ['h264'],
-    transcode,
+    transcode: transcode.map(at),
     scope: [],
     expiresAt: LATER,
   };
@@ -126,8 +132,8 @@ describe('who gets the slot when more than one wants it', () => {
     sessionId,
     visible: ['aaa', 'zzz'].map((id) => `${THING}/${id}`),
     codecs: ['h264'],
-    transcode,
-    transcodeSince,
+    transcode: transcode.map(at),
+    transcodeSince: Object.fromEntries(Object.entries(transcodeSince).map(([k, v]) => [at(k), v])),
     scope: [],
     expiresAt: LATER,
   });

@@ -1,22 +1,40 @@
 /**
  * Registry key layout.
  *
- *   TENANT#<t>  PREMISES#<premisesId>           a physical site
- *   TENANT#<t>  ENROLLMENT#<token>              one-time agent enrollment token
- *   TENANT#<t>  DEVICE#<thingName>              an enrolled agent
- *   TENANT#<t>  LIVECAMERA#<thing>#<cameraId>   a camera an agent can publish
- *   TENANT#<t>  DISCOVERED#<identity>           a physical camera, as seen by any agent
- *   TENANT#<t>  CAMERA#<identity>               a camera an administrator approved
- *   TENANT#<t>  DEMAND#<sessionId>              what one viewer currently wants
- *   TENANT#<t>  CREDENTIAL#<thingName>#<scope>  ciphertext only this agent can open
- *   USER#<sub>  SESSION                         the account's single live session
+ *   REGISTRY                  CUSTOMER#<tenantId>              a customer
+ *   TENANT#<t>                PREMISES#<premisesId>            a physical site
+ *   TENANT#<t>                ENROLLMENT#<token>               one-time agent token
+ *   TENANT#<t>                HEALTH#<thingName>               last heartbeat
+ *   TENANT#<t>#PREMISES#<p>   DEVICE#<thingName>               an enrolled agent
+ *   TENANT#<t>#PREMISES#<p>   CAMERA#<identity>                an approved camera
+ *   TENANT#<t>#PREMISES#<p>   LIVECAMERA#<thing>#<cameraId>    a camera being published
+ *   TENANT#<t>#PREMISES#<p>   DISCOVERED#<identity>            a camera any agent can see
+ *   TENANT#<t>#PREMISES#<p>   CREDENTIAL#<thing>#<scope>       ciphertext for one agent
+ *   TENANT#<t>#PREMISES#<p>   DEMAND#<sessionId>               what one viewer wants
+ *   USER#<sub>                SESSION                          the single live session
+ *
+ * Premises is the partition for everything that scales with the estate, and
+ * that is the whole point. A single partition key gets about 3,000 reads a
+ * second regardless of what the table is provisioned for, and resolving what
+ * an agent should publish means reading every demand that mentions it — which,
+ * partitioned by tenant, meant reading the tenant. A hundred sites is a
+ * hundred partitions and about a hundredth of the work per call.
+ *
+ * Three things stay at tenant level on purpose. Premises and enrollment tokens
+ * are few and are read before a premises is known. Health is written by an IoT
+ * topic rule with no Lambda in the path, and that rule builds its key in SQL —
+ * it can cut the thing name at the first separator but not the second, because
+ * IoT SQL has no indexof that takes an offset. A thousand agents heartbeating
+ * once a minute is about seventeen writes a second, comfortably inside one
+ * partition, so the cheap rule survives and the console fetches health only
+ * for the agents on the page it is showing.
  *
  * Discovered cameras are keyed by the camera's own identity rather than by the
- * agent that found it. A premises large enough to need several agents will have
- * overlapping scan ranges, and the same camera seen twice must merge into one
- * record — otherwise it is approved twice, published twice, and billed twice.
+ * agent that found it. A premises large enough to need several agents will
+ * have overlapping scan ranges, and the same camera seen twice must merge into
+ * one record — otherwise it is approved twice, published twice, and billed
+ * twice.
  */
-
 export const key = {
   premises: (premisesId: string) => `PREMISES#${premisesId}`,
   enrollment: (token: string) => `ENROLLMENT#${token}`,
@@ -28,7 +46,36 @@ export const key = {
   demand: (sessionId: string) => `DEMAND#${sessionId}`,
   credential: (thingName: string, scope: string) => `CREDENTIAL#${thingName}#${scope}`,
   tenant: (tenantId: string) => `TENANT#${tenantId}`,
+  /**
+   * The partition holding everything that scales with the estate.
+   *
+   * Every camera, agent, sighting, credential and viewer demand for one site
+   * lives here, which is what keeps a watch call reading one premises rather
+   * than one customer.
+   */
+  site: (tenantId: string, premisesId: string) => `TENANT#${tenantId}#PREMISES#${premisesId}`,
+  /**
+   * The customer itself, under a registry-wide partition.
+   *
+   * A tenant used to exist only as a prefix on other people's keys — writing
+   * into `TENANT#acme` was what brought it into being, so a typo created a
+   * customer nobody could find, and nothing could enumerate them. This record
+   * makes a customer a thing that can be listed, named and refused.
+   */
+  customer: (tenantId: string) => `CUSTOMER#${tenantId}`,
 };
+
+/** Partition holding the customer list. One row per customer; there are few. */
+export const REGISTRY_PK = 'REGISTRY';
+
+export interface CustomerRecord {
+  pk: string;
+  sk: string;
+  tenantId: string;
+  displayName: string;
+  createdAt: number;
+  createdBy: string;
+}
 
 /** How one agent sees a camera. A camera may be reachable from several. */
 export interface Sighting {
@@ -131,6 +178,53 @@ export function slugFor(identity: string): string {
 export const DEFAULT_MAX_TRANSCODES = 1;
 
 /**
+ * The most an operator may ask one agent to convert at once.
+ *
+ * Not a capability, a guard rail. The agent's own resource ceiling is the real
+ * limit and applies underneath this one, so a machine that cannot manage two
+ * will not manage two whatever is typed here. This bound exists so a typed
+ * number is a plausible one - the difference between "this box has cores to
+ * spare" and a fat-fingered 300 that the console would then display as the
+ * agent's settled intent.
+ *
+ * The agent enforces the same bound when it validates its own configuration,
+ * and `transcode-bound.test.ts` fails if the two ever drift apart.
+ */
+export const MAX_CONCURRENT_TRANSCODES = 32;
+
+/**
+ * One page of items, and where to resume.
+ *
+ * The cursor is DynamoDB's own LastEvaluatedKey, base64-encoded so a caller
+ * cannot read meaning into it or hand back something we would then trust as a
+ * key. It is opaque on purpose: the shape of a page boundary is ours to change.
+ */
+export interface Page<T> {
+  items: T[];
+  cursor?: string;
+}
+
+export function encodeCursor(key: Record<string, unknown> | undefined): string | undefined {
+  return key ? Buffer.from(JSON.stringify(key), 'utf8').toString('base64url') : undefined;
+}
+
+/**
+ * Decodes a cursor, or returns undefined for anything that is not one.
+ *
+ * A malformed cursor starts the listing again rather than failing: a stale
+ * bookmark should show the first page, not an error page.
+ */
+export function decodeCursor(cursor: string | undefined): Record<string, unknown> | undefined {
+  if (!cursor) return undefined;
+  try {
+    const parsed = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'));
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Every item under one partition and sort-key prefix.
  *
  * DynamoDB caps a Query response at 1MB and hands back a cursor for the rest.
@@ -146,10 +240,19 @@ export async function queryAllPages<T>(
     KeyConditionExpression: string;
     ExpressionAttributeValues: Record<string, unknown>;
     ExclusiveStartKey?: Record<string, unknown>;
+    ProjectionExpression?: string;
   }) => Promise<{ Items?: Record<string, unknown>[]; LastEvaluatedKey?: Record<string, unknown> }>,
   table: string,
   pk: string,
   prefix: string,
+  /**
+   * Attributes to fetch, when the caller needs only some of them.
+   *
+   * A page is a megabyte of *returned* data, so narrowing what comes back
+   * narrows how many round trips a full read takes. It does not reduce the
+   * items read — this makes a large partition cheaper to walk, not cheap.
+   */
+  projection?: string,
 ): Promise<T[]> {
   const items: Record<string, unknown>[] = [];
   let cursor: Record<string, unknown> | undefined;
@@ -159,6 +262,7 @@ export async function queryAllPages<T>(
       KeyConditionExpression: 'pk = :pk AND begins_with(sk, :prefix)',
       ExpressionAttributeValues: { ':pk': pk, ':prefix': prefix },
       ExclusiveStartKey: cursor,
+      ...(projection ? { ProjectionExpression: projection } : {}),
     });
     items.push(...(page.Items ?? []));
     cursor = page.LastEvaluatedKey;

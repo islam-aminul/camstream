@@ -1,12 +1,13 @@
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, QueryCommand, PutCommand, GetCommand } from '@aws-sdk/lib-dynamodb';
+import { DynamoDBDocumentClient, QueryCommand, PutCommand, GetCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { IoTDataPlaneClient, PublishCommand } from '@aws-sdk/client-iot-data-plane';
 import type { APIGatewayProxyEventV2WithJWTAuthorizer, APIGatewayProxyStructuredResultV2 } from 'aws-lambda';
 import { isValidId, parseThingName, premisesScope, withinScope } from '../shared/tenant';
 import { fail, json } from '../shared/http';
+import { identify, targetTenant } from '../shared/roles';
 import { readSession, sessionSuperseded } from '../shared/session';
 import { canDecode } from '../shared/playability';
-import { DEFAULT_MAX_TRANSCODES, queryAllPages } from '../shared/registry';
+import { DEFAULT_MAX_TRANSCODES, key, queryAllPages } from '../shared/registry';
 
 const TABLE = process.env.REGISTRY_TABLE!;
 const IOT_ENDPOINT = process.env.IOT_DATA_ENDPOINT!;
@@ -16,6 +17,26 @@ const IOT_ENDPOINT = process.env.IOT_DATA_ENDPOINT!;
  * inside this, so closing a tab stops the stream within a minute.
  */
 const DEMAND_TTL_SECONDS = 60;
+
+/**
+ * How long an unchanged desired state may go unrepeated.
+ *
+ * Publishing only on change is what makes the fan-out affordable, but silence
+ * is also how an agent decides everyone has left: it stops every rendition
+ * once no instruction has arrived for `idleShutdownSeconds`. So this is not
+ * merely a bound on how stale a dropped message may leave someone - it is the
+ * heartbeat the agent is listening for, and it has to beat faster than that
+ * window or a working stream stops itself mid-view. It did: at 300 against a
+ * 30-second window every stream died half a minute in and flickered back once
+ * every five minutes, which is indistinguishable from a stream that never
+ * worked.
+ *
+ * The expensive thing was never the cadence, it was multiplying it by viewers.
+ * This resends per agent that has demand, whether one person is watching or
+ * fifty, so the fan-out stays flat. `watch-cadence.test.ts` holds the
+ * relationship to the agent's window.
+ */
+const WATCH_RESEND_SECONDS = 45;
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const iot = new IoTDataPlaneClient({ endpoint: `https://${IOT_ENDPOINT}` });
@@ -58,6 +79,15 @@ interface DemandRecord {
   /** Premises this viewer may drive. Empty means the whole tenant. */
   scope?: string[];
   expiresAt: number;
+}
+
+interface DeviceRecord {
+  thingName: string;
+  maxConcurrentTranscodes?: number;
+  /** Digest of the last desired state actually published to this agent. */
+  watchDigest?: string;
+  /** When an unchanged state should be repeated anyway. */
+  watchResendAfter?: number;
 }
 
 interface CameraRecord {
@@ -111,15 +141,16 @@ export async function handler(
   event: APIGatewayProxyEventV2WithJWTAuthorizer,
 ): Promise<APIGatewayProxyStructuredResultV2> {
   const claims = event.requestContext.authorizer?.jwt?.claims ?? {};
-  const tenantId = claims['custom:tenantId'];
   const userSub = claims.sub;
 
-  if (typeof userSub !== 'string' || !isValidId(tenantId)) {
-    return fail(403, 'Account is not associated with a valid tenant');
+  if (typeof userSub !== 'string') {
+    return fail(403, 'Token carries no subject');
   }
 
   let body: {
     sessionId?: unknown;
+    tenantId?: unknown;
+    premisesId?: unknown;
     visible?: unknown;
     main?: unknown;
     codecs?: unknown;
@@ -136,6 +167,31 @@ export async function handler(
   if (typeof body.sessionId !== 'string') {
     return fail(400, 'Body must include sessionId');
   }
+  // A viewer watches one site at a time — that is a product decision, and it is
+  // what makes this call read one partition instead of the whole customer.
+  // Resolving what an agent should publish needs every demand that mentions it;
+  // partitioned by tenant that meant reading the tenant, some 11,500 items a
+  // call at the size this is sold for, against a per-partition ceiling of about
+  // 3,000 reads a second.
+  if (!isValidId(body.premisesId)) {
+    return fail(400, 'Body must include the premisesId being watched');
+  }
+  const premisesId = body.premisesId;
+
+  // Whose cameras these are. The platform operator selects a customer in the
+  // console, and reading their own tenant instead wrote the demand into an
+  // empty partition and resolved a desired state from nothing: the agent was
+  // never asked to publish, and every tile sat waiting for an acknowledgement
+  // that was being filed under the wrong customer.
+  const caller = identify(event);
+  const tenantId = caller ? targetTenant(caller, body.tenantId) : null;
+  if (!tenantId) {
+    return fail(403, 'Not permitted to act on that tenant');
+  }
+  if (!withinScope(`${tenantId}--${premisesId}--x`, premisesScope(claims as Record<string, unknown>))) {
+    return fail(403, 'That premises is not within your permitted sites');
+  }
+  const sitePk = key.site(tenantId, premisesId);
   const current = await readSession(ddb, TABLE, userSub);
   if (!current || current.sessionId !== body.sessionId
       || await sessionSuperseded(ddb, TABLE, userSub, claims as Record<string, unknown>)) {
@@ -159,8 +215,24 @@ export async function handler(
   const codecs = Array.isArray(body.codecs)
     ? body.codecs.filter((c: unknown): c is string => typeof c === 'string' && /^[a-z0-9]{1,12}$/i.test(c)).slice(0, 8)
     : [];
+  // Keyed "thingName/cameraId", like `visible`. Keyed by cameraId alone, a
+  // viewer asking to transcode their own cam-01 started an encode on every
+  // agent in the tenant that happened to have a camera of that name — burning
+  // a scarce slot, and the operator's CPU, at a site nobody had asked about.
+  // Bare ids are still accepted and scoped to what the viewer can see, so an
+  // older player keeps working.
   const transcode = Array.isArray(body.transcode)
-    ? body.transcode.filter((c: unknown): c is string => isValidId(c)).slice(0, 32)
+    ? body.transcode
+        .filter((c: unknown): c is string => typeof c === 'string' && c.length <= 160)
+        .flatMap((entry: string) => {
+          if (entry.includes('/')) {
+            const slash = entry.indexOf('/');
+            return parseThingName(entry.slice(0, slash)) && isValidId(entry.slice(slash + 1))
+              ? [entry] : [];
+          }
+          return isValidId(entry) ? visible.map((v) => `${v.slice(0, v.indexOf('/'))}/${entry}`) : [];
+        })
+        .slice(0, 32)
     : [];
 
   // At most one full-resolution stream per viewer — this is the cap that keeps
@@ -192,20 +264,20 @@ export async function handler(
   // to the back of the queue, and a second request must not evict the first.
   const previous = await ddb.send(new GetCommand({
     TableName: TABLE,
-    Key: { pk: `TENANT#${tenantId}`, sk: `DEMAND#${body.sessionId}` },
+    Key: { pk: sitePk, sk: key.demand(body.sessionId) },
   }));
   const wasRequestedAt = (previous.Item?.transcodeSince ?? {}) as Record<string, number>;
   const transcodeSince: Record<string, number> = {};
-  for (const cameraId of transcode) {
-    transcodeSince[cameraId] = wasRequestedAt[cameraId] ?? now;
+  for (const entry of transcode) {
+    transcodeSince[entry] = wasRequestedAt[entry] ?? now;
   }
 
   await ddb.send(
     new PutCommand({
       TableName: TABLE,
       Item: {
-        pk: `TENANT#${tenantId}`,
-        sk: `DEMAND#${body.sessionId}`,
+        pk: sitePk,
+        sk: key.demand(body.sessionId),
         sessionId: body.sessionId,
         visible,
         mainThingName,
@@ -220,30 +292,59 @@ export async function handler(
   );
 
   const [demands, devices, cameras] = await Promise.all([
-    queryPrefix<DemandRecord>(tenantId, 'DEMAND#'),
-    queryPrefix<{ thingName: string; maxConcurrentTranscodes?: number }>(tenantId, 'DEVICE#'),
-    queryPrefix<CameraRecord>(tenantId, 'LIVECAMERA#'),
+    queryPrefix<DemandRecord>(sitePk, 'DEMAND#'),
+    queryPrefix<DeviceRecord>(sitePk, 'DEVICE#'),
+    queryPrefix<CameraRecord>(sitePk, 'LIVECAMERA#'),
   ]);
+  const digestOf = new Map(devices.map((d) => [d.thingName, d.watchDigest]));
+  const resendDueAt = new Map(devices.map((d) => [d.thingName, d.watchResendAfter ?? 0]));
 
   const desired = resolveDesiredState(now, demands, devices, cameras);
 
-  // Every known device is told its full desired state, including an empty one,
-  // so an agent whose last viewer left learns to stop rather than time out.
-  await Promise.all(
-    desired.map((state) =>
-      iot.send(
-        new PublishCommand({
-          topic: `camstream/${state.thingName}/watch`,
-          qos: 1,
-          payload: Buffer.from(JSON.stringify({ renditions: state.renditions, issuedAt: now })),
-        }),
-      ),
-    ),
-  );
+  // Every agent is told its full desired state, including an empty one, so one
+  // whose last viewer left learns to stop rather than time out — but only when
+  // that state has actually changed.
+  //
+  // This used to publish to every agent in the tenant on every keepalive. The
+  // player re-posts every 25 seconds per viewer, so the cost was
+  // agents x viewers x 2.4 a minute, almost all of it telling agents nothing
+  // had happened. A hundred-agent tenant with twenty viewers was some 4,800
+  // messages a minute to say so.
+  //
+  // The digest lives on the device record, so a resend also happens whenever
+  // the record is rewritten — and `resendAfter` bounds how long a dropped
+  // message can leave an agent out of step.
+  const publishes = desired.map(async (state) => {
+    const digest = JSON.stringify(state.renditions);
+    const previousDigest = digestOf.get(state.thingName);
+    const dueAt = resendDueAt.get(state.thingName) ?? 0;
+    if (digest === previousDigest && now < dueAt) {
+      return;
+    }
+    await iot.send(
+      new PublishCommand({
+        topic: `camstream/${state.thingName}/watch`,
+        qos: 1,
+        payload: Buffer.from(JSON.stringify({ renditions: state.renditions, issuedAt: now })),
+      }),
+    );
+    await ddb.send(new UpdateCommand({
+      TableName: TABLE,
+      Key: { pk: sitePk, sk: key.device(state.thingName) },
+      UpdateExpression: 'SET watchDigest = :digest, watchResendAfter = :due',
+      ExpressionAttributeValues: { ':digest': digest, ':due': now + WATCH_RESEND_SECONDS },
+    }));
+  });
+  await Promise.all(publishes);
 
   return json(200, {
     keepaliveInSeconds: Math.floor(DEMAND_TTL_SECONDS / 2),
-    desired,
+    // Scoped like every other listing. The full set above drives the agents,
+    // but returning it verbatim told a viewer restricted to one site the thing
+    // name of every agent in the tenant — which encodes the premises — along
+    // with the cameras other viewers had open there. A restriction that
+    // blocked viewing would otherwise still leak the shape of the estate.
+    desired: desired.filter((state) => withinScope(state.thingName, scope)),
   });
 }
 
@@ -258,7 +359,7 @@ export async function handler(
 export function resolveDesiredState(
   now: number,
   demands: DemandRecord[],
-  devices: { thingName: string; maxConcurrentTranscodes?: number }[],
+  devices: DeviceRecord[],
   cameras: CameraRecord[],
 ): DesiredState[] {
   const live = demands.filter((d) => d.expiresAt > now);
@@ -293,7 +394,7 @@ export function resolveDesiredState(
     const variant = variantFor(
       codecByCamera.get(`${thingName}/${cameraId}`),
       viewerCodecs,
-      transcodeRequested.includes(cameraId),
+      transcodeRequested.includes(`${thingName}/${cameraId}`),
     );
     if (variant === null) {
       return;
@@ -304,10 +405,10 @@ export function resolveDesiredState(
   for (const demand of live) {
     const viewerCodecs = demand.codecs ?? [];
     const transcodeRequested = demand.transcode ?? [];
-    for (const [cameraId, at] of Object.entries(demand.transcodeSince ?? {})) {
-      const existing = requestedAt.get(cameraId);
+    for (const [entry, at] of Object.entries(demand.transcodeSince ?? {})) {
+      const existing = requestedAt.get(entry);
       if (existing === undefined || at < existing) {
-        requestedAt.set(cameraId, at);
+        requestedAt.set(entry, at);
       }
     }
     for (const entry of demand.visible ?? []) {
@@ -372,9 +473,10 @@ function applyTranscodeCap(
   // later request evict a transcode somebody was already watching — and, with
   // two viewers, let one silently take the other's stream away. Ties fall back
   // to the name so the choice is at least stable between calls.
+  const queuedAt = (r: { cameraId: string }) => requestedAt.get(`${thingName}/${r.cameraId}`) ?? Infinity;
   const contenders = renditions
     .filter((r) => r.variant === 'h264')
-    .sort((a, b) => (requestedAt.get(a.cameraId) ?? Infinity) - (requestedAt.get(b.cameraId) ?? Infinity)
+    .sort((a, b) => queuedAt(a) - queuedAt(b)
       || a.cameraId.localeCompare(b.cameraId)
       || a.profile.localeCompare(b.profile));
   const granted = new Set(contenders.slice(0, Math.max(0, cap))
@@ -397,8 +499,7 @@ function applyTranscodeCap(
     : { thingName, renditions: kept };
 }
 
-function queryPrefix<T>(tenantId: string, prefix: string): Promise<T[]> {
+function queryPrefix<T>(pk: string, prefix: string): Promise<T[]> {
   return queryAllPages<T>(
-    (input) => ddb.send(new QueryCommand(input)),
-    TABLE, `TENANT#${tenantId}`, prefix);
+    (input) => ddb.send(new QueryCommand(input)), TABLE, pk, prefix);
 }

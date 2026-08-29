@@ -17,10 +17,25 @@ export interface StorageProps {
 export class Storage extends Construct {
   public readonly liveBucket: s3.Bucket;
   public readonly webBucket: s3.Bucket;
+  public readonly accessLogBucket: s3.Bucket;
 
   constructor(scope: Construct, id: string, props: StorageProps) {
     super(scope, id);
     const { config } = props;
+
+    // Server access logs for both buckets. Nothing recorded who read a segment
+    // or a page, which is the other half of the question a CCTV customer
+    // eventually asks — CloudFront says who asked for it, this says what was
+    // actually served. Expired on a schedule so an audit trail does not become
+    // a storage bill.
+    this.accessLogBucket = new s3.Bucket(this, 'AccessLogs', {
+      bucketName: `camstream-access-logs-${config.account}`,
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      encryption: s3.BucketEncryption.S3_MANAGED,
+      enforceSSL: true,
+      lifecycleRules: [{ id: 'expire-access-logs', enabled: true, expiration: Duration.days(90) }],
+      removalPolicy: RemovalPolicy.RETAIN,
+    });
 
     this.liveBucket = new s3.Bucket(this, 'LiveBucket', {
       bucketName: `camstream-live-${config.account}`,
@@ -29,6 +44,8 @@ export class Storage extends Construct {
       enforceSSL: true,
       removalPolicy: RemovalPolicy.DESTROY,
       autoDeleteObjects: true,
+      serverAccessLogsBucket: this.accessLogBucket,
+      serverAccessLogsPrefix: 'live/',
       lifecycleRules: [
         {
           id: 'expire-live-segments',
@@ -49,6 +66,8 @@ export class Storage extends Construct {
       enforceSSL: true,
       removalPolicy: RemovalPolicy.DESTROY,
       autoDeleteObjects: true,
+      serverAccessLogsBucket: this.accessLogBucket,
+      serverAccessLogsPrefix: 'web/',
     });
   }
 }

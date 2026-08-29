@@ -36,6 +36,46 @@ final class RtspProbe {
     record Result(String codec, Integer width, Integer height, Integer fps,
                   String profile, Integer level) {}
 
+    /**
+     * What an attempt learned, which is more than whether it worked.
+     *
+     * A path that does not exist and a path that exists but refused the
+     * password are both "no stream", and treating them alike is what made
+     * credential retry guesswork: trying a second password against a camera
+     * that simply has no such path wastes a probe per path per credential,
+     * and giving up after one password on a camera that answered 401 misses
+     * the camera entirely.
+     */
+    record Outcome(Result stream, boolean unauthorized) {
+        static final Outcome NOTHING = new Outcome(null, false);
+        static final Outcome DENIED = new Outcome(null, true);
+
+        static Outcome found(Result stream) {
+            return new Outcome(stream, false);
+        }
+
+        boolean ok() {
+            return stream != null;
+        }
+    }
+
+    /**
+     * Whether ffmpeg's diagnostics describe a refused password.
+     *
+     * ffmpeg words this differently depending on which method was rejected and
+     * which auth scheme the camera offered, so this matches the parts that do
+     * not vary: the status code, and the phrase used when a Digest exchange is
+     * rejected outright.
+     */
+    static boolean looksUnauthorized(String diagnostics) {
+        if (diagnostics == null) {
+            return false;
+        }
+        String text = diagnostics.toLowerCase();
+        return text.contains("401") || text.contains("unauthorized")
+                || text.contains("authorization failed");
+    }
+
     private final String ffprobePath;
 
     RtspProbe(String ffprobePath) {
@@ -44,6 +84,11 @@ final class RtspProbe {
 
     /** Returns null when the stream could not be opened or carries no video. */
     Result probe(String rtspUrl, String transport) {
+        return attempt(rtspUrl, transport).stream();
+    }
+
+    /** Probes, and reports whether a failure was the camera refusing the password. */
+    Outcome attempt(String rtspUrl, String transport) {
         List<String> command = List.of(
                 ffprobePath,
                 "-v", "error",
@@ -58,19 +103,33 @@ final class RtspProbe {
             ProcessBuilder builder = new ProcessBuilder(command);
             builder.redirectErrorStream(false);
             Process process = builder.start();
+            // Both pipes are drained, and stderr is drained on its own thread:
+            // ffmpeg writes its refusals there, and a full pipe would deadlock
+            // a process nobody is reading from.
+            StringBuilder diagnostics = new StringBuilder();
+            Thread errors = Thread.ofVirtual().start(() -> {
+                try {
+                    diagnostics.append(new String(drain(process.getErrorStream()),
+                            java.nio.charset.StandardCharsets.UTF_8));
+                } catch (Exception ignored) {
+                    // Nothing useful to say about a failure to read a failure.
+                }
+            });
             byte[] stdout = drain(process.getInputStream());
             if (!process.waitFor(TIMEOUT_SECONDS + 5, TimeUnit.SECONDS)) {
                 process.destroyForcibly();
-                return null;
+                errors.join(java.time.Duration.ofSeconds(2));
+                return Outcome.NOTHING;
             }
+            errors.join(java.time.Duration.ofSeconds(2));
             if (process.exitValue() != 0) {
-                return null;
+                return looksUnauthorized(diagnostics.toString()) ? Outcome.DENIED : Outcome.NOTHING;
             }
             JsonNode stream = MAPPER.readTree(stdout).path("streams").path(0);
             if (stream.isMissingNode() || stream.path("codec_name").isMissingNode()) {
-                return null;
+                return Outcome.NOTHING;
             }
-            return new Result(
+            return Outcome.found(new Result(
                     stream.path("codec_name").asText(null),
                     stream.hasNonNull("width") ? stream.get("width").asInt() : null,
                     stream.hasNonNull("height") ? stream.get("height").asInt() : null,
@@ -78,13 +137,13 @@ final class RtspProbe {
                     stream.hasNonNull("profile") ? stream.get("profile").asText() : null,
                     // ffprobe reports -99 when the level is unknown.
                     stream.hasNonNull("level") && stream.get("level").asInt() > 0
-                            ? stream.get("level").asInt() : null);
+                            ? stream.get("level").asInt() : null));
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            return null;
+            return Outcome.NOTHING;
         } catch (Exception e) {
             log.debug("ffprobe failed for a stream on this camera: {}", e.toString());
-            return null;
+            return Outcome.NOTHING;
         }
     }
 

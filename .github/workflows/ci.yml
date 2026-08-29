@@ -227,7 +227,104 @@ jobs:
         working-directory: web
         run: |
           npm ci --no-fund --no-audit
+          # The repo carries an oxlint config that nothing ran, so the lint
+          # rules were advisory at best.
+          npm run lint
           npm run build
+
+      # Dependencies were installed with --no-audit and never checked anywhere
+      # else either, so a known-vulnerable transitive dependency would have
+      # arrived silently. Advisory rather than blocking: a high-severity
+      # finding in a dev-only tool should not stop a deploy at 2am, but nobody
+      # should have to go looking for it.
+      - name: Known vulnerabilities
+        continue-on-error: true
+        run: |
+          echo "--- infra ---"; (cd infra && npm audit --audit-level=high)
+          echo "--- web ---";   (cd web   && npm audit --audit-level=high)
+
+  windows-installer:
+    name: Windows installer
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      - name: Build the agent
+        working-directory: agent
+        run: mvn -B --no-transfer-progress package -DskipTests
+
+      # -AllowSystemTools resolves java and ffmpeg from PATH. The runner has
+      # java; it does not have ffmpeg, and the installer is quite right to
+      # refuse without it. The bundled-archive path — the normal route, and the
+      # one carrying the ARM64 JVM guard — is exercised by the Linux job.
+      - name: Install ffmpeg
+        run: choco install ffmpeg -y --no-progress --limit-output
+
+      # install.ps1 had never been executed by anything. It is the supported
+      # path for a platform the product explicitly ships to, and it carries the
+      # ARM64 JVM guard that is the difference between a clear refusal and an
+      # UnsatisfiedLinkError at first start.
+      # Windows PowerShell, not pwsh. They differ in ways that matter to this
+      # script: 5.1 wraps a native command's redirected stderr in ErrorRecords,
+      # so `java -version 2>&1` under `$ErrorActionPreference = 'Stop'` ends
+      # the install. Running this job on 7 meant the exact line an operator
+      # tripped over was green here every time. 5.1 is what ships with Windows
+      # and is what most operators will use, so it is what this must prove.
+      - name: Install as a scheduled task
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Force -Path dist-test | Out-Null
+          Copy-Item agent/target/camstream-agent.jar dist-test/
+          Copy-Item packaging/windows/install.ps1 dist-test/
+          Copy-Item packaging/windows/uninstall.ps1 dist-test/
+          Copy-Item packaging/agent.yaml.example dist-test/agent.yaml.example
+          @'
+          tenantId: ci-tenant
+          premisesId: ci-site
+          deviceId: ci-agent
+          region: ap-south-1
+          bucket: example-bucket
+          apiInvokeUrl: https://example.invalid
+          iotDataEndpoint: example.invalid
+          iotCredentialsEndpoint: example.invalid
+          certificatePath: C:/ProgramData/CamStream/device.crt
+          privateKeyPath: C:/ProgramData/CamStream/device.key
+          discoveryEnabled: false
+          cameras: []
+          '@ | Set-Content -Path dist-test/agent.yaml -Encoding utf8
+
+          ./dist-test/install.ps1 -ConfigPath ./dist-test/agent.yaml -UseScheduledTask -AllowSystemTools
+
+      - name: Verify what the installer produced
+        shell: pwsh
+        run: |
+          if (-not (Get-ScheduledTask -TaskName 'camstream-agent' -ErrorAction SilentlyContinue)) {
+            throw 'the scheduled task was not registered'
+          }
+          if (-not (Test-Path "$env:ProgramData\CamStream\agent.yaml")) {
+            throw 'the configuration was not installed'
+          }
+          # The config holds camera credentials, so its directory must not be
+          # readable by ordinary users.
+          $acl = Get-Acl "$env:ProgramData\CamStream"
+          $acl.Access | ForEach-Object { "$($_.IdentityReference) $($_.FileSystemRights)" }
+          if ($acl.Access | Where-Object { $_.IdentityReference -match 'Users|Everyone' }) {
+            throw 'the data directory is readable by ordinary users'
+          }
+
+      - name: Uninstall cleanly
+        shell: powershell
+        run: |
+          ./dist-test/uninstall.ps1 -Purge
+          if (Get-ScheduledTask -TaskName 'camstream-agent' -ErrorAction SilentlyContinue) {
+            throw 'the scheduled task survived uninstall'
+          }
 
   secrets:
     name: No secrets committed

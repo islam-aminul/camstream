@@ -3,6 +3,7 @@ package online.camstream.agent.control;
 import online.camstream.agent.config.AgentConfig;
 import online.camstream.agent.config.CameraConfig;
 import online.camstream.agent.media.FfmpegHls;
+import online.camstream.agent.health.ResourceMonitor;
 import online.camstream.agent.publish.HlsPublisher;
 import online.camstream.agent.publish.MasterPlaylist;
 import online.camstream.agent.supervise.Backoff;
@@ -111,7 +112,8 @@ public final class StreamManager implements AutoCloseable {
             start(rendition);
         }
 
-        Split split = withinCap(transcodes, runningTranscodes(), config.maxConcurrentTranscodes);
+        Split split = withinCap(transcodes, runningTranscodes(),
+                config.effectiveMaxConcurrentTranscodes());
         for (Rendition rendition : split.start()) {
             declined.remove(rendition);
             start(rendition);
@@ -119,7 +121,7 @@ public final class StreamManager implements AutoCloseable {
         for (Rendition rendition : split.refuse()) {
             if (declined.add(rendition)) {
                 log.warn("[{}] not transcoding: this agent allows {} at a time and they are all in use",
-                        rendition, config.maxConcurrentTranscodes);
+                        rendition, config.effectiveMaxConcurrentTranscodes());
             }
         }
         declined.retainAll(desired);
@@ -163,7 +165,14 @@ public final class StreamManager implements AutoCloseable {
         return camera != null && !camera.browserPlayable();
     }
 
-    private int runningTranscodes() {
+    /** Watches how well the uplink keeps up; attached before any stream starts. */
+    public void meter(ResourceMonitor monitor) {
+        this.monitor = monitor;
+    }
+
+    private ResourceMonitor monitor;
+
+    public int runningTranscodes() {
         return (int) active.keySet().stream().filter(this::needsEncoder).count();
     }
 
@@ -180,8 +189,18 @@ public final class StreamManager implements AutoCloseable {
     /**
      * Uploads whatever ffmpeg has produced, restarts anything that died, and
      * shuts everything down if the control plane has gone quiet.
+     *
+     * Synchronized on the same monitor as {@link #apply}, which it was not.
+     * ConcurrentHashMap makes each operation atomic and does nothing for the
+     * sequences: tick() would stop a dead rendition and be interrupted before
+     * recording its retry, apply() would find it in neither map and start it,
+     * and the retry would then start it a second time — replacing the map
+     * entry without closing the first ffmpeg. The orphan keeps its RTSP
+     * session, and a camera with a handful of slots then refuses everyone,
+     * including this agent when it restarts. That is the same failure the
+     * shutdown hook exists to prevent, reachable during normal operation.
      */
-    public void tick() {
+    public synchronized void tick() {
         if (Duration.between(lastInstruction, Instant.now()).getSeconds() > config.idleShutdownSeconds
                 && !active.isEmpty()) {
             log.info("no watch instruction for {}s — stopping all renditions", config.idleShutdownSeconds);
@@ -283,7 +302,16 @@ public final class StreamManager implements AutoCloseable {
                 publishedLadders.remove(cameraId);
             }
         }
-        publishedLadders.keySet().removeIf(cameraId -> !byCamera.containsKey(cameraId));
+        // A camera whose last rendition stopped never entered the loop above,
+        // so its master would otherwise survive every manifest it names —
+        // which is the state a returning viewer loads first.
+        for (String cameraId : Set.copyOf(publishedLadders.keySet())) {
+            if (!byCamera.containsKey(cameraId)) {
+                MasterPlaylist.remove(s3, config.bucket, config.keyPrefix() + cameraId + "/");
+                publishedLadders.remove(cameraId);
+                log.info("[{}] retired the ABR ladder", cameraId);
+            }
+        }
     }
 
     private void start(Rendition rendition) {
@@ -300,16 +328,42 @@ public final class StreamManager implements AutoCloseable {
             Path directory = Files.createDirectories(
                     workRoot.resolve(rendition.keySuffix().replace('/', java.io.File.separatorChar)));
             clean(directory);
+            // Clear the published manifest too, not just the local files.
+            // stop() retires a playlist on the way down, but an agent that was
+            // killed, crashed or lost power never runs it — and the playlist it
+            // leaves behind still resolves, because the segments it names live
+            // until the bucket's lifecycle rule expires them a day later. A
+            // viewer opening this camera then watches yesterday's footage
+            // believing it is live, which is the one failure worse than the
+            // stream not starting at all. The new pipeline republishes within a
+            // segment; until it does, a 404 is what the player already reads as
+            // "starting".
+            retirePlaylist(rendition);
 
             FfmpegHls ffmpeg = new FfmpegHls(config, camera, rendition, directory);
             HlsPublisher publisher = new HlsPublisher(
                     s3, config.bucket, config.keyPrefix() + rendition.keySuffix(), directory,
                     rendition.toString(), config.playlistWindow);
+            // Every publisher feeds the same meter, so the throughput figure is
+            // the whole agent's upload rather than one stream's.
+            if (monitor != null) {
+                publisher.meter(monitor);
+            }
+
+            // So a playlist built without ffmpeg's own still carries the right
+            // nominal duration rather than a guess.
+            publisher.segmentSeconds(config.segmentDurationMs / 1000.0);
 
             if (restartedRenditions.remove(rendition)) {
                 publisher.encoderRestarted();
             }
-            active.put(rendition, new Pipeline(ffmpeg, publisher, directory, Instant.now()));
+            // Belt and braces against the race above ever reappearing: a
+            // displaced pipeline is closed rather than leaked.
+            Pipeline displaced = active.put(rendition, new Pipeline(ffmpeg, publisher, directory, Instant.now()));
+            if (displaced != null) {
+                log.warn("[{}] a pipeline was already running — closing the previous one", rendition);
+                displaced.ffmpeg().close();
+            }
             retryAfter.remove(rendition);
             backoffs.computeIfAbsent(rendition, r -> new Backoff(MIN_BACKOFF, MAX_BACKOFF, HEALTHY_AFTER))
                     .started();
@@ -330,7 +384,7 @@ public final class StreamManager implements AutoCloseable {
     }
 
     /**
-     * Removes the playlist when a rendition stops.
+     * Removes a rendition's published playlist.
      *
      * The segments it names stay in the bucket until their lifecycle rule
      * expires them, and the playlist would otherwise go on describing them as
@@ -339,7 +393,13 @@ public final class StreamManager implements AutoCloseable {
      * stream looked like it was working, and was showing the wrong day.
      *
      * Deleting it means the manifest 404s until real segments exist, which the
-     * player already understands as "starting". One DELETE per stop.
+     * player already understands as "starting".
+     *
+     * Called on both edges, not just the way down. Doing it only in stop()
+     * left every playlist behind whenever the process did not shut down
+     * cleanly — a kill, a crash, a power cut at the site — and those are
+     * exactly the cases where nobody is watching to notice. One DELETE per
+     * start and one per stop is a rounding error against a segment per second.
      */
     private void retirePlaylist(Rendition rendition) {
         String key = config.keyPrefix() + rendition.keySuffix() + "index.m3u8";

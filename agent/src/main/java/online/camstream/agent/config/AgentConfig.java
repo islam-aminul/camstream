@@ -39,6 +39,17 @@ public final class AgentConfig {
     /** Where the device certificate, keys and working state live. */
     public String stateDir;
 
+    /**
+     * The jar this agent is running from, for replacing it on instruction.
+     *
+     * Normally discovered rather than configured: the JVM knows where it
+     * loaded the code from, and asking it is more reliable than asking an
+     * installer to write the path down correctly. The setting exists for the
+     * case the JVM cannot say - running from a directory of classes during
+     * development, where self-update is meaningless anyway.
+     */
+    public String agentJar;
+
     /** Friendly site label, reported on heartbeat. */
     public String siteName;
 
@@ -83,16 +94,37 @@ public final class AgentConfig {
      * the request bill. 2s lands around 5s of glass-to-glass latency; 4s halves
      * request cost for roughly double the delay.
      */
-    public int segmentDurationMs = 2000;
+    /**
+     * Segment length, and the largest cost lever in the system.
+     *
+     * Every segment interval writes two S3 objects: the segment, and the
+     * rewritten playlist that names it. HLS requires both, so the request bill
+     * scales inversely with this number while storage barely moves — at a few
+     * thousand concurrent cameras, requests are the bill and storage is a
+     * rounding error. Two seconds costs roughly twice what four does.
+     *
+     * Four is the chosen balance: about twelve seconds to the live edge, which
+     * keeps a viewer close enough to the present to be watching the event
+     * rather than its aftermath, at half the request cost of two.
+     */
+    public int segmentDurationMs = 4000;
 
     /** Segments kept in the live playlist window. */
     public int playlistWindow = 4;
 
     /**
-     * Stop publishing a rendition this long after the last viewer keepalive.
-     * Nothing is published — and nothing is billed — while no one is watching.
+     * Stop publishing a rendition after this long without a watch instruction.
+     * Nothing is published - and nothing is billed - while no one is watching.
+     *
+     * This is measured against the control plane's resend cadence, not against
+     * viewer keepalives, which the agent never sees. The control plane repeats
+     * an unchanged desired state every WATCH_RESEND_SECONDS; anything shorter
+     * than that here stops a stream somebody is actively watching. At 30
+     * against a 300-second resend, every stream stopped itself half a minute
+     * in. Keep several missed resends of headroom: a departing viewer costs
+     * this much trailing ffmpeg, a viewer still present costs nothing at all.
      */
-    public int idleShutdownSeconds = 30;
+    public int idleShutdownSeconds = 150;
 
     public String ffmpegPath = "ffmpeg";
     public String ffprobePath = "ffprobe";
@@ -146,7 +178,34 @@ public final class AgentConfig {
      * console; the control plane enforces the same number, so a viewer is told
      * their transcode is queued rather than watching it never start.
      */
-    public int maxConcurrentTranscodes = 1;
+    // Volatile: written by the MQTT worker when configuration arrives, read by
+    // the supervisor thread that decides what to start.
+    public volatile int maxConcurrentTranscodes = 1;
+
+    /**
+     * The most this may be set to, matching what the console will accept.
+     *
+     * The resource ceiling below is the real limit; this only keeps a typed
+     * number plausible. Kept in step with MAX_CONCURRENT_TRANSCODES in
+     * infra/lambda/shared/registry.ts by transcode-bound.test.ts.
+     */
+    public static final int MAX_CONCURRENT_TRANSCODES = 32;
+
+    /**
+     * A ceiling the agent has imposed on itself because the machine cannot
+     * carry more.
+     *
+     * Kept apart from the configured value rather than overwriting it, so a
+     * machine that recovers goes back to what it was told to do. Overwriting
+     * would make every dip permanent, and a cloud config push would be the only
+     * way to undo it.
+     */
+    public volatile int resourceCap = Integer.MAX_VALUE;
+
+    /** What the agent may actually run: what it was told, or what it can bear. */
+    public int effectiveMaxConcurrentTranscodes() {
+        return Math.min(maxConcurrentTranscodes, resourceCap);
+    }
 
     /**
      * Ceiling on addresses scanned per sweep. 0 means scan whatever the
@@ -208,7 +267,7 @@ public final class AgentConfig {
      */
     public static AgentConfig loadRaw(Path path) throws IOException {
         ObjectMapper mapper = new ObjectMapper(new YAMLFactory());
-        return mapper.readValue(Files.readString(path), AgentConfig.class);
+        return mapper.readValue(TextFiles.read(path), AgentConfig.class);
     }
 
     public String thingName() {
@@ -235,7 +294,11 @@ public final class AgentConfig {
 
     /** Resolves paths that default to sitting under the state directory. */
     public void resolveStatePaths() {
-        Path state = Path.of(stateDir == null || stateDir.isBlank() ? "." : stateDir);
+        // Normalised onto the field, not just used locally: callers read
+        // config.stateDir directly, and one of them handed a null straight to
+        // Path.of - a crash at start-up for any config that omitted it.
+        stateDir = stateDir == null || stateDir.isBlank() ? "." : stateDir;
+        Path state = Path.of(stateDir);
         certificatePath = orElse(certificatePath, state.resolve("device.crt").toString());
         privateKeyPath = orElse(privateKeyPath, state.resolve("device.key").toString());
         credentialKeyPath = orElse(credentialKeyPath, state.resolve("credential-key.pem").toString());
@@ -273,8 +336,9 @@ public final class AgentConfig {
         if (defaultRtspTransport == null || !defaultRtspTransport.matches("tcp|udp")) {
             throw new IllegalArgumentException("defaultRtspTransport must be \"tcp\" or \"udp\"");
         }
-        if (maxConcurrentTranscodes < 0 || maxConcurrentTranscodes > 64) {
-            throw new IllegalArgumentException("maxConcurrentTranscodes must be between 0 and 64");
+        if (maxConcurrentTranscodes < 0 || maxConcurrentTranscodes > MAX_CONCURRENT_TRANSCODES) {
+            throw new IllegalArgumentException(
+                    "maxConcurrentTranscodes must be between 0 and " + MAX_CONCURRENT_TRANSCODES);
         }
         if (heartbeatActiveMinutes < 1 || heartbeatActiveMinutes > 1440) {
             throw new IllegalArgumentException("heartbeatActiveMinutes must be between 1 and 1440");
@@ -317,6 +381,27 @@ public final class AgentConfig {
         require(field, value);
         if (!value.matches("[a-z0-9]+(-[a-z0-9]+)*") || value.contains("--") || value.length() < 3 || value.length() > 32) {
             throw new IllegalArgumentException(field + " must be 3-32 chars of [a-z0-9-] and must not contain '--'");
+        }
+    }
+
+    /**
+     * Where this agent's own program lives.
+     *
+     * Taken from the code source the JVM actually loaded, so an update
+     * replaces the jar that is running rather than one a configuration file
+     * claims is running.
+     */
+    public String agentJarPath() {
+        if (agentJar != null && !agentJar.isBlank()) {
+            return agentJar;
+        }
+        try {
+            java.net.URL location = AgentConfig.class.getProtectionDomain()
+                    .getCodeSource().getLocation();
+            return java.nio.file.Path.of(location.toURI()).toString();
+        } catch (Exception e) {
+            throw new IllegalStateException(
+                    "cannot tell where this agent is installed; set agentJar in the config", e);
         }
     }
 }

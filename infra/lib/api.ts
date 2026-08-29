@@ -38,6 +38,8 @@ export interface ApiProps {
  */
 export class Api extends Construct {
   public readonly httpApi: apigwv2.HttpApi;
+  /** Every function here, so the stack can alarm on each without repeating itself. */
+  public readonly functions: Record<string, lambda.IFunction> = {};
 
   constructor(scope: Construct, id: string, props: ApiProps) {
     super(scope, id);
@@ -49,7 +51,7 @@ export class Api extends Construct {
     const logGroupFor = (functionName: string) =>
       new logs.LogGroup(this, `${functionName}Logs`, {
         logGroupName: `/aws/lambda/${functionName}`,
-        retention: logs.RetentionDays.ONE_WEEK,
+        retention: logs.RetentionDays.ONE_MONTH,
         removalPolicy: RemovalPolicy.DESTROY,
       });
 
@@ -138,6 +140,11 @@ export class Api extends Construct {
     presenceFn.addPermission('IotRuleInvoke', {
       principal: new iam.ServicePrincipal('iot.amazonaws.com'),
       sourceAccount: stack.account,
+      // Pinned to the rule, not merely the account: any topic rule in the
+      // account could otherwise invoke this and write agent liveness.
+      sourceArn: stack.formatArn({
+        service: 'iot', resource: 'rule', resourceName: 'camstream_agent_presence',
+      }),
     });
 
     // Lifecycle events replace the heartbeat poll entirely: this is the actual
@@ -190,6 +197,14 @@ export class Api extends Construct {
           'topic(2) AS thingName,',
           'agentVersion, uptimeSeconds, publishing, camerasConfigured,',
           'healthy, failingTasks,',
+          // What the machine has left, and which part of it is binding. The
+          // 128-stream ceiling is a hard limit and never the real one: an
+          // agent runs out of processor, memory, disk or uplink long before
+          // it runs out of that, and an operator told "128 maximum" while
+          // video stutters at thirty has been told nothing useful.
+          'constraint, constraintMessage, maxConcurrentTranscodes,',
+          'cpuLoad, memoryUsedFraction, memoryFreeBytes, diskFreeBytes,',
+          'uploadBytesPerSecond, uploadMillisPerSegment,',
           'floor(timestamp() / 1000) AS heartbeatAt,',
           // Health is only ever read as "the latest"; a record nobody replaced
           // in three days describes an agent that is long gone.
@@ -272,6 +287,43 @@ export class Api extends Construct {
       createDefaultStage: true,
     });
 
+    // The stage inherited the account default of 10,000 requests a second, so
+    // every authenticated route was unmetered per caller — and two of them are
+    // expensive by design: /api/session does an SSM read and an RSA signature,
+    // /api/watch reads three key ranges and publishes MQTT. One careless or
+    // compromised viewer account was a cost lever against the customer's own
+    // bill, which is awkward for a product whose headline is that it only
+    // spends money while somebody is watching.
+    //
+    // Generous enough that a real player never meets it: a viewer makes a few
+    // calls a minute, and an estate's agents do not come through here at all.
+    const stage = this.httpApi.defaultStage?.node.defaultChild as apigwv2.CfnStage;
+    stage.defaultRouteSettings = {
+      throttlingRateLimit: 50,
+      throttlingBurstLimit: 100,
+      detailedMetricsEnabled: true,
+    };
+
+    const accessLogs = new logs.LogGroup(this, 'ApiAccessLogs', {
+      logGroupName: '/aws/apigateway/camstream-api',
+      retention: logs.RetentionDays.THREE_MONTHS,
+      removalPolicy: RemovalPolicy.DESTROY,
+    });
+    stage.accessLogSettings = {
+      destinationArn: accessLogs.logGroupArn,
+      // Enough to answer "who called what, when, and did it work".
+      format: JSON.stringify({
+        requestId: '$context.requestId',
+        at: '$context.requestTime',
+        method: '$context.httpMethod',
+        path: '$context.path',
+        status: '$context.status',
+        latencyMs: '$context.responseLatency',
+        principal: '$context.authorizer.claims.sub',
+        ip: '$context.identity.sourceIp',
+      }),
+    };
+
     const viewerAuth = new authorizers.HttpUserPoolAuthorizer('ViewerAuthorizer', userPool, {
       userPoolClients: [userPoolClient],
       identitySource: ['$request.header.Authorization'],
@@ -315,6 +367,24 @@ export class Api extends Construct {
       actions: ['iot:Publish'],
       resources: [stack.formatArn({ service: 'iot', resource: 'topic', resourceName: 'camstream/*' })],
     }));
+    // Retiring an agent: detach and delete its certificate, then the thing.
+    // Without this an enrolled device could never be decommissioned, and a
+    // premises that had ever held one could never be deleted either.
+    adminFn.addToRolePolicy(new iam.PolicyStatement({
+      actions: [
+        'iot:ListThingPrincipals',
+        'iot:DetachThingPrincipal',
+        'iot:ListAttachedPolicies',
+        'iot:DetachPolicy',
+        'iot:UpdateCertificate',
+        'iot:DeleteCertificate',
+        'iot:DeleteThing',
+      ],
+      resources: [
+        stack.formatArn({ service: 'iot', resource: 'thing', resourceName: '*' }),
+        stack.formatArn({ service: 'iot', resource: 'cert', resourceName: '*' }),
+      ],
+    }));
     // Presigning a download link needs read on the downloads prefix only.
     props.liveBucket.grantRead(adminFn, 'downloads/*');
     adminFn.addToRolePolicy(new iam.PolicyStatement({
@@ -330,10 +400,21 @@ export class Api extends Construct {
           'cognito-idp:ListUsers',
           'cognito-idp:AdminCreateUser',
           'cognito-idp:AdminDeleteUser',
+          // Needed to establish which tenant an account belongs to before
+          // acting on it — deleting one used to check the caller's role but
+          // never the target's tenant.
+          'cognito-idp:AdminGetUser',
+          // Changing a role means leaving the old group as well as joining the
+          // new one, and moving someone between sites rewrites an attribute.
+          'cognito-idp:AdminUpdateUserAttributes',
           'cognito-idp:AdminAddUserToGroup',
           'cognito-idp:AdminRemoveUserFromGroup',
           // Needed to report each user's role, which is group membership.
           'cognito-idp:AdminListGroupsForUser',
+          // Suspending an account rather than deleting it: the reversible
+          // option, and the one the console recommends before deletion.
+          'cognito-idp:AdminEnableUser',
+          'cognito-idp:AdminDisableUser',
         ],
         resources: [userPool.userPoolArn],
       }),
@@ -344,21 +425,32 @@ export class Api extends Construct {
     // group membership decides what that identity may do.
     for (const [method, routePath] of [
       [apigwv2.HttpMethod.GET, '/api/admin/me'],
+      [apigwv2.HttpMethod.GET, '/api/admin/customers'],
+      [apigwv2.HttpMethod.POST, '/api/admin/customers'],
       [apigwv2.HttpMethod.GET, '/api/admin/premises'],
       [apigwv2.HttpMethod.POST, '/api/admin/premises'],
       [apigwv2.HttpMethod.DELETE, '/api/admin/premises/{premisesId}'],
       [apigwv2.HttpMethod.GET, '/api/admin/agents'],
+      [apigwv2.HttpMethod.GET, '/api/admin/cameras'],
+      [apigwv2.HttpMethod.GET, '/api/admin/counts'],
+      [apigwv2.HttpMethod.GET, '/api/admin/search'],
       [apigwv2.HttpMethod.POST, '/api/admin/agents'],
       [apigwv2.HttpMethod.PATCH, '/api/admin/agents/{thingName}'],
+      [apigwv2.HttpMethod.DELETE, '/api/admin/agents/{thingName}'],
       [apigwv2.HttpMethod.GET, '/api/admin/agents/{thingName}/identity'],
       [apigwv2.HttpMethod.GET, '/api/admin/agents/{thingName}/installer'],
       [apigwv2.HttpMethod.POST, '/api/admin/scan'],
+      [apigwv2.HttpMethod.POST, '/api/admin/agents/{thingName}/update'],
       [apigwv2.HttpMethod.GET, '/api/admin/discovered'],
       [apigwv2.HttpMethod.POST, '/api/admin/cameras'],
+      [apigwv2.HttpMethod.PATCH, '/api/admin/cameras/{identity}'],
       [apigwv2.HttpMethod.DELETE, '/api/admin/cameras/{identity}'],
+      [apigwv2.HttpMethod.GET, '/api/admin/credentials'],
       [apigwv2.HttpMethod.POST, '/api/admin/credentials'],
+      [apigwv2.HttpMethod.DELETE, '/api/admin/credentials'],
       [apigwv2.HttpMethod.GET, '/api/admin/users'],
       [apigwv2.HttpMethod.POST, '/api/admin/users'],
+      [apigwv2.HttpMethod.PATCH, '/api/admin/users/{username}'],
       [apigwv2.HttpMethod.DELETE, '/api/admin/users/{username}'],
     ] as [apigwv2.HttpMethod, string][]) {
       this.httpApi.addRoutes({
@@ -390,6 +482,15 @@ export class Api extends Construct {
       methods: [apigwv2.HttpMethod.GET],
       authorizer: iamAuth,
       integration: deviceIntegration,
+    });
+
+    Object.assign(this.functions, {
+      Session: sessionFn,
+      Streams: streamsFn,
+      Device: deviceFn,
+      Presence: presenceFn,
+      Watch: watchFn,
+      Admin: adminFn,
     });
   }
 

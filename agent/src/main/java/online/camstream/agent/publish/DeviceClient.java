@@ -141,9 +141,11 @@ public final class DeviceClient {
                     envelopes.put(node.path("scope").asText("*"), ciphertext);
                 }
             }
-            if (!envelopes.isEmpty()) {
-                credentialStore.apply(envelope, envelopes);
-            }
+            // Unconditionally, including when the document carries none. This
+            // used to be guarded on the map being non-empty, so withdrawing
+            // the last credential left the agent still holding it — the one
+            // case where revocation most obviously had to work.
+            credentialStore.apply(envelope, envelopes);
 
             List<CameraRegistry.Approved> approved = new java.util.ArrayList<>();
             for (JsonNode node : root.path("approvedCameras")) {
@@ -249,6 +251,15 @@ public final class DeviceClient {
             }
             if (camera.macAddress != null && !camera.macAddress.isBlank()) {
                 node.put("macAddress", camera.macAddress);
+            }
+            // The grid shows the sub stream, so those are the dimensions the
+            // console means by "resolution". It read them from the record and
+            // they were never written, so the field was dead on both ends.
+            Integer width = camera.widthFor(StreamProfile.SUB);
+            Integer height = camera.heightFor(StreamProfile.SUB);
+            if (width != null && width > 0 && height != null && height > 0) {
+                node.put("width", width);
+                node.put("height", height);
             }
             ArrayNode profiles = node.putArray("profiles");
             for (StreamProfile profile : StreamProfile.values()) {

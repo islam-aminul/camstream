@@ -59,13 +59,23 @@ export async function sessionSuperseded(
   userSub: string,
   claims: Record<string, unknown> | undefined,
 ): Promise<boolean> {
-  const originJti = claims?.origin_jti;
-  if (typeof originJti !== 'string' || originJti.length === 0) {
-    return false;
-  }
   const current = await readSession(ddb, table, userSub);
+  // Absence of a record means the record's TTL passed, not that someone else
+  // signed in — so that case is allowed rather than inventing a second way to
+  // be locked out. A record that predates this check likewise has no stored
+  // identity to compare against.
   if (!current || !current.originJti) {
     return false;
+  }
+
+  const originJti = claims?.origin_jti;
+  // A token with no origin_jti, against a session that recorded one, is a
+  // token this check cannot vouch for. It used to be allowed, which meant any
+  // future token shape lacking the claim would silently disable single-session
+  // across the whole API rather than fail one request — the wrong default for
+  // a control whose job is to lock people out.
+  if (typeof originJti !== 'string' || originJti.length === 0) {
+    return true;
   }
   return current.originJti !== originJti;
 }

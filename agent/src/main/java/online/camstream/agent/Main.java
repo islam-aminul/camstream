@@ -24,6 +24,9 @@ import software.amazon.awssdk.services.s3.S3Client;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import online.camstream.agent.health.ResourceMonitor;
+import online.camstream.agent.update.Updater;
+import online.camstream.agent.health.Resources;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
@@ -118,6 +121,12 @@ public final class Main {
              StreamManager manager = new StreamManager(config, s3, registry);
              Supervisor supervisor = new Supervisor(3)) {
 
+            // Watches what the machine has left. The publisher feeds it upload
+            // timings, which is how the uplink gets measured under real load
+            // rather than by a speed test on an idle link.
+            ResourceMonitor resourceMonitor = new ResourceMonitor(Path.of(config.stateDir));
+            manager.meter(resourceMonitor);
+
             // The listener does not exist until its handlers do, and its
             // handlers need to reach it; this closes that loop.
             java.util.concurrent.atomic.AtomicReference<WatchListener> watch =
@@ -154,6 +163,34 @@ public final class Main {
                         public List<Supervisor.TaskHealth> taskHealth() {
                             return supervisor.health();
                         }
+
+                        /**
+                         * Sampled here, at the moment the heartbeat is sent, so
+                         * the reading describes the interval it is reporting on.
+                         *
+                         * The verdict is applied as well as reported: the cap it
+                         * returns becomes the agent's own limit, so a machine
+                         * that is out of headroom stops taking on conversions
+                         * rather than accepting them and stuttering.
+                         */
+                        @Override
+                        public Resources.Verdict resources() {
+                            lastSigns = resourceMonitor.sample();
+                            Resources.Verdict verdict = Resources.assess(
+                                    lastSigns,
+                                    config.maxConcurrentTranscodes,
+                                    manager.runningTranscodes(),
+                                    config.segmentDurationMs);
+                            config.resourceCap = verdict.maxConcurrentTranscodes();
+                            return verdict;
+                        }
+
+                        @Override
+                        public Resources.Snapshot vitalSigns() {
+                            return lastSigns;
+                        }
+
+                        private Resources.Snapshot lastSigns = Resources.Snapshot.unknown();
                     },
                     DeviceClient.version(),
                     Duration.ofMinutes(config.heartbeatActiveMinutes),
@@ -171,14 +208,26 @@ public final class Main {
                 }
 
                 @Override
-                public void onCommand(String action) {
-                    if ("scan".equals(action)) {
-                        log.info("scan requested by the control plane");
-                        discovery.scan();
-                        registry.refresh();
-                        device.report(true);
-                    } else {
-                        log.warn("ignoring unknown command \"{}\"", action);
+                public void onCommand(String action, com.fasterxml.jackson.databind.JsonNode command) {
+                    switch (action) {
+                        case "scan" -> {
+                            log.info("scan requested by the control plane");
+                            discovery.scan();
+                            registry.refresh();
+                            device.report(true);
+                        }
+                        case "update" -> {
+                            // Runs on the command worker, which is not the MQTT
+                            // event loop: a download of tens of megabytes must
+                            // not hold the connection open and silent long
+                            // enough to miss a keepalive.
+                            new Updater(Path.of(config.agentJarPath()), Path.of(config.stateDir))
+                                    .apply(DeviceClient.version(),
+                                            command.path("version").asText(null),
+                                            command.path("build").asText(null),
+                                            command.path("url").asText(null));
+                        }
+                        default -> log.warn("ignoring unknown command \"{}\"", action);
                     }
                 }
 
@@ -231,6 +280,13 @@ public final class Main {
                 CountDownLatch shutdown = new CountDownLatch(1);
                 Runtime.getRuntime().addShutdownHook(new Thread(() -> {
                     log.info("shutting down");
+                    // Before the manager, not after. The supervisor's threads
+                    // are daemons and keep running until the JVM exits, so the
+                    // 250ms publish task could be mid-tick during close() — or
+                    // worse, fire a retry and start a rendition after
+                    // stopAll() had already run, leaving exactly one orphaned
+                    // ffmpeg at the moment this hook exists to prevent that.
+                    supervisor.close();
                     // Stop the encoders here rather than leaving it to
                     // try-with-resources on the main thread: the JVM exits as
                     // soon as the hooks finish, and losing that race orphans

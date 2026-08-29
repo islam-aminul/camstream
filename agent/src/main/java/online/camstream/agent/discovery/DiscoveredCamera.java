@@ -99,6 +99,34 @@ public final class DiscoveredCamera {
         }
     }
 
+    /**
+     * A full copy, RTSP URLs and all — for use inside the agent only.
+     *
+     * Distinct from {@link #redacted()} on purpose: that one exists to cross
+     * the network and deliberately drops the stream URLs, because they carry
+     * the password in their userinfo. This one is for splitting a recorder
+     * into the cameras behind it, which needs those URLs to keep working.
+     */
+    public DiscoveredCamera copy() {
+        DiscoveredCamera copy = redacted();
+        copy.profiles.clear();
+        for (Map.Entry<String, DiscoveredProfile> entry : profiles.entrySet()) {
+            DiscoveredProfile source = entry.getValue();
+            DiscoveredProfile full = new DiscoveredProfile();
+            full.token = source.token;
+            full.name = source.name;
+            full.codec = source.codec;
+            full.codecProfile = source.codecProfile;
+            full.codecLevel = source.codecLevel;
+            full.width = source.width;
+            full.height = source.height;
+            full.fps = source.fps;
+            full.rtspUrl = source.rtspUrl;
+            copy.profiles.put(entry.getKey(), full);
+        }
+        return copy;
+    }
+
     /** A copy with every credential-bearing field removed, safe to send to the cloud. */
     public DiscoveredCamera redacted() {
         DiscoveredCamera copy = new DiscoveredCamera();

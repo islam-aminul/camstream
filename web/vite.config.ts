@@ -1,14 +1,15 @@
+import { fileURLToPath, URL } from 'node:url';
 import { defineConfig } from 'vite';
-import react from '@vitejs/plugin-react';
+import vue from '@vitejs/plugin-vue';
 
 export default defineConfig({
-  plugins: [react()],
+  plugins: [vue()],
 
   /**
    * amazon-cognito-identity-js is authored against Node globals — its SRP
    * implementation reaches for `global` and for Buffer. Vite targets the
    * browser and provides neither, so without these the bundle throws
-   * "global is not defined" before React ever mounts.
+   * "global is not defined" before the app ever mounts.
    */
   define: {
     global: 'globalThis',
@@ -16,6 +17,9 @@ export default defineConfig({
 
   resolve: {
     alias: {
+      // Declared here rather than left to the bundler's tsconfig-path support,
+      // which the test runner does not share.
+      '@': fileURLToPath(new URL('./src', import.meta.url)),
       // The SRP maths operates on Buffers; the browser shim is a real
       // implementation, not a stub.
       buffer: 'buffer/',
@@ -36,6 +40,7 @@ export default defineConfig({
           groups: [
             { name: 'cognito', test: /node_modules\/(amazon-cognito-identity-js|buffer|crypto-js)/ },
             { name: 'hls', test: /node_modules\/hls\.js/ },
+            { name: 'primevue', test: /node_modules\/(primevue|@primevue|primeicons)/ },
           ],
         },
       },

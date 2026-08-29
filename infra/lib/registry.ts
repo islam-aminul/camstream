@@ -5,12 +5,13 @@ import { Construct } from 'constructs';
 /**
  * Single-table registry of devices and the cameras they expose.
  *
- *   pk = TENANT#<tenantId>   sk = DEVICE#<thingName>            -> device record
- *   pk = TENANT#<tenantId>   sk = CAMERA#<thingName>#<cameraId> -> camera record
+ * The key layout lives in `lambda/shared/registry.ts`, which is where it is
+ * enforced; restating it here only produced a second version to drift.
  *
- * On-demand billing so an idle deployment bills nothing. Camera and device
- * records carry a TTL refreshed by agent heartbeats, so a device that goes away
- * disappears from the viewer's camera list on its own.
+ * On-demand billing so an idle deployment bills nothing. Health, live-camera
+ * and demand records carry a TTL, so what a departed device leaves behind
+ * expires on its own; premises, agents, approvals and credentials do not, and
+ * are the reason for the recovery settings below.
  */
 export class Registry extends Construct {
   public readonly table: dynamodb.Table;
@@ -24,8 +25,15 @@ export class Registry extends Construct {
       sortKey: { name: 'sk', type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       timeToLiveAttribute: 'expiresAt',
-      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: false },
-      removalPolicy: RemovalPolicy.DESTROY,
+      // This table is the estate: every premises, agent registration, camera
+      // approval and credential envelope. Nothing else holds a copy — the
+      // ciphertext here is the only stored form of a camera's password, since
+      // the design deliberately keeps no key that could re-derive it. Losing
+      // the table means re-entering every credential by hand, on site, which
+      // is too expensive an outcome to leave one `cdk destroy` away.
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      deletionProtection: true,
+      removalPolicy: RemovalPolicy.RETAIN,
     });
   }
 }

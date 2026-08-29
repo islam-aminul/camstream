@@ -80,55 +80,18 @@ public final class DiscoveryService implements CameraSource {
         return profile == null ? null : profile.rtspUrl;
     }
 
-    /** One full sweep. Safe to run on a timer; takes tens of seconds on a busy LAN. */
-    public List<DiscoveredCamera> scan() {
-        Map<String, DiscoveredCamera> found = new LinkedHashMap<>();
-
-        // Multicast first: it is fast, needs no credentials, and yields the
-        // exact ONVIF service URL rather than a guess.
-        for (Map.Entry<String, String> entry : WsDiscovery.probe().entrySet()) {
-            DiscoveredCamera camera = new DiscoveredCamera();
-            camera.ipAddress = entry.getKey();
-            camera.onvifServiceUrl = entry.getValue();
-            camera.lastSeen = System.currentTimeMillis();
-            found.put(camera.ipAddress, camera);
-        }
-
-        // Then sweep for anything that ignored it.
-        for (Map.Entry<String, PortScanner.OpenPorts> entry : PortScanner.scan(maxHosts, extraNetworks).entrySet()) {
-            PortScanner.OpenPorts open = entry.getValue();
-            DiscoveredCamera camera = found.computeIfAbsent(entry.getKey(), host -> {
-                DiscoveredCamera fresh = new DiscoveredCamera();
-                fresh.ipAddress = host;
-                fresh.lastSeen = System.currentTimeMillis();
-                return fresh;
-            });
-            camera.onvifPorts = open.onvif();
-            camera.rtspPorts = open.rtsp();
-            if (camera.onvifServiceUrl == null && !open.onvif().isEmpty()) {
-                // The conventional ONVIF path; confirmed or refuted by the call below.
-                camera.onvifServiceUrl = "http://" + camera.ipAddress + ":" + open.onvif().get(0) + "/onvif/device_service";
-            }
-        }
-
-        // The ARP cache is only populated for hosts we have just spoken to,
-        // which is why this runs after the sweep rather than before it.
-        Map<String, String> arp = MacResolver.arpTable();
-        for (DiscoveredCamera camera : found.values()) {
-            String mac = arp.get(camera.ipAddress);
-            if (mac == null) {
-                MacResolver.prime(camera.ipAddress);
-                mac = MacResolver.arpTable().get(camera.ipAddress);
-            }
-            camera.macAddress = mac;
-        }
-
-        // A MAC seen at more than one address is not a camera's MAC. ARP only
-        // holds on-link entries, so this normally cannot happen — but proxy ARP
-        // and some consumer routers answer for hosts behind them, and every
-        // camera on the far side then reports the router's address. Left alone
-        // that would fold a dozen cameras into one identity, so the value is
-        // dropped and identity falls through to the serial.
+    /**
+     * Turns raw sightings into publishable cameras and makes them visible.
+     *
+     * Called twice in a scan, and that is the point. WS-Discovery answers in
+     * about a second; the port sweep walks thousands of addresses and takes
+     * minutes. Publishing only at the end meant an agent that had already found
+     * a camera by multicast refused to stream it - "unknown camera" - until the
+     * sweep it did not need had finished. After a restart that window is longer
+     * than the sixty seconds a viewer's demand lives, so the camera never
+     * started at all.
+     */
+    private void resolveAndPublish(Map<String, DiscoveredCamera> found) {
         discardSharedMacs(found.values());
 
         for (DiscoveredCamera camera : found.values()) {
@@ -152,11 +115,122 @@ public final class DiscoveryService implements CameraSource {
         // all it knows at the time, but every consumer looks a camera up by the
         // identity assigned afterwards — an approved camera resolved to nothing
         // while these disagreed.
+        //
+        // A recorder becomes several entries here: it is one address holding
+        // eight or sixteen cameras, and an operator approves the cameras, not
+        // the box they are wired into.
         Map<String, DiscoveredCamera> byIdentity = new LinkedHashMap<>();
         for (DiscoveredCamera camera : found.values()) {
-            byIdentity.put(camera.id, camera);
+            List<DiscoveredCamera> channels = expandChannels(camera);
+            if (channels.isEmpty()) {
+                byIdentity.put(camera.id, camera);
+            } else {
+                for (DiscoveredCamera channel : channels) {
+                    byIdentity.put(channel.id, channel);
+                }
+            }
         }
+        byIdentity.values().removeIf(DiscoveryService::isNotACamera);
         lastScan = byIdentity;
+    }
+
+    /**
+     * Whether a device that answered the sweep is worth showing to an operator.
+     *
+     * A port scan finds whatever is listening, and on an ordinary network that
+     * includes the router, a printer, a NAS and the machine running this agent.
+     * They are not cameras, but they arrived through the same door as the
+     * cameras, so they were offered for approval alongside them - a list of
+     * candidates in which the first entry was the gateway.
+     *
+     * The test is the two things a camera must be able to do: answer ONVIF, or
+     * have an RTSP port open. Something that does neither cannot become a
+     * stream no matter which credential is tried, and UNSUPPORTED is set
+     * precisely when both have already been ruled out. A camera that merely
+     * refused its credentials is NEEDS_CREDENTIALS and is still offered, since
+     * that one is fixed by typing a password.
+     */
+    static boolean isNotACamera(DiscoveredCamera camera) {
+        if (camera.authState != DiscoveredCamera.AuthState.UNSUPPORTED) {
+            return false;
+        }
+        log.debug("ignoring {} - {}", camera.ipAddress,
+                camera.note == null ? "not a camera" : camera.note);
+        return true;
+    }
+
+    /**
+     * Fills in hardware addresses from the ARP cache.
+     *
+     * The cache only holds hosts recently spoken to, which is why this runs
+     * after a device has been contacted rather than before.
+     */
+    private static void primeHardwareAddresses(Collection<DiscoveredCamera> cameras) {
+        Map<String, String> arp = MacResolver.arpTable();
+        for (DiscoveredCamera camera : cameras) {
+            if (camera.macAddress != null && !camera.macAddress.isBlank()) {
+                continue;
+            }
+            String mac = arp.get(camera.ipAddress);
+            if (mac == null) {
+                MacResolver.prime(camera.ipAddress);
+                mac = MacResolver.arpTable().get(camera.ipAddress);
+            }
+            camera.macAddress = mac;
+        }
+    }
+
+    /** One full sweep. Safe to run on a timer; takes tens of seconds on a busy LAN. */
+    public List<DiscoveredCamera> scan() {
+        Map<String, DiscoveredCamera> found = new LinkedHashMap<>();
+
+        // Multicast first: it is fast, needs no credentials, and yields the
+        // exact ONVIF service URL rather than a guess.
+        for (Map.Entry<String, String> entry : WsDiscovery.probe().entrySet()) {
+            DiscoveredCamera camera = new DiscoveredCamera();
+            camera.ipAddress = entry.getKey();
+            camera.onvifServiceUrl = entry.getValue();
+            camera.lastSeen = System.currentTimeMillis();
+            found.put(camera.ipAddress, camera);
+        }
+
+        // Anything multicast found is worth publishing before the sweep starts.
+        // The sweep is minutes of work that this camera does not need, and an
+        // agent that has just restarted is refusing streams for every one of
+        // them.
+        if (!found.isEmpty()) {
+            primeHardwareAddresses(found.values());
+            resolveAndPublish(found);
+            log.info("{} device(s) answered multicast and are usable now; "
+                    + "sweeping for the rest", found.size());
+        }
+
+        // Then sweep for anything that ignored it.
+        for (Map.Entry<String, PortScanner.OpenPorts> entry : PortScanner.scan(maxHosts, extraNetworks).entrySet()) {
+            PortScanner.OpenPorts open = entry.getValue();
+            DiscoveredCamera camera = found.computeIfAbsent(entry.getKey(), host -> {
+                DiscoveredCamera fresh = new DiscoveredCamera();
+                fresh.ipAddress = host;
+                fresh.lastSeen = System.currentTimeMillis();
+                return fresh;
+            });
+            camera.onvifPorts = open.onvif();
+            camera.rtspPorts = open.rtsp();
+            if (camera.onvifServiceUrl == null && !open.onvif().isEmpty()) {
+                // The conventional ONVIF path; confirmed or refuted by the call below.
+                camera.onvifServiceUrl = "http://" + camera.ipAddress + ":" + open.onvif().get(0) + "/onvif/device_service";
+            }
+        }
+
+        primeHardwareAddresses(found.values());
+
+        // A MAC seen at more than one address is not a camera's MAC. ARP only
+        // holds on-link entries, so this normally cannot happen — but proxy ARP
+        // and some consumer routers answer for hosts behind them, and every
+        // camera on the far side then reports the router's address. Left alone
+        // that would fold a dozen cameras into one identity, so the value is
+        // dropped and identity falls through to the serial.
+        resolveAndPublish(found);
 
         long usable = found.values().stream()
                 .filter(c -> c.authState == DiscoveredCamera.AuthState.AUTHENTICATED).count();
@@ -285,6 +359,8 @@ public final class DiscoveryService implements CameraSource {
                 camera.authState = DiscoveredCamera.AuthState.AUTHENTICATED;
                 return;
             } catch (OnvifClient.AuthenticationFailed e) {
+                // Refused. The next credential is worth a try - that is the
+                // only reason to have more than one.
                 camera.authState = DiscoveredCamera.AuthState.NEEDS_CREDENTIALS;
             } catch (Exception e) {
                 log.debug("ONVIF interrogation of {} failed: {}", camera.ipAddress, e.toString());
@@ -292,6 +368,11 @@ public final class DiscoveryService implements CameraSource {
                     camera.authState = DiscoveredCamera.AuthState.UNSUPPORTED;
                     camera.note = e.getMessage();
                 }
+                // Not a refusal: the device is not answering ONVIF, is not
+                // reachable, or spoke something unintelligible. It will do the
+                // same for every other password on the list, so trying them
+                // costs a timeout each and tells us nothing new.
+                break;
             }
         }
 
@@ -300,6 +381,91 @@ public final class DiscoveryService implements CameraSource {
         if (camera.profiles.isEmpty()) {
             guessStreams(camera);
         }
+    }
+
+    /**
+     * Turns a recorder into the cameras behind it.
+     *
+     * An NVR is one address serving many channels, and every consumer of this
+     * — approval, assignment, the live grid — deals in cameras. Left as one
+     * entry, an operator could approve "the recorder" and get channel one.
+     *
+     * Only attempted where the vendor's numbering scheme is known and the
+     * device answered on more than one channel. A single-channel answer is an
+     * ordinary camera and is left exactly as it was, so nothing changes for
+     * the common case.
+     *
+     * @return one camera per live channel, or empty when this is not a recorder
+     */
+    private List<DiscoveredCamera> expandChannels(DiscoveredCamera camera) {
+        VendorDirectory.Vendor vendor = identifyVendor(camera);
+        if (vendor == null || !vendor.enumeratesChannels() || camera.rtspPorts.isEmpty()) {
+            return List.of();
+        }
+
+        List<Credential> usable = credentials.apply(camera.id);
+        if (usable.isEmpty()) {
+            return List.of();
+        }
+
+        int port = camera.rtspPorts.get(0);
+        Map<Integer, Map<String, DiscoveredCamera.DiscoveredProfile>> byChannel =
+                pathGuesser.walkChannels(camera.ipAddress, port, usable.get(0), vendor);
+
+        // One channel is a camera, not a recorder, and re-labelling it would
+        // change the identity of something already approved.
+        if (byChannel.size() < 2) {
+            return List.of();
+        }
+
+        List<DiscoveredCamera> cameras = new ArrayList<>();
+        for (Map.Entry<Integer, Map<String, DiscoveredCamera.DiscoveredProfile>> entry
+                : byChannel.entrySet()) {
+            DiscoveredCamera channel = camera.copy();
+            // Derived from the recorder's own identity, so it is as stable as
+            // the recorder is and survives a change of address.
+            channel.id = camera.id + "-ch" + entry.getKey();
+            channel.identityStable = camera.identityStable;
+            channel.alternateIds = List.of();
+            channel.profiles.clear();
+            channel.profiles.putAll(entry.getValue());
+            channel.model = (camera.model == null ? vendor.name() : camera.model)
+                    + " channel " + entry.getKey();
+            channel.authState = DiscoveredCamera.AuthState.AUTHENTICATED;
+            channel.note = "channel " + entry.getKey() + " of a recorder at " + camera.ipAddress;
+            cameras.add(channel);
+        }
+        log.info("{} is a recorder: {} channels became cameras", camera.ipAddress, cameras.size());
+        return cameras;
+    }
+
+    /**
+     * The manufacturer, from the hardware address or from what ONVIF said.
+     *
+     * The address is preferred: a device that answered ONVIF has usually named
+     * itself already, and the ones that need this most are the ones that
+     * answered nothing at all.
+     */
+    private static VendorDirectory.Vendor identifyVendor(DiscoveredCamera camera) {
+        VendorDirectory.Vendor vendor = VendorDirectory.forMac(camera.macAddress);
+        if (vendor == null) {
+            vendor = VendorDirectory.byName(camera.manufacturer);
+        }
+        if (camera.manufacturer == null || camera.manufacturer.isBlank()) {
+            // Give the operator a name to recognise in a list of numbers. The
+            // curated table knows a few vendors well; the IEEE registry knows
+            // who owns every assigned prefix, and a device that answered no
+            // ONVIF query has nothing else left to identify it. Without this
+            // the console showed "Unknown model" and the camera was approved
+            // under its own MAC address.
+            String name = vendor != null
+                    ? vendor.name() : VendorDirectory.registrantFor(camera.macAddress);
+            if (name != null && !name.isBlank()) {
+                camera.manufacturer = name;
+                log.debug("{} identified as {} from its hardware address", camera.ipAddress, name);
+            }
+        }
+        return vendor;
     }
 
     /** Last resort for cameras without a usable ONVIF media service. */
@@ -311,8 +477,14 @@ public final class DiscoveryService implements CameraSource {
             }
             return;
         }
-        Map<String, DiscoveredCamera.DiscoveredProfile> guessed =
-                pathGuesser.guess(camera.ipAddress, camera.rtspPorts, credentials.apply(camera.id));
+        // Who made it, from the three bytes the IEEE gave its maker. This is
+        // worth more than a label: the vendor's own paths go first, which turns
+        // a walk through two dozen candidates - each miss a timeout - into a
+        // walk through four.
+        VendorDirectory.Vendor vendor = identifyVendor(camera);
+
+        Map<String, DiscoveredCamera.DiscoveredProfile> guessed = pathGuesser.guess(
+                camera.ipAddress, camera.rtspPorts, credentials.apply(camera.id), vendor);
         if (guessed.isEmpty()) {
             camera.authState = DiscoveredCamera.AuthState.NEEDS_CREDENTIALS;
             camera.note = "RTSP port open but no known stream path responded";
@@ -361,7 +533,7 @@ public final class DiscoveryService implements CameraSource {
      * ONVIF returns a bare rtsp:// URL; ffmpeg needs the credentials inline.
      * This value stays on the agent — {@link DiscoveredCamera#redacted()} drops it.
      */
-    private static String withCredentials(String rtspUrl, Credential credential) {
+    static String withCredentials(String rtspUrl, Credential credential) {
         if (credential.username() == null || credential.username().isEmpty()) {
             return rtspUrl;
         }
@@ -370,8 +542,8 @@ public final class DiscoveryService implements CameraSource {
             if (uri.getUserInfo() != null) {
                 return rtspUrl;
             }
-            String encodedUser = java.net.URLEncoder.encode(credential.username(), java.nio.charset.StandardCharsets.UTF_8);
-            String encodedPass = java.net.URLEncoder.encode(credential.password(), java.nio.charset.StandardCharsets.UTF_8);
+            String encodedUser = percentEncode(credential.username());
+            String encodedPass = percentEncode(credential.password());
             return uri.getScheme() + "://" + encodedUser + ":" + encodedPass + "@"
                     + uri.getHost() + (uri.getPort() > 0 ? ":" + uri.getPort() : "")
                     + (uri.getRawPath() == null ? "" : uri.getRawPath())
@@ -379,5 +551,40 @@ public final class DiscoveryService implements CameraSource {
         } catch (Exception e) {
             return rtspUrl;
         }
+    }
+
+    /**
+     * Percent-encodes one userinfo component, per RFC 3986.
+     *
+     * Not URLEncoder, which this used to be. URLEncoder implements HTML form
+     * encoding, and its defining difference is that a space becomes '+' rather
+     * than %20 — so a password with a space in it reached the camera as a
+     * different password, and one containing '+' arrived as a space. The
+     * camera answered 401, which the agent reads as a refusal and backs off
+     * from for five minutes with "check the credentials". The credentials were
+     * correct; this was not.
+     *
+     * Everything outside the unreserved set is escaped. That is stricter than
+     * userinfo strictly requires, which costs nothing: a percent-encoded
+     * unreserved character is equivalent to the character itself, so
+     * over-escaping is always safe and under-escaping is not.
+     */
+    private static String percentEncode(String value) {
+        if (value == null) {
+            return "";
+        }
+        StringBuilder out = new StringBuilder(value.length() + 8);
+        for (byte raw : value.getBytes(java.nio.charset.StandardCharsets.UTF_8)) {
+            int c = raw & 0xFF;
+            boolean unreserved = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
+                    || c == '-' || c == '.' || c == '_' || c == '~';
+            if (unreserved) {
+                out.append((char) c);
+            } else {
+                out.append('%').append(Character.toUpperCase(Character.forDigit(c >> 4, 16)))
+                        .append(Character.toUpperCase(Character.forDigit(c & 0x0F, 16)));
+            }
+        }
+        return out.toString();
     }
 }

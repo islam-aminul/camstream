@@ -59,43 +59,86 @@ final class RtspPathGuesser {
     }
 
     /**
-     * Tries each path against each credential until streams are found.
+     * Tries the known paths, moving to the next credential only when the camera
+     * refused the one before it.
      *
-     * Stops at the first credential that yields anything: continuing would
-     * multiply attempts against a camera that may lock out on repeated auth
-     * failures, and a second credential is unlikely to expose more paths.
+     * The distinction is the whole point. A camera that answers 401 has the
+     * path and dislikes the password, so another password is worth trying. A
+     * camera that answers "no such path" will answer that to every password
+     * there is, and marching a site's whole credential list past it multiplies
+     * the scan by five for nothing - on devices that often lock an account out
+     * after a handful of failures.
      *
      * @return profiles keyed by a synthetic token, empty if nothing decoded
      */
     Map<String, DiscoveredCamera.DiscoveredProfile> guess(
             String host, List<Integer> rtspPorts, List<Credential> credentials) {
+        return guess(host, rtspPorts, credentials, null);
+    }
+
+    /**
+     * The same, with the manufacturer known.
+     *
+     * A vendor's own paths go first. The generic list is two dozen entries and
+     * every miss is a timeout, so knowing the maker turns a walk through all of
+     * them into a walk through four - and the ones tried first are the ones
+     * this device actually serves.
+     */
+    Map<String, DiscoveredCamera.DiscoveredProfile> guess(
+            String host, List<Integer> rtspPorts, List<Credential> credentials,
+            VendorDirectory.Vendor vendor) {
 
         List<Credential> toTry = new ArrayList<>(credentials);
         // Some cameras stream without authentication even when ONVIF requires it.
         toTry.add(new Credential("", ""));
 
+        List<String> ordered = orderFor(vendor);
         for (int port : rtspPorts) {
             for (Credential credential : toTry) {
-                Map<String, DiscoveredCamera.DiscoveredProfile> found =
-                        tryPaths(host, port, credential);
-                if (!found.isEmpty()) {
+                Attempt attempt = tryPaths(host, port, credential, ordered);
+                if (!attempt.found().isEmpty()) {
                     log.info("guessed {} stream(s) on {}:{} as \"{}\"",
-                            found.size(), host, port,
+                            attempt.found().size(), host, port,
                             credential.username().isEmpty() ? "<anonymous>" : credential.username());
-                    return found;
+                    return attempt.found();
+                }
+                if (!attempt.refused()) {
+                    // Nothing here refused us; it simply has none of these
+                    // paths. A different password cannot conjure one.
+                    break;
                 }
             }
         }
         return Map.of();
     }
 
-    private Map<String, DiscoveredCamera.DiscoveredProfile> tryPaths(
-            String host, int port, Credential credential) {
+    /** What one credential achieved against one port, and whether it was refused. */
+    private record Attempt(Map<String, DiscoveredCamera.DiscoveredProfile> found, boolean refused) {}
 
-        Map<String, DiscoveredCamera.DiscoveredProfile> found = new LinkedHashMap<>();
+    /** This vendor's paths first, then the rest, with no path tried twice. */
+    private List<String> orderFor(VendorDirectory.Vendor vendor) {
+        if (vendor == null || vendor.paths().isEmpty()) {
+            return paths;
+        }
+        List<String> ordered = new ArrayList<>(vendor.paths());
         for (String path : paths) {
+            if (!ordered.contains(path)) {
+                ordered.add(path);
+            }
+        }
+        return ordered;
+    }
+
+    private Attempt tryPaths(String host, int port, Credential credential, List<String> candidates) {
+        Map<String, DiscoveredCamera.DiscoveredProfile> found = new LinkedHashMap<>();
+        boolean refused = false;
+        for (String path : candidates) {
             String url = buildUrl(host, port, path, credential);
-            RtspProbe.Result result = probe.probe(url, transport);
+            RtspProbe.Outcome outcome = probe.attempt(url, transport);
+            if (outcome.unauthorized()) {
+                refused = true;
+            }
+            RtspProbe.Result result = outcome.stream();
             if (result == null || result.codec() == null) {
                 continue;
             }
@@ -114,7 +157,7 @@ final class RtspPathGuesser {
                 break;
             }
         }
-        return found;
+        return new Attempt(found, refused);
     }
 
     private static String buildUrl(String host, int port, String path, Credential credential) {
@@ -133,5 +176,72 @@ final class RtspPathGuesser {
 
     private static String encode(String value) {
         return java.net.URLEncoder.encode(value == null ? "" : value, java.nio.charset.StandardCharsets.UTF_8);
+    }
+
+    /**
+     * Walks a recorder's channels and returns the streams behind each one.
+     *
+     * Only attempted for a vendor whose numbering scheme is known: without one
+     * the paths would be invented and every probe a timeout. The walk stops
+     * after a run of empty channels rather than at the ceiling, because a
+     * recorder with an unused bay in the middle still has cameras after it.
+     *
+     * @return one entry per live channel, keyed by channel number
+     */
+    Map<Integer, Map<String, DiscoveredCamera.DiscoveredProfile>> walkChannels(
+            String host, int port, Credential credential, VendorDirectory.Vendor vendor) {
+
+        Map<Integer, Map<String, DiscoveredCamera.DiscoveredProfile>> byChannel =
+                new LinkedHashMap<>();
+        if (vendor == null || !vendor.enumeratesChannels()) {
+            return byChannel;
+        }
+
+        ChannelWalk walk = new ChannelWalk();
+        while (walk.hasNext()) {
+            int channel = walk.next();
+            Map<String, DiscoveredCamera.DiscoveredProfile> profiles = new LinkedHashMap<>();
+
+            addChannelProfile(profiles, host, port, credential,
+                    VendorDirectory.resolveChannel(vendor.nvrMainPattern(), channel), "main");
+            addChannelProfile(profiles, host, port, credential,
+                    VendorDirectory.resolveChannel(vendor.nvrSubPattern(), channel), "sub");
+
+            if (profiles.isEmpty()) {
+                walk.empty();
+            } else {
+                walk.found();
+                byChannel.put(channel, profiles);
+            }
+        }
+
+        if (!byChannel.isEmpty()) {
+            log.info("{} looks like a recorder: {} channel(s) with streams, stopped at {}",
+                    host, walk.channelsFound(), walk.lastChannel());
+        }
+        return byChannel;
+    }
+
+    private void addChannelProfile(
+            Map<String, DiscoveredCamera.DiscoveredProfile> into,
+            String host, int port, Credential credential, String path, String name) {
+
+        if (path == null || path.isBlank()) {
+            return;
+        }
+        String url = buildUrl(host, port, path, credential);
+        RtspProbe.Result result = probe.attempt(url, transport).stream();
+        if (result == null || result.codec() == null) {
+            return;
+        }
+        DiscoveredCamera.DiscoveredProfile profile = new DiscoveredCamera.DiscoveredProfile();
+        profile.token = name;
+        profile.name = name;
+        profile.codec = result.codec();
+        profile.width = result.width();
+        profile.height = result.height();
+        profile.fps = result.fps();
+        profile.rtspUrl = url;
+        into.put(profile.token, profile);
     }
 }

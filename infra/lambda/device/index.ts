@@ -3,13 +3,21 @@ import { DynamoDBDocumentClient, QueryCommand, UpdateCommand, BatchWriteCommand 
 import { IoTClient, ListPrincipalThingsCommand } from '@aws-sdk/client-iot';
 import type { APIGatewayProxyEventV2WithIAMAuthorizer, APIGatewayProxyStructuredResultV2 } from 'aws-lambda';
 import { parseThingName, isValidId } from '../shared/tenant';
-import { key, type CameraRecord, DEFAULT_MAX_TRANSCODES } from '../shared/registry';
+import { key, queryAllPages, type CameraRecord, DEFAULT_MAX_TRANSCODES } from '../shared/registry';
 import { base64Key, bounded, ipAddress, label, macAddress, oneOf } from '../shared/sanitise';
 import { fail, json } from '../shared/http';
 
 const TABLE = process.env.REGISTRY_TABLE!;
 const DISCOVERY_TTL_SECONDS = 7 * 24 * 60 * 60;
-const MAX_CAMERAS = 64;
+/**
+ * The most cameras one agent may publish.
+ *
+ * How many it can actually carry is a property of the hardware — CPU, memory,
+ * disk throughput, network interface, upstream bandwidth — which only the
+ * agent can measure. This is the ceiling above which the answer is no
+ * regardless.
+ */
+const MAX_CAMERAS = 128;
 const MAX_DISCOVERED = 256;
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
@@ -21,12 +29,6 @@ const iot = new IoTClient({});
  * discovered — every earlier test found nothing to report, so the path had
  * never run.
  */
-const RESERVED_NAMES = (thingName: string) => ({
-  '#agent': thingName,
-  '#identity': 'identity',
-  '#model': 'model',
-});
-
 /** Certificate id -> thing name, cached for the container's lifetime. */
 const thingNameByCertId = new Map<string, string>();
 
@@ -60,7 +62,10 @@ export async function handler(
   if (!identity) {
     return fail(403, `Device name "${thingName}" is not a valid CamStream thing name`);
   }
-  const pk = key.tenant(identity.tenantId);
+  // The agent's own premises, taken from the name on its certificate. It never
+  // sends one, which is why re-partitioning the registry needed no agent
+  // change at all.
+  const pk = key.site(identity.tenantId, identity.premisesId);
 
   const route = event.routeKey.split(' ')[1] ?? '';
   if (route === '/api/device/config') {
@@ -147,7 +152,16 @@ async function acceptReport(
     return fail(400, 'Body must be JSON');
   }
 
-  const cameras = Array.isArray(body.cameras) ? body.cameras.slice(0, MAX_CAMERAS) : [];
+  const reported = Array.isArray(body.cameras) ? body.cameras : [];
+  // Refused, not truncated. Quietly discarding the hundred and twenty-ninth
+  // camera means an operator who wired one up sees nothing and is told
+  // nothing; an error at least names the wall they have hit.
+  if (reported.length > MAX_CAMERAS) {
+    return fail(400,
+      `This agent reported ${reported.length} cameras; one agent may publish at most ${MAX_CAMERAS}. `
+      + 'Split the site across more agents.');
+  }
+  const cameras = reported;
   const invalid = cameras.find((c) => !isValidId((c as { cameraId?: unknown }).cameraId));
   if (invalid) {
     return fail(400, `Invalid cameraId: ${JSON.stringify((invalid as { cameraId?: unknown }).cameraId)}`);
@@ -223,6 +237,9 @@ async function writeCameras(pk: string, thingName: string, cameras: unknown[], n
           // the agent, so they are shaped rather than trusted.
           ipAddress: ipAddress(camera.ipAddress),
           macAddress: macAddress(camera.macAddress),
+          // Bounded like everything else the camera gets a say in.
+          width: bounded(camera.width, 1, 16384),
+          height: bounded(camera.height, 1, 16384),
           profiles: Array.isArray(camera.profiles)
             ? camera.profiles.filter((p): p is string => p === 'sub' || p === 'main')
             : ['sub'],
@@ -234,8 +251,49 @@ async function writeCameras(pk: string, thingName: string, cameras: unknown[], n
     };
   });
   for (let i = 0; i < items.length; i += 25) {
-    await ddb.send(new BatchWriteCommand({ RequestItems: { [TABLE]: items.slice(i, i + 25) } }));
+    await writeBatch(items.slice(i, i + 25));
   }
+}
+
+/**
+ * Writes one batch, following up whatever DynamoDB declined to take.
+ *
+ * BatchWriteItem reports throttled writes in UnprocessedItems rather than
+ * failing, and nothing read it — so under load a camera simply did not appear
+ * in the registry, and the agent would not rewrite it, because its report had
+ * not changed. The camera stayed missing from /api/streams until something
+ * else happened to move.
+ */
+async function writeBatch(batch: Record<string, unknown>[]): Promise<void> {
+  let pending = batch;
+  for (let attempt = 0; pending.length > 0 && attempt < 5; attempt++) {
+    if (attempt > 0) {
+      // Exponential, because the reason for a retry here is always capacity.
+      await new Promise((resolve) => setTimeout(resolve, 50 * 2 ** attempt));
+    }
+    const result = await ddb.send(new BatchWriteCommand({ RequestItems: { [TABLE]: pending } }));
+    pending = (result.UnprocessedItems?.[TABLE] ?? []) as Record<string, unknown>[];
+  }
+  if (pending.length > 0) {
+    // Louder than dropping them: the next report will try again, and a log
+    // line is the only way anyone learns this site is being throttled.
+    console.warn(`${pending.length} camera record(s) still unwritten after retries`);
+  }
+}
+
+/**
+ * Whether a failed conditional update means the record does not exist yet.
+ *
+ * The distinction is load-bearing. The update below is guarded on
+ * `reachableBy` already existing, and its fallback rewrites the record whole
+ * with only this agent's sighting. That fallback used to run on *any* error,
+ * so a throttle or a transient fault erased every other agent's sighting of
+ * the camera — destroying exactly the merge the identity-keyed design exists
+ * to produce, and doing it most readily on a busy estate, which is the kind
+ * with several agents in the first place.
+ */
+export function isFirstSighting(err: unknown): boolean {
+  return (err as { name?: string })?.name === 'ConditionalCheckFailedException';
 }
 
 /**
@@ -275,15 +333,23 @@ async function recordDiscoveries(pk: string, thingName: string, reported: unknow
             }).filter((profile) => profile.token.length > 0)
           : [],
       };
+      const learnt = learnedFrom(camera);
+      const known = learnt.values;
+      // #identity and #model are reserved words; #agent is the thing name used
+      // as a map key. Only the ones the expression actually names may appear,
+      // because DynamoDB rejects an unused entry as firmly as a missing one.
+      const names: Record<string, string> = {
+        '#agent': thingName, '#identity': 'identity', ...learnt.names,
+      };
+      const learned = learnt.clause;
+
       const values = {
         ':identity': identity,
         ':stable': camera.identityStable === true,
         ':sighting': sighting,
         ':now': now,
         ':expiresAt': expiresAt,
-        ':mac': macAddress(camera.macAddress) ?? null,
-        ':make': label(camera.manufacturer, 64) ?? null,
-        ':model': label(camera.model, 64) ?? null,
+        ...known,
       };
       try {
         // reachableBy is a map keyed by thing name, so concurrent reports from
@@ -293,24 +359,27 @@ async function recordDiscoveries(pk: string, thingName: string, reported: unknow
           Key: { pk, sk: key.discovered(identity) },
           UpdateExpression:
             'SET #identity = :identity, identityStable = :stable, reachableBy.#agent = :sighting, ' +
-            'lastSeen = :now, expiresAt = :expiresAt, macAddress = if_not_exists(macAddress, :mac), ' +
-            'manufacturer = if_not_exists(manufacturer, :make), #model = if_not_exists(#model, :model)',
-          ExpressionAttributeNames: RESERVED_NAMES(thingName),
+            'lastSeen = :now, expiresAt = :expiresAt' + learned,
+          ExpressionAttributeNames: names,
           ExpressionAttributeValues: values,
           ConditionExpression: 'attribute_exists(reachableBy)',
         }));
-      } catch {
+      } catch (err) {
+        if (!isFirstSighting(err)) {
+          throw err;
+        }
         // First sighting: the map does not exist yet, so create the record
         // whole. :sighting is deliberately dropped — DynamoDB rejects an
         // ExpressionAttributeValues entry that the expression never uses.
         const { ':sighting': _unused, ...withoutSighting } = values;
+        const { '#agent': _agent, ...firstNames } = names;
         await ddb.send(new UpdateCommand({
           TableName: TABLE,
           Key: { pk, sk: key.discovered(identity) },
           UpdateExpression:
             'SET #identity = :identity, identityStable = :stable, reachableBy = :first, ' +
-            'macAddress = :mac, manufacturer = :make, #model = :model, lastSeen = :now, expiresAt = :expiresAt',
-          ExpressionAttributeNames: { '#identity': 'identity', '#model': 'model' },
+            'lastSeen = :now, expiresAt = :expiresAt' + learned,
+          ExpressionAttributeNames: firstNames,
           ExpressionAttributeValues: { ...withoutSighting, ':first': { [thingName]: sighting } },
         }));
       }
@@ -318,11 +387,48 @@ async function recordDiscoveries(pk: string, thingName: string, reported: unknow
   );
 }
 
-async function queryPrefix(pk: string, prefix: string): Promise<Record<string, unknown>[]> {
-  const result = await ddb.send(new QueryCommand({
-    TableName: TABLE,
-    KeyConditionExpression: 'pk = :pk AND begins_with(sk, :prefix)',
-    ExpressionAttributeValues: { ':pk': pk, ':prefix': prefix },
-  }));
-  return (result.Items ?? []) as Record<string, unknown>[];
+/**
+ * What a sighting learned about the device itself, as an update clause.
+ *
+ * Only fields this sighting actually carries. These used to be written with
+ * `if_not_exists`, meaning to stop a later, less informative sighting erasing
+ * a name already known - and it achieved the opposite. A camera first seen
+ * before its credentials were set answers no ONVIF question, so its record was
+ * created with `manufacturer` explicitly null, and a DynamoDB null is a value
+ * that exists. Every later report found the attribute present and kept it, so
+ * the console read "Unknown model" for the life of the record while the agent
+ * reported CPPLUS on every single scan.
+ *
+ * Writing only what is known leaves the attribute absent until something knows
+ * it, which is both the honest representation of "not discovered yet" and the
+ * state `if_not_exists` was reasoning about in the first place.
+ */
+export function learnedFrom(camera: {
+  macAddress?: unknown; manufacturer?: unknown; model?: unknown;
+}): { clause: string; names: Record<string, string>; values: Record<string, unknown> } {
+  const mac = macAddress(camera.macAddress);
+  const make = label(camera.manufacturer, 64);
+  const model = label(camera.model, 64);
+
+  const sets: string[] = [];
+  const names: Record<string, string> = {};
+  const values: Record<string, unknown> = {};
+  if (mac) { sets.push('macAddress = :mac'); values[':mac'] = mac; }
+  if (make) { sets.push('manufacturer = :make'); values[':make'] = make; }
+  if (model) { sets.push('#model = :model'); names['#model'] = 'model'; values[':model'] = model; }
+
+  return { clause: sets.length ? ', ' + sets.join(', ') : '', names, values };
+}
+
+/**
+ * Every item under a prefix, following the cursor.
+ *
+ * This used to be a single Query, which is the bug queryAllPages was written
+ * to prevent — and the one place it mattered most, since an agent that reads a
+ * short list of credentials or approved cameras does not fail, it just quietly
+ * stops publishing part of the site.
+ */
+function queryPrefix(pk: string, prefix: string): Promise<Record<string, unknown>[]> {
+  return queryAllPages<Record<string, unknown>>(
+    (input) => ddb.send(new QueryCommand(input)), TABLE, pk, prefix);
 }

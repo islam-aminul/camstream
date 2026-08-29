@@ -2,13 +2,18 @@ import { randomBytes } from 'node:crypto';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, QueryCommand, PutCommand, DeleteCommand, UpdateCommand, GetCommand } from '@aws-sdk/lib-dynamodb';
 import { IoTDataPlaneClient, PublishCommand } from '@aws-sdk/client-iot-data-plane';
+import {
+  IoTClient, ListThingPrincipalsCommand, DetachThingPrincipalCommand, ListAttachedPoliciesCommand,
+  DetachPolicyCommand, UpdateCertificateCommand, DeleteCertificateCommand, DeleteThingCommand,
+} from '@aws-sdk/client-iot';
 import { SSMClient, GetParameterCommand } from '@aws-sdk/client-ssm';
 import {
-  CognitoIdentityProviderClient, ListUsersCommand, AdminCreateUserCommand, AdminDeleteUserCommand,
-  AdminAddUserToGroupCommand, AdminListGroupsForUserCommand,
+  CognitoIdentityProviderClient, ListUsersCommand, AdminCreateUserCommand, AdminDeleteUserCommand, AdminGetUserCommand,
+  AdminAddUserToGroupCommand, AdminListGroupsForUserCommand, AdminRemoveUserFromGroupCommand,
+  AdminUpdateUserAttributesCommand, AdminEnableUserCommand, AdminDisableUserCommand,
 } from '@aws-sdk/client-cognito-identity-provider';
 import type { APIGatewayProxyEventV2WithJWTAuthorizer, APIGatewayProxyStructuredResultV2 } from 'aws-lambda';
-import { isValidId, parseThingName, thingName as buildThingName, THING_NAME_PATTERN } from '../shared/tenant';
+import { isValidId, isValidDisplayName, idFrom, parseThingName, thingName as buildThingName, isThingName } from '../shared/tenant';
 import { identify, can, targetTenant, ROLES, type Caller, type Role } from '../shared/roles';
 import { fail, json } from '../shared/http';
 import { label } from '../shared/sanitise';
@@ -21,8 +26,8 @@ class Refused extends Error {
     this.name = 'Refused';
   }
 }
-import { key, slugFor, DEFAULT_MAX_TRANSCODES, queryAllPages, type CameraRecord, type DiscoveredRecord, type PremisesRecord } from '../shared/registry';
-import { buildInstaller, isPlatform, PLATFORMS } from './installer';
+import { key, slugFor, DEFAULT_MAX_TRANSCODES, MAX_CONCURRENT_TRANSCODES, queryAllPages, encodeCursor, decodeCursor, REGISTRY_PK, type CameraRecord, type CustomerRecord, type DiscoveredRecord, type PremisesRecord } from '../shared/registry';
+import { buildInstaller, buildInstallerArchive, bundleUrl, bundleBuildId, isPlatform, PLATFORMS } from './installer';
 
 const TABLE = process.env.REGISTRY_TABLE!;
 const USER_POOL_ID = process.env.USER_POOL_ID!;
@@ -34,12 +39,17 @@ const LIVE_BUCKET = process.env.LIVE_BUCKET!;
 const API_INVOKE_URL = process.env.API_INVOKE_URL!;
 const AGENT_VERSION = process.env.AGENT_VERSION ?? '0.1.0';
 
+/** The shape of a discovered camera's identity, as the agent reports it. */
+const CAMERA_IDENTITY = /^[A-Za-z0-9._-]{3,64}$/;
+
 /** An installer is useless without a token, so the token is short-lived. */
 const ENROLLMENT_TTL_SECONDS = 14 * 24 * 60 * 60;
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const cognito = new CognitoIdentityProviderClient({});
 const iot = new IoTDataPlaneClient({ endpoint: `https://${IOT_ENDPOINT}` });
+/** Control plane rather than data plane: things and certificates, not messages. */
+const iotControl = new IoTClient({});
 const ssm = new SSMClient({});
 
 export async function handler(
@@ -61,27 +71,50 @@ export async function handler(
   try {
     switch (route) {
       case 'GET /api/admin/me':          return json(200, { ...caller });
-      case 'GET /api/admin/premises':    return await listPremises(caller);
+      case 'GET /api/admin/customers':   return await listCustomers(caller);
+      case 'POST /api/admin/customers':  return await createCustomer(caller, event.body);
+      case 'GET /api/admin/premises':    return await listPremises(caller, event.queryStringParameters?.tenantId);
       case 'POST /api/admin/premises':   return await createPremises(caller, event.body);
       case 'DELETE /api/admin/premises/{premisesId}':
-        return await deletePremises(caller, event.pathParameters?.premisesId);
-      case 'GET /api/admin/agents':      return await listAgents(caller);
+        return await deletePremises(caller, event.pathParameters?.premisesId,
+          event.queryStringParameters?.tenantId);
+      case 'GET /api/admin/agents':      return await listAgents(caller,
+          event.queryStringParameters?.tenantId, event.queryStringParameters?.premisesId,
+          event.queryStringParameters);
+      case 'GET /api/admin/cameras':     return await listCameras(caller, event.queryStringParameters);
+      case 'GET /api/admin/counts':      return await counts(caller, event.queryStringParameters);
+      case 'GET /api/admin/search':      return await search(caller, event.queryStringParameters);
       case 'POST /api/admin/agents':     return await createAgent(caller, event.body);
       case 'PATCH /api/admin/agents/{thingName}':
         return await updateAgent(caller, event.pathParameters?.thingName, event.body);
+      case 'DELETE /api/admin/agents/{thingName}':
+        return await removeAgent(caller, event.pathParameters?.thingName);
       case 'GET /api/admin/agents/{thingName}/identity':
         return await agentIdentity(caller, event.pathParameters?.thingName);
       case 'GET /api/admin/agents/{thingName}/installer':
         return await agentInstaller(caller, event.pathParameters?.thingName,
-          event.queryStringParameters?.platform);
-      case 'GET /api/admin/discovered':  return await listDiscovered(caller);
+          event.queryStringParameters?.platform, event.queryStringParameters);
+      case 'GET /api/admin/discovered':  return await listDiscovered(caller,
+          event.queryStringParameters?.premisesId, event.queryStringParameters?.tenantId);
       case 'POST /api/admin/cameras':    return await approveCamera(caller, event.body);
+      case 'PATCH /api/admin/cameras/{identity}':
+        return await renameCamera(caller, event.pathParameters?.identity, event.body);
       case 'DELETE /api/admin/cameras/{identity}':
-        return await removeCamera(caller, event.pathParameters?.identity);
+        return await removeCamera(caller, event.pathParameters?.identity,
+          event.queryStringParameters?.premisesId, event.queryStringParameters?.tenantId);
+      case 'GET /api/admin/credentials': return await listCredentials(caller,
+          event.queryStringParameters?.thingName);
       case 'POST /api/admin/credentials':return await storeCredential(caller, event.body);
+      case 'DELETE /api/admin/credentials':
+        return await removeCredential(caller, event.queryStringParameters?.thingName,
+          event.queryStringParameters?.scope);
       case 'POST /api/admin/scan':       return await triggerScan(caller, event.body);
-      case 'GET /api/admin/users':       return await listUsers(caller);
+      case 'POST /api/admin/agents/{thingName}/update':
+        return await upgradeAgent(caller, event.pathParameters?.thingName, event.body);
+      case 'GET /api/admin/users':       return await listUsers(caller, event.queryStringParameters);
       case 'POST /api/admin/users':      return await createUser(caller, event.body);
+      case 'PATCH /api/admin/users/{username}':
+        return await updateUser(caller, event.pathParameters?.username, event.body);
       case 'DELETE /api/admin/users/{username}':
         return await deleteUser(caller, event.pathParameters?.username);
       default:
@@ -98,10 +131,98 @@ export async function handler(
   }
 }
 
-function queryPrefix<T>(tenantId: string, prefix: string): Promise<T[]> {
+function queryPrefix<T>(pk: string, prefix: string, projection?: string): Promise<T[]> {
   return queryAllPages<T>(
-    (input) => ddb.send(new QueryCommand(input)),
-    TABLE, key.tenant(tenantId), prefix);
+    (input) => ddb.send(new QueryCommand(input)), TABLE, pk, prefix, projection);
+}
+
+/**
+ * One record by its exact sort key.
+ *
+ * Several lookups used to pass a complete identifier to `queryPrefix` and take
+ * the first row, which is a `begins_with` scan wearing a point lookup's
+ * clothing: `PREMISES#hq` matches `PREMISES#hq-2`, so an agent could be
+ * enrolled against a premises that does not exist, and `DISCOVERED#sn-ABC`
+ * matches `DISCOVERED#sn-ABCD`, so a camera could be approved from a
+ * different camera's record.
+ */
+async function getRecord<T>(pk: string, sk: string): Promise<T | undefined> {
+  const result = await ddb.send(new GetCommand({ TableName: TABLE, Key: { pk, sk } }));
+  return result.Item as T | undefined;
+}
+
+/**
+ * Filtering, sorting and paging, applied in the lambda rather than in DynamoDB.
+ *
+ * This works because of the partitioning, not in spite of it. A site holds on
+ * the order of a hundred cameras, so reading the partition and narrowing it
+ * here costs about what one page would have cost anyway — and it buys
+ * case-insensitive matching anywhere in a name, which a DynamoDB filter
+ * expression cannot do, without a search service or a second index to keep
+ * true. Estate-wide search is the case this does not cover, and it is
+ * deliberately prefix-only for the same reason.
+ *
+ * Measured, because the premise above is the whole argument and premises rot.
+ * At a hundred cameras in a site — the shape this is sold at, ten thousand
+ * cameras across a hundred sites — every read here is about 120ms, and a page
+ * of sixteen costs the same as a page of two hundred, which is the point.
+ *
+ * The cost is linear in the size of the *site*, not the estate. Ten thousand
+ * cameras in one site takes the same read to about 1.5s, because the partition
+ * is then some two megabytes and arrives over several round trips. That is the
+ * boundary: sites of a few hundred are comfortable, and a site of thousands
+ * wants a secondary index on the name so a page can be fetched rather than
+ * filtered. Splitting such a site across premises is the cheaper answer, and
+ * is what the partitioning already assumes.
+ */
+function paginate<T extends Record<string, unknown>>(
+  rows: T[],
+  options: { q?: string; sortBy: (row: T) => string; cursor?: string; limit?: string },
+): { items: T[]; cursor?: string; total: number } {
+  const needle = (options.q ?? '').trim().toLowerCase();
+  const matched = needle
+    ? rows.filter((row) => options.sortBy(row).toLowerCase().includes(needle))
+    : rows;
+  matched.sort((a, b) => options.sortBy(a).localeCompare(options.sortBy(b)));
+
+  const limit = Math.min(Math.max(Number(options.limit) || 50, 1), 200);
+  // The cursor is an offset into a stable sort, which is what makes a page
+  // boundary meaningful once filtering has changed which rows exist at all.
+  const from = Number((decodeCursor(options.cursor) ?? {}).from ?? 0) || 0;
+  const items = matched.slice(from, from + limit);
+  const next = from + limit < matched.length
+    ? encodeCursor({ from: from + limit })
+    : undefined;
+  return { items, cursor: next, total: matched.length };
+}
+
+/**
+ * The partition an agent's records live in, taken from its own name.
+ *
+ * A thing name is <tenant>--<premises>--<device>, so anything addressed by one
+ * already knows where to look. Callers reach this only after refuseOutOfScope
+ * has established the name parses and belongs to them.
+ */
+function siteOfThing(thing: string): string {
+  const identity = parseThingName(thing)!;
+  return key.site(identity.tenantId, identity.premisesId);
+}
+
+/**
+ * The premises a request names, checked against what the caller may see.
+ *
+ * Most reads now address one site rather than one customer, because that is
+ * where the estate-sized collections live.
+ */
+function siteOf(caller: Caller, tenantId: string, premisesId: unknown):
+    { pk: string; refusal?: undefined } | { pk?: undefined; refusal: APIGatewayProxyStructuredResultV2 } {
+  if (!isValidId(premisesId)) {
+    return { refusal: fail(400, 'premisesId is required') };
+  }
+  if (!visible(caller, premisesId)) {
+    return { refusal: fail(403, 'That premises is not within your permitted sites') };
+  }
+  return { pk: key.site(tenantId, premisesId) };
 }
 
 /** Premises this caller may act on. Empty claim means all within the tenant. */
@@ -132,12 +253,109 @@ function refuseOutOfScope(caller: Caller, thing: string): APIGatewayProxyStructu
   return null;
 }
 
+// --------------------------------------------------------------- customers
+
+/**
+ * Every customer, for the top level of the console's selection rail.
+ *
+ * Superadmin only, and deliberately unpaginated: a customer list is measured
+ * in tens, and paging it would be ceremony over a single page.
+ */
+async function listCustomers(caller: Caller) {
+  if (!can(caller, 'crossTenant')) return fail(403, 'Only a superadmin may list customers');
+  const customers = await queryAllPages<CustomerRecord>(
+    (input) => ddb.send(new QueryCommand(input)), TABLE, REGISTRY_PK, 'CUSTOMER#');
+  return json(200, {
+    customers: customers
+      .map((c) => ({ tenantId: c.tenantId, displayName: c.displayName, createdAt: c.createdAt }))
+      .sort((a, b) => a.displayName.localeCompare(b.displayName)),
+  });
+}
+
+/**
+ * Brings a customer into existence deliberately.
+ *
+ * Until now a tenant was created by writing into it: passing an unrecognised
+ * `tenantId` to any create call made one, so a typo produced a customer with
+ * no users, no name, and no way to find it again. It also meant nothing could
+ * enumerate customers without scanning the whole table.
+ *
+ * The caller supplies a name and the id is derived from it, because the id
+ * ends up inside IoT thing names, S3 keys and signed cookies where spaces are
+ * either illegal or need escaping everywhere.
+ */
+async function createCustomer(caller: Caller, rawBody: string | undefined) {
+  if (!can(caller, 'crossTenant')) return fail(403, 'Only a superadmin may create a customer');
+
+  let body: { displayName?: unknown };
+  try {
+    body = JSON.parse(rawBody ?? '{}');
+  } catch {
+    return fail(400, 'Body must be JSON');
+  }
+
+  const displayName = String(body.displayName ?? '').trim();
+  if (!isValidDisplayName(displayName)) {
+    return fail(400,
+      'displayName must be 3-64 characters of letters, digits, single spaces and single hyphens, '
+      + 'with no "--" and no repeated spaces');
+  }
+  const tenantId = idFrom(displayName);
+  if (!tenantId) return fail(400, `"${displayName}" does not reduce to a usable id`);
+
+  const record: CustomerRecord = {
+    pk: REGISTRY_PK, sk: key.customer(tenantId),
+    tenantId, displayName,
+    createdAt: Math.floor(Date.now() / 1000), createdBy: caller.email,
+  };
+  await ddb.send(new PutCommand({
+    TableName: TABLE, Item: record,
+    // Re-creating one would rename a live customer and re-point everything
+    // already filed under its id.
+    ConditionExpression: 'attribute_not_exists(sk)',
+  })).catch((err) => {
+    if (err?.name === 'ConditionalCheckFailedException') {
+      throw new Refused(409, `A customer with the id "${tenantId}" already exists`);
+    }
+    throw err;
+  });
+
+  return json(200, { tenantId, displayName });
+}
+
+/**
+ * Refuses to act on a customer that was never created.
+ *
+ * This is the other half of making customers real: without it, a mistyped
+ * tenant still silently brings one into being on the next write.
+ */
+async function customerExists(tenantId: string): Promise<boolean> {
+  const found = await ddb.send(new GetCommand({
+    TableName: TABLE, Key: { pk: REGISTRY_PK, sk: key.customer(tenantId) },
+  }));
+  return found.Item !== undefined;
+}
+
 // ---------------------------------------------------------------- premises
 
-async function listPremises(caller: Caller) {
+/**
+ * The tenant a read should address.
+ *
+ * Creating a premises or an agent already accepted a `tenantId` for a
+ * superadmin, but every read and delete hard-coded the caller's own — so
+ * onboarding a customer half-worked: you could create their site and then not
+ * see it. Reads take the same optional parameter, resolved by the same rule.
+ */
+function readTenant(caller: Caller, requested: string | undefined): string | null {
+  return targetTenant(caller, requested);
+}
+
+async function listPremises(caller: Caller, requestedTenant?: string) {
   if (!can(caller, 'manageEstate')) return fail(403, 'Not permitted to list premises');
-  const premises = await queryPrefix<PremisesRecord>(caller.tenantId, 'PREMISES#');
-  return json(200, { premises: premises.filter((p) => visible(caller, p.premisesId)) });
+  const tenantId = readTenant(caller, requestedTenant);
+  if (!tenantId) return fail(403, 'Not permitted to act on that tenant');
+  const premises = await queryPrefix<PremisesRecord>(key.tenant(tenantId), 'PREMISES#');
+  return json(200, { tenantId, premises: premises.filter((p) => visible(caller, p.premisesId)) });
 }
 
 async function createPremises(caller: Caller, rawBody: string | undefined) {
@@ -146,9 +364,25 @@ async function createPremises(caller: Caller, rawBody: string | undefined) {
   const tenantId = targetTenant(caller, body.tenantId);
   if (!tenantId) return fail(403, 'Not permitted to act on that tenant');
 
-  const premisesId = String(body.premisesId ?? '').trim().toLowerCase();
-  if (!isValidId(premisesId)) {
-    return fail(400, 'premisesId must be 3-32 chars of [a-z0-9-] and must not contain "--"');
+  // A customer must exist before anything can be filed under it. Without this
+  // a mistyped tenantId still creates one by writing into it.
+  if (!(await customerExists(tenantId))) {
+    return fail(404, `No customer with the id "${tenantId}"`);
+  }
+
+  // The name is typed; the id is derived. An explicit premisesId is still
+  // accepted so an existing integration does not break.
+  const displayName = String(body.displayName ?? '').trim();
+  const premisesId = body.premisesId
+    ? String(body.premisesId).trim().toLowerCase()
+    : (displayName ? idFrom(displayName) : null);
+  if (displayName && !isValidDisplayName(displayName)) {
+    return fail(400,
+      'displayName must be 3-64 characters of letters, digits, single spaces and single hyphens, '
+      + 'with no "--" and no repeated spaces');
+  }
+  if (!premisesId || !isValidId(premisesId)) {
+    return fail(400, 'Supply a displayName, or a premisesId of 3-32 chars of [a-z0-9-] without "--"');
   }
   // Someone restricted to particular sites creating a new one would produce a
   // premises they immediately cannot see or manage.
@@ -160,7 +394,7 @@ async function createPremises(caller: Caller, rawBody: string | undefined) {
     pk: key.tenant(tenantId),
     sk: key.premises(premisesId),
     premisesId,
-    displayName: String(body.displayName ?? premisesId).slice(0, 128),
+    displayName: displayName || premisesId,
     address: body.address ? String(body.address).slice(0, 256) : undefined,
     createdAt: Math.floor(Date.now() / 1000),
     createdBy: caller.email,
@@ -178,43 +412,83 @@ async function createPremises(caller: Caller, rawBody: string | undefined) {
   return json(200, { premisesId, tenantId });
 }
 
-async function deletePremises(caller: Caller, premisesId: string | undefined) {
+async function deletePremises(caller: Caller, premisesId: string | undefined, requestedTenant?: string) {
   if (!can(caller, 'manageEstate')) return fail(403, 'Not permitted');
   if (!premisesId || !isValidId(premisesId)) return fail(400, 'Invalid premises id');
   if (!visible(caller, premisesId)) return fail(403, 'Not permitted for that premises');
+  const tenantId = readTenant(caller, requestedTenant);
+  if (!tenantId) return fail(403, 'Not permitted to act on that tenant');
 
-  const agents = await queryPrefix<Record<string, unknown>>(caller.tenantId, 'DEVICE#');
-  const attached = agents.filter((a) => a.premisesId === premisesId);
+  const attached = await queryPrefix<Record<string, unknown>>(key.site(tenantId, premisesId), 'DEVICE#');
   if (attached.length > 0) {
     // Deleting it would orphan agents whose thing names encode it.
     return fail(400, `${attached.length} agent(s) are still assigned to this premises`);
   }
   await ddb.send(new DeleteCommand({
-    TableName: TABLE, Key: { pk: key.tenant(caller.tenantId), sk: key.premises(premisesId) },
+    TableName: TABLE, Key: { pk: key.tenant(tenantId), sk: key.premises(premisesId) },
   }));
-  return json(200, { removed: premisesId });
+  return json(200, { removed: premisesId, tenantId });
 }
 
 // ------------------------------------------------------------------ agents
 
-async function listAgents(caller: Caller) {
+async function listAgents(
+  caller: Caller,
+  requestedTenant?: string,
+  premisesId?: string,
+  query?: Record<string, string | undefined>,
+) {
   if (!can(caller, 'manageEstate')) return fail(403, 'Not permitted to list agents');
+  const forTenant = readTenant(caller, requestedTenant);
+  if (!forTenant) return fail(403, 'Not permitted to act on that tenant');
+  // Agents are listed for one site. A thousand of them across a customer is
+  // more than a page and more than a partition; the console always has a site
+  // selected, and counts come from their own endpoint.
+  const site = siteOf(caller, forTenant, premisesId);
+  if (site.refusal) return site.refusal;
   // Health arrives on its own item, written directly by an IoT rule, so it is
   // read alongside the registration rather than being part of it.
-  const [devices, health] = await Promise.all([
-    queryPrefix<Record<string, unknown>>(caller.tenantId, 'DEVICE#'),
-    queryPrefix<Record<string, unknown>>(caller.tenantId, 'HEALTH#'),
+  const [devices, health, cameras] = await Promise.all([
+    queryPrefix<Record<string, unknown>>(site.pk, 'DEVICE#'),
+    // Health stays partitioned by customer: the IoT rule that writes it builds
+    // its key in SQL and cannot cut a thing name at the second separator.
+    queryPrefix<Record<string, unknown>>(key.tenant(forTenant), 'HEALTH#'),
+    // Assignments, which is what capacity is actually measured against. Only
+    // the owning agent is read: the rest of a camera record is several times
+    // its size, and this walks every camera at the site to count them.
+    queryPrefix<CameraRecord>(site.pk, 'CAMERA#', 'assignedTo'),
   ]);
   const healthOf = new Map(health.map((h) => [String(h.thingName), h]));
+
+  // How many cameras each agent has been given, as opposed to how many it has
+  // got round to telling us about. An agent that has never connected reports
+  // nothing, so reading its own figure showed an agent carrying three hundred
+  // cameras as empty — and the console uses this to warn before the ceiling.
+  const assigned = new Map<string, number>();
+  for (const camera of cameras) {
+    const owner = String(camera.assignedTo ?? '');
+    assigned.set(owner, (assigned.get(owner) ?? 0) + 1);
+  }
+  const page = paginate(devices.filter((d) => visible(caller, d.premisesId as string | undefined)), {
+    q: query?.q,
+    sortBy: (d) => String(d.siteName ?? d.thingName ?? ''),
+    cursor: query?.cursor,
+    limit: query?.limit,
+  });
   return json(200, {
-    agents: devices
-      .filter((d) => visible(caller, d.premisesId as string | undefined))
+    total: page.total,
+    cursor: page.cursor,
+    agents: page.items
       .map((device) => ({
         thingName: device.thingName,
         premisesId: device.premisesId,
         siteName: device.siteName,
         agentVersion: device.agentVersion,
-        cameraCount: device.cameraCount ?? 0,
+        cameraCount: assigned.get(String(device.thingName)) ?? 0,
+        // What the agent itself last said it was handling. Differs from the
+        // assignment while it is catching up, and staying different while it
+        // is connected is the interesting case.
+        reportedCameras: Number(device.cameraCount ?? 0),
         lastSeen: device.lastSeen,
         // Liveness comes from IoT presence events, not a poll, so this is the
         // connection's actual state rather than "seen within N seconds".
@@ -226,6 +500,9 @@ async function listAgents(caller: Caller) {
         // A connected agent whose heartbeat has stopped is the case presence
         // events cannot see: the socket is up and the agent is stuck.
         health: heartbeat(healthOf.get(String(device.thingName))),
+        // What the agent was configured to allow. What it is actually
+        // honouring can be lower, and comes back on the health record — a
+        // machine under pressure lowers its own cap.
         maxConcurrentTranscodes: Number(device.maxConcurrentTranscodes ?? DEFAULT_MAX_TRANSCODES),
       })),
   });
@@ -253,13 +530,14 @@ async function updateAgent(caller: Caller, thingName: string | undefined, rawBod
   }
 
   const cap = body.maxConcurrentTranscodes;
-  if (!Number.isInteger(cap) || (cap as number) < 0 || (cap as number) > 64) {
-    return fail(400, 'maxConcurrentTranscodes must be a whole number between 0 and 64');
+  if (!Number.isInteger(cap) || (cap as number) < 0 || (cap as number) > MAX_CONCURRENT_TRANSCODES) {
+    return fail(400,
+      `maxConcurrentTranscodes must be a whole number between 0 and ${MAX_CONCURRENT_TRANSCODES}`);
   }
 
   const existing = await ddb.send(new GetCommand({
     TableName: TABLE,
-    Key: { pk: key.tenant(caller.tenantId), sk: key.device(thing) },
+    Key: { pk: siteOfThing(thing), sk: key.device(thing) },
   }));
   if (!existing.Item) return fail(404, 'No such agent');
 
@@ -269,13 +547,122 @@ async function updateAgent(caller: Caller, thingName: string | undefined, rawBod
 
   await ddb.send(new UpdateCommand({
     TableName: TABLE,
-    Key: { pk: key.tenant(caller.tenantId), sk: key.device(thing) },
+    Key: { pk: siteOfThing(thing), sk: key.device(thing) },
     UpdateExpression: 'SET maxConcurrentTranscodes = :cap',
     ExpressionAttributeValues: { ':cap': cap },
   }));
-  await pushConfig(caller.tenantId, thing);
+  await pushConfig(thing);
 
   return json(200, { thingName: thing, maxConcurrentTranscodes: cap });
+}
+
+/**
+ * Retires an agent: its records, its credentials, and its identity.
+ *
+ * There was no way to do this. Enrolment was one-way, so a decommissioned edge
+ * box stayed in the registry permanently — listed, counted, and able to
+ * reconnect and resume publishing while its certificate lived. It compounded
+ * one level up: `deletePremises` refuses while agents are attached, quite
+ * rightly, so a premises that had ever held an agent could not be deleted
+ * either. The estate could only grow.
+ *
+ * Cameras are refused rather than cascaded. Which agent takes over a camera is
+ * a decision with a cost attached, and it belongs to the administrator, not to
+ * a delete.
+ */
+async function removeAgent(caller: Caller, thingName: string | undefined) {
+  if (!can(caller, 'manageEstate')) return fail(403, 'Not permitted to remove agents');
+  const thing = thingName ?? '';
+  const outOfScope = refuseOutOfScope(caller, thing);
+  if (outOfScope) return outOfScope;
+
+  const existing = await getRecord<Record<string, unknown>>(siteOfThing(thing), key.device(thing));
+  if (!existing) return fail(404, 'No such agent');
+
+  const cameras = await queryPrefix<CameraRecord>(siteOfThing(thing), 'CAMERA#');
+  const owned = cameras.filter((camera) => camera.assignedTo === thing);
+  if (owned.length > 0) {
+    return fail(400,
+      `${owned.length} camera(s) are still assigned to this agent — reassign or remove them first`);
+  }
+
+  // The identity goes first. A record without a certificate is untidy; a
+  // certificate without a record is an agent that can still publish.
+  const retired = await retireThing(thing);
+
+  const stale = [
+    key.device(thing),
+    `HEALTH#${thing}`,
+    ...(await queryPrefix<Record<string, unknown>>(siteOfThing(thing), `CREDENTIAL#${thing}#`))
+      .map((item) => String(item.sk)),
+    ...(await queryPrefix<Record<string, unknown>>(siteOfThing(thing), `LIVECAMERA#${thing}#`))
+      .map((item) => String(item.sk)),
+  ];
+  for (const sk of stale) {
+    await ddb.send(new DeleteCommand({ TableName: TABLE, Key: { pk: siteOfThing(thing), sk } }));
+  }
+
+  return json(200, { removed: thing, records: stale.length, identityRevoked: retired });
+}
+
+/**
+ * Detaches and deletes the thing's certificate, then the thing.
+ *
+ * Reports rather than throws. An agent enrolled but never booted has no
+ * certificate at all, and a half-torn-down identity should not leave the
+ * registry records behind — that is the state nobody can clean up from.
+ */
+async function retireThing(thing: string): Promise<boolean> {
+  try {
+    const principals = await iotControl.send(new ListThingPrincipalsCommand({ thingName: thing }));
+    for (const principal of principals.principals ?? []) {
+      await iotControl.send(new DetachThingPrincipalCommand({ thingName: thing, principal }));
+      const attached = await iotControl.send(new ListAttachedPoliciesCommand({ target: principal }));
+      for (const policy of attached.policies ?? []) {
+        await iotControl.send(new DetachPolicyCommand({ policyName: policy.policyName!, target: principal }));
+      }
+      const certificateId = principal.split('/').pop()!;
+      // Deactivate before delete: an active certificate cannot be deleted, and
+      // deactivating is itself what stops the agent reconnecting.
+      await iotControl.send(new UpdateCertificateCommand({ certificateId, newStatus: 'INACTIVE' }));
+      await iotControl.send(new DeleteCertificateCommand({ certificateId, forceDelete: true }));
+    }
+    await iotControl.send(new DeleteThingCommand({ thingName: thing }));
+    return true;
+  } catch (err) {
+    console.warn(`could not fully retire ${thing}: ${err}`);
+    return false;
+  }
+}
+
+/**
+ * Withdraws a stored credential.
+ *
+ * Storing one was possible and withdrawing it was not, so a credential set by
+ * mistake, or for a camera long since removed, was relayed to the agent
+ * forever. For a system whose stated property is that the operator controls
+ * where camera passwords live, "cannot be taken back" is a gap in the claim.
+ */
+async function removeCredential(caller: Caller, thingName: unknown, scope: unknown) {
+  if (!can(caller, 'manageCredentials')) return fail(403, 'Not permitted to manage credentials');
+  const thing = String(thingName ?? '');
+  const target = String(scope ?? '*');
+
+  const outOfScope = refuseOutOfScope(caller, thing);
+  if (outOfScope) return outOfScope;
+  if (!isCredentialScope(target)) return fail(400, 'Invalid scope');
+
+  const existing = await getRecord<Record<string, unknown>>(
+    siteOfThing(thing), key.credential(thing, target));
+  if (!existing) return fail(404, 'No credential stored for that scope');
+
+  await ddb.send(new DeleteCommand({
+    TableName: TABLE, Key: { pk: siteOfThing(thing), sk: key.credential(thing, target) },
+  }));
+  // The agent replaces its whole relayed set from the config it fetches, so
+  // bumping the version is what actually revokes this on the edge box.
+  await pushConfig(thing);
+  return json(200, { removed: target, thingName: thing });
 }
 
 /**
@@ -298,7 +685,32 @@ function heartbeat(record: Record<string, unknown> | undefined) {
     uptimeSeconds: record.uptimeSeconds ?? null,
     camerasConfigured: record.camerasConfigured ?? null,
     agentVersion: record.agentVersion ?? null,
+    /**
+     * Which resource is binding, and what to do about it.
+     *
+     * The agent decides this, because it is the only thing that can see the
+     * machine. It arrives as a sentence rather than a set of thresholds so the
+     * console does not have to re-derive a judgement the agent already made
+     * with better information.
+     */
+    constraint: typeof record.constraint === 'string' ? record.constraint : 'none',
+    constraintMessage:
+      typeof record.constraintMessage === 'string' ? record.constraintMessage : null,
+    /** The numbers behind it, so a healthy agent's headroom is visible too. */
+    resources: {
+      cpuLoad: numberOrNull(record.cpuLoad),
+      memoryUsedFraction: numberOrNull(record.memoryUsedFraction),
+      memoryFreeBytes: numberOrNull(record.memoryFreeBytes),
+      diskFreeBytes: numberOrNull(record.diskFreeBytes),
+      uploadBytesPerSecond: numberOrNull(record.uploadBytesPerSecond),
+      uploadMillisPerSegment: numberOrNull(record.uploadMillisPerSegment),
+    },
   };
+}
+
+/** A reading the agent omitted stays absent rather than becoming a zero. */
+function numberOrNull(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
 /**
@@ -314,15 +726,27 @@ async function createAgent(caller: Caller, rawBody: string | undefined) {
   const tenantId = targetTenant(caller, body.tenantId);
   if (!tenantId) return fail(403, 'Not permitted to act on that tenant');
 
+  if (!(await customerExists(tenantId))) {
+    return fail(404, `No customer with the id "${tenantId}"`);
+  }
+
   const premisesId = String(body.premisesId ?? '').trim().toLowerCase();
-  const deviceId = String(body.deviceId ?? '').trim().toLowerCase();
-  if (!isValidId(premisesId) || !isValidId(deviceId)) {
-    return fail(400, 'premisesId and deviceId must be 3-32 chars of [a-z0-9-] without "--"');
+  const siteName = String(body.siteName ?? '').trim();
+  const deviceId = body.deviceId
+    ? String(body.deviceId).trim().toLowerCase()
+    : (siteName ? idFrom(siteName) : null);
+  if (siteName && !isValidDisplayName(siteName)) {
+    return fail(400,
+      'siteName must be 3-64 characters of letters, digits, single spaces and single hyphens, '
+      + 'with no "--" and no repeated spaces');
+  }
+  if (!isValidId(premisesId) || !deviceId || !isValidId(deviceId)) {
+    return fail(400, 'premisesId is required, and deviceId must be supplied or derivable from siteName');
   }
   if (!visible(caller, premisesId)) return fail(403, 'Not permitted for that premises');
 
-  const premises = await queryPrefix<PremisesRecord>(tenantId, key.premises(premisesId));
-  if (premises.length === 0) return fail(404, 'No such premises');
+  const premises = await getRecord<PremisesRecord>(key.tenant(tenantId), key.premises(premisesId));
+  if (!premises) return fail(404, 'No such premises');
 
   const thingName = buildThingName({ tenantId, premisesId, deviceId });
   const token = randomBytes(32).toString('base64url');
@@ -340,8 +764,8 @@ async function createAgent(caller: Caller, rawBody: string | undefined) {
   await ddb.send(new PutCommand({
     TableName: TABLE,
     Item: {
-      pk: key.tenant(tenantId), sk: key.device(thingName),
-      thingName, premisesId, siteName: String(body.siteName ?? deviceId).slice(0, 128),
+      pk: key.site(tenantId, premisesId), sk: key.device(thingName),
+      thingName, premisesId, siteName: siteName || deviceId,
       connected: false, createdAt: now, createdBy: caller.email,
     },
     ConditionExpression: 'attribute_not_exists(sk)',
@@ -364,19 +788,36 @@ async function createAgent(caller: Caller, rawBody: string | undefined) {
  */
 async function agentIdentity(caller: Caller, thing: string | undefined) {
   if (!can(caller, 'manageEstate')) return fail(403, 'Not permitted');
-  if (!thing || !THING_NAME_PATTERN.test(thing)) return fail(400, 'Invalid agent name');
+  if (!isThingName(thing)) return fail(400, 'Invalid agent name');
 
-  const [tenantId, premisesId, deviceId] = thing.split('--');
+  const { tenantId, premisesId, deviceId } = parseThingName(thing)!;
   if (tenantId !== caller.tenantId && !can(caller, 'crossTenant')) return fail(403, 'Not permitted');
   if (!visible(caller, premisesId)) return fail(403, 'Not permitted for that premises');
 
-  const tokens = await queryPrefix<Record<string, unknown>>(tenantId, 'ENROLLMENT#');
+  const tokens = await queryPrefix<Record<string, unknown>>(key.tenant(tenantId), 'ENROLLMENT#');
   const now = Math.floor(Date.now() / 1000);
-  const usable = tokens
+  let usable = tokens
     .filter((t) => t.thingName === thing && !t.usedAt && Number(t.expiresAt) > now)
     .sort((a, b) => Number(b.issuedAt) - Number(a.issuedAt))[0];
   if (!usable) {
-    return fail(404, 'No unused enrollment token for this agent — create it again to issue a new one');
+    // The installer *is* the enrolment: asking for one is asking for a token,
+    // and refusing because the last one was spent told an administrator to go
+    // and perform, by hand, the thing they had just asked for. A token is
+    // one-use and short-lived, so issuing a fresh one here is the same act as
+    // issuing the first.
+    const token = randomBytes(32).toString('base64url');
+    const issuedAt = Math.floor(Date.now() / 1000);
+    await ddb.send(new PutCommand({
+      TableName: TABLE,
+      Item: {
+        pk: key.tenant(tenantId), sk: key.enrollment(token),
+        token, thingName: thing, premisesId,
+        issuedAt, issuedBy: caller.email,
+        expiresAt: issuedAt + ENROLLMENT_TTL_SECONDS,
+      },
+    }));
+    usable = { token, thingName: thing, premisesId, issuedAt,
+      expiresAt: issuedAt + ENROLLMENT_TTL_SECONDS } as Record<string, unknown>;
   }
 
   const claim = await ssm.send(new GetParameterCommand({ Name: CLAIM_PARAM, WithDecryption: true }));
@@ -411,7 +852,12 @@ async function agentIdentity(caller: Caller, thing: string | undefined) {
  * a few kilobytes and leaves the 30MB binary cacheable and identical for every
  * customer.
  */
-async function agentInstaller(caller: Caller, thing: string | undefined, platform: unknown) {
+async function agentInstaller(
+  caller: Caller,
+  thing: string | undefined,
+  platform: unknown,
+  query?: Record<string, string | undefined>,
+) {
   if (!isPlatform(platform)) {
     return fail(400, `platform must be one of ${PLATFORMS.join(', ')}`);
   }
@@ -420,8 +866,29 @@ async function agentInstaller(caller: Caller, thing: string | undefined, platfor
     return identity;
   }
 
-  const installer = await buildInstaller(
-    platform, JSON.parse(identity.body ?? '{}'), LIVE_BUCKET, AGENT_VERSION);
+  const parsed = JSON.parse(identity.body ?? '{}');
+
+  // A folder by default. A bare script is awkward to carry to a machine: it
+  // cannot be double-clicked, the execution policy is against it, and it says
+  // nothing about the runtime archives the operator still has to supply. The
+  // raw form stays available for anyone driving this from a script.
+  if (query?.format !== 'raw') {
+    const archive = await buildInstallerArchive(platform, parsed, LIVE_BUCKET, AGENT_VERSION);
+    return {
+      statusCode: 200,
+      headers: {
+        'content-type': archive.contentType,
+        'content-disposition': `attachment; filename="${archive.filename}"`,
+        'cache-control': 'no-store',
+      },
+      // Binary has to travel base64 and be decoded by API Gateway; sending it
+      // as a string would corrupt every byte above 127 in the archive.
+      isBase64Encoded: true,
+      body: archive.body.toString('base64'),
+    };
+  }
+
+  const installer = await buildInstaller(platform, parsed, LIVE_BUCKET, AGENT_VERSION);
 
   return {
     statusCode: 200,
@@ -435,14 +902,168 @@ async function agentInstaller(caller: Caller, thing: string | undefined, platfor
   };
 }
 
+// --------------------------------------------------------- listing at scale
+
+/**
+ * The approved cameras at one site, filtered, sorted and paged.
+ *
+ * Distinct from /api/streams, which answers "where do I fetch this camera's
+ * video". This answers "what cameras exist here", which is what the console's
+ * table and the rail's third dropdown are built on.
+ */
+async function listCameras(caller: Caller, query: Record<string, string | undefined> | undefined) {
+  if (!can(caller, 'viewStreams')) return fail(403, 'Not permitted');
+  const tenantId = readTenant(caller, query?.tenantId);
+  if (!tenantId) return fail(403, 'Not permitted to act on that tenant');
+  const site = siteOf(caller, tenantId, query?.premisesId);
+  if (site.refusal) return site.refusal;
+
+  const [approved, live] = await Promise.all([
+    queryPrefix<CameraRecord>(site.pk, 'CAMERA#'),
+    queryPrefix<Record<string, unknown>>(site.pk, 'LIVECAMERA#'),
+  ]);
+  const publishing = new Set(live.map((c) => `${c.thingName}/${c.cameraId}`));
+
+  const rows = approved
+    // Narrowing by agent is the rail's second dropdown feeding the third.
+    .filter((c) => !query?.agentId || c.assignedTo === query.agentId)
+    // An exact id, for the live view showing one chosen camera on its own.
+    // Distinct from `q`, which is a substring of the display name: searching
+    // for the name would match every camera that happens to contain it, and
+    // choosing a camera in the rail means that camera and no other.
+    .filter((c) => !query?.cameraId || c.cameraId === query.cameraId)
+    .map((c) => ({
+      identity: c.identity,
+      cameraId: c.cameraId,
+      displayName: c.displayName,
+      assignedTo: c.assignedTo,
+      sourceCodec: c.sourceCodec ?? null,
+      approvedAt: c.approvedAt,
+      publishing: publishing.has(`${c.assignedTo}/${c.cameraId}`),
+    }))
+    .filter((c) => query?.status !== 'publishing' || c.publishing);
+
+  const page = paginate(rows as unknown as Record<string, unknown>[], {
+    q: query?.q,
+    sortBy: (c) => String(c.displayName ?? c.cameraId ?? ''),
+    cursor: query?.cursor,
+    limit: query?.limit,
+  });
+  return json(200, { total: page.total, cursor: page.cursor, cameras: page.items });
+}
+
+/**
+ * Totals for the rail, without fetching the rows behind them.
+ *
+ * A rail that says "Cameras (128)" should not have to read 128 records to say
+ * so, and at a hundred sites the console would otherwise read the estate just
+ * to render its own furniture.
+ */
+async function counts(caller: Caller, query: Record<string, string | undefined> | undefined) {
+  if (!can(caller, 'viewStreams')) return fail(403, 'Not permitted');
+  const tenantId = readTenant(caller, query?.tenantId);
+  if (!tenantId) return fail(403, 'Not permitted to act on that tenant');
+
+  const countOf = async (pk: string, prefix: string) => {
+    const result = await ddb.send(new QueryCommand({
+      TableName: TABLE,
+      KeyConditionExpression: 'pk = :pk AND begins_with(sk, :prefix)',
+      ExpressionAttributeValues: { ':pk': pk, ':prefix': prefix },
+      Select: 'COUNT',
+    }));
+    return result.Count ?? 0;
+  };
+
+  if (query?.premisesId) {
+    const site = siteOf(caller, tenantId, query.premisesId);
+    if (site.refusal) return site.refusal;
+    const [agents, cameras, discovered] = await Promise.all([
+      countOf(site.pk, 'DEVICE#'),
+      countOf(site.pk, 'CAMERA#'),
+      countOf(site.pk, 'DISCOVERED#'),
+    ]);
+    return json(200, { tenantId, premisesId: query.premisesId, agents, cameras, discovered });
+  }
+
+  const premises = await queryPrefix<PremisesRecord>(key.tenant(tenantId), 'PREMISES#');
+  const mine = premises.filter((p) => visible(caller, p.premisesId));
+  return json(200, { tenantId, premises: mine.length });
+}
+
+/**
+ * Finds something by name without knowing where it lives.
+ *
+ * Premises come from one partition and are matched anywhere in the name.
+ * Cameras and agents are matched within a site when one is given, because that
+ * is one partition too. Across the estate they are matched by prefix over a
+ * bounded fan-out — searching every site on every keystroke is exactly the
+ * read this rebuild removed, so this is meant for a deliberate search rather
+ * than type-ahead.
+ */
+async function search(caller: Caller, query: Record<string, string | undefined> | undefined) {
+  if (!can(caller, 'viewStreams')) return fail(403, 'Not permitted');
+  const tenantId = readTenant(caller, query?.tenantId);
+  if (!tenantId) return fail(403, 'Not permitted to act on that tenant');
+  const needle = (query?.q ?? '').trim().toLowerCase();
+  if (needle.length < 2) return fail(400, 'Search for at least two characters');
+
+  const premises = (await queryPrefix<PremisesRecord>(key.tenant(tenantId), 'PREMISES#'))
+    .filter((p) => visible(caller, p.premisesId))
+    .filter((p) => `${p.displayName} ${p.premisesId}`.toLowerCase().includes(needle));
+
+  // One site if named, otherwise a bounded sweep of the sites this caller can
+  // see. The bound is what keeps a search from becoming a scan of the estate.
+  const sites = query?.premisesId
+    ? [query.premisesId]
+    : (await queryPrefix<PremisesRecord>(key.tenant(tenantId), 'PREMISES#'))
+        .filter((p) => visible(caller, p.premisesId))
+        .map((p) => p.premisesId)
+        .slice(0, 25);
+
+  const found = await Promise.all(sites.map(async (premisesId) => {
+    const pk = key.site(tenantId, premisesId);
+    const [agents, cameras] = await Promise.all([
+      queryPrefix<Record<string, unknown>>(pk, 'DEVICE#'),
+      queryPrefix<CameraRecord>(pk, 'CAMERA#'),
+    ]);
+    return {
+      agents: agents
+        .filter((a) => `${a.siteName ?? ''} ${a.thingName ?? ''}`.toLowerCase().includes(needle))
+        .map((a) => ({ thingName: a.thingName, siteName: a.siteName, premisesId })),
+      cameras: cameras
+        .filter((c) => `${c.displayName} ${c.cameraId}`.toLowerCase().includes(needle))
+        .map((c) => ({
+          identity: c.identity, cameraId: c.cameraId, displayName: c.displayName,
+          assignedTo: c.assignedTo, premisesId,
+        })),
+    };
+  }));
+
+  return json(200, {
+    premises: premises.map((p) => ({ premisesId: p.premisesId, displayName: p.displayName })).slice(0, 25),
+    agents: found.flatMap((f) => f.agents).slice(0, 25),
+    cameras: found.flatMap((f) => f.cameras).slice(0, 50),
+    // Says plainly when the answer is partial, rather than looking complete.
+    searchedSites: sites.length,
+  });
+}
+
 // ----------------------------------------------------------------- cameras
 
-async function listDiscovered(caller: Caller) {
+async function listDiscovered(caller: Caller, premisesId?: string, requestedTenant?: string) {
   if (!can(caller, 'manageEstate')) return fail(403, 'Not permitted to list discovered cameras');
+  // The caller's own tenant is not the tenant being looked at. The platform
+  // operator selects a customer in the console, and reading their own instead
+  // queried an empty partition: cameras were found, written and waiting, and
+  // the page said nothing had been found yet.
+  const forTenant = readTenant(caller, requestedTenant);
+  if (!forTenant) return fail(403, 'Not permitted to act on that tenant');
+  const site = siteOf(caller, forTenant, premisesId);
+  if (site.refusal) return site.refusal;
   const [discovered, approved, agents] = await Promise.all([
-    queryPrefix<DiscoveredRecord>(caller.tenantId, 'DISCOVERED#'),
-    queryPrefix<CameraRecord>(caller.tenantId, 'CAMERA#'),
-    queryPrefix<Record<string, unknown>>(caller.tenantId, 'DEVICE#'),
+    queryPrefix<DiscoveredRecord>(site.pk, 'DISCOVERED#'),
+    queryPrefix<CameraRecord>(site.pk, 'CAMERA#'),
+    queryPrefix<Record<string, unknown>>(site.pk, 'DEVICE#'),
   ]);
   const premisesOf = new Map(agents.map((a) => [String(a.thingName), a.premisesId as string | undefined]));
   const approvedByIdentity = new Map(approved.map((camera) => [camera.identity, camera]));
@@ -485,12 +1106,11 @@ async function approveCamera(caller: Caller, rawBody: string | undefined) {
   const identity = String(body.identity ?? '');
   const assignedTo = String(body.assignedTo ?? '');
 
-  if (!/^[A-Za-z0-9._-]{3,64}$/.test(identity)) return fail(400, 'Invalid camera identity');
+  if (!CAMERA_IDENTITY.test(identity)) return fail(400, 'Invalid camera identity');
   const outOfScope = refuseOutOfScope(caller, assignedTo);
   if (outOfScope) return outOfScope;
 
-  const discovered = await queryPrefix<DiscoveredRecord>(caller.tenantId, key.discovered(identity));
-  const record = discovered[0];
+  const record = await getRecord<DiscoveredRecord>(siteOfThing(assignedTo), key.discovered(identity));
   if (!record) return fail(404, 'No such discovered camera');
   // Assigning to an agent that cannot see it yields a stream that never starts.
   if (!Object.keys(record.reachableBy ?? {}).includes(assignedTo)) {
@@ -498,7 +1118,7 @@ async function approveCamera(caller: Caller, rawBody: string | undefined) {
   }
 
   const camera: CameraRecord = {
-    pk: key.tenant(caller.tenantId), sk: key.camera(identity), identity,
+    pk: siteOfThing(assignedTo), sk: key.camera(identity), identity,
     cameraId: typeof body.cameraId === 'string' && isValidId(body.cameraId) ? body.cameraId : slugFor(identity),
     displayName: String(body.displayName ?? record.model ?? identity).slice(0, 128),
     assignedTo,
@@ -507,25 +1127,156 @@ async function approveCamera(caller: Caller, rawBody: string | undefined) {
     sourceCodec: body.sourceCodec ? String(body.sourceCodec) : undefined,
     approvedAt: Math.floor(Date.now() / 1000), approvedBy: caller.email,
   };
+  const previousOwner = (await getRecord<CameraRecord>(siteOfThing(assignedTo), key.camera(identity)))?.assignedTo;
+
   await ddb.send(new PutCommand({ TableName: TABLE, Item: camera }));
-  await pushConfig(caller.tenantId, assignedTo);
-  return json(200, { approved: camera.cameraId, assignedTo });
+  await pushConfig(assignedTo);
+  // Reassignment used to tell the new owner and nobody else. The old agent's
+  // configVersion never moved, so it never refetched, never learned the camera
+  // had been taken away, and went on publishing into the same S3 prefix the
+  // new one now writes — two agents interleaving segments under one key, which
+  // is the exact outcome single ownership exists to prevent.
+  if (previousOwner && previousOwner !== assignedTo) {
+    await pushConfig(previousOwner);
+  }
+  return json(200, { approved: camera.cameraId, assignedTo, reassignedFrom: previousOwner ?? null });
 }
 
-async function removeCamera(caller: Caller, identity: string | undefined) {
-  if (!can(caller, 'manageEstate')) return fail(403, 'Not permitted');
-  if (!identity) return fail(400, 'Camera identity is required');
+/**
+ * Renames a camera.
+ *
+ * The name is the only thing about a camera an operator chooses, and until
+ * this existed it could only be chosen once, at approval, from whatever the
+ * device happened to say about itself. A camera that said nothing was approved
+ * as its own MAC address and stayed that way, so a wall of tiles read
+ * "mac-2818fdf1e5be" where it should have read "Front Gate".
+ *
+ * Deliberately only the name. Identity, assignment and profiles are what the
+ * stream is built from; letting a rename touch them would make a typing
+ * mistake capable of stopping a camera.
+ */
+async function renameCamera(caller: Caller, identity: string | undefined, rawBody: string | undefined) {
+  if (!can(caller, 'manageEstate')) return fail(403, 'Not permitted to rename cameras');
+  if (!identity || !CAMERA_IDENTITY.test(identity)) return fail(400, 'Invalid camera identity');
 
-  const existing = await queryPrefix<CameraRecord>(caller.tenantId, key.camera(identity));
-  if (existing[0]?.assignedTo) {
-    const outOfScope = refuseOutOfScope(caller, existing[0].assignedTo);
-    if (outOfScope) return outOfScope;
+  let body: { displayName?: unknown; premisesId?: unknown; tenantId?: unknown };
+  try {
+    body = JSON.parse(rawBody ?? '{}');
+  } catch {
+    return fail(400, 'Body must be JSON');
   }
-  await ddb.send(new DeleteCommand({
-    TableName: TABLE, Key: { pk: key.tenant(caller.tenantId), sk: key.camera(identity) },
+
+  const displayName = String(body.displayName ?? '').trim();
+  // The same rule as every other name in the system: no double hyphens, no
+  // double spaces. Thing names are built by joining on "--", so a name
+  // carrying one would produce an identifier that cannot be taken apart again.
+  if (!isValidDisplayName(displayName)) {
+    return fail(400,
+      'displayName must be 3-64 characters of letters, digits, single spaces and single hyphens, '
+      + 'with no double hyphens and no double spaces');
+  }
+
+  const forTenant = readTenant(caller, typeof body.tenantId === 'string' ? body.tenantId : undefined);
+  if (!forTenant) return fail(403, 'Not permitted to act on that tenant');
+  const site = siteOf(caller, forTenant, typeof body.premisesId === 'string' ? body.premisesId : undefined);
+  if (site.refusal) return site.refusal;
+
+  const existing = await getRecord<CameraRecord>(site.pk!, key.camera(identity));
+  if (!existing) return fail(404, 'No such camera');
+  const outOfScope = refuseOutOfScope(caller, existing.assignedTo);
+  if (outOfScope) return outOfScope;
+
+  await ddb.send(new UpdateCommand({
+    TableName: TABLE,
+    Key: { pk: site.pk!, sk: key.camera(identity) },
+    UpdateExpression: 'SET displayName = :name',
+    ExpressionAttributeValues: { ':name': displayName },
   }));
-  if (existing[0]?.assignedTo) await pushConfig(caller.tenantId, existing[0].assignedTo);
+  // The agent labels its own logs and its ffmpeg processes with this, so it
+  // should hear about it rather than keep using the name it was given once.
+  await pushConfig(existing.assignedTo);
+
+  return json(200, { identity, displayName, assignedTo: existing.assignedTo });
+}
+
+async function removeCamera(
+  caller: Caller,
+  identity: string | undefined,
+  premisesId?: string,
+  requestedTenant?: string,
+) {
+  if (!can(caller, 'manageEstate')) return fail(403, 'Not permitted');
+  const forTenant = readTenant(caller, requestedTenant);
+  if (!forTenant) return fail(403, 'Not permitted to act on that tenant');
+  const site = siteOf(caller, forTenant, premisesId);
+  if (site.refusal) return site.refusal;
+  // Shaped like the identity approveCamera accepts. Without this an unbounded
+  // path parameter reached a key expression unchecked.
+  if (!identity || !CAMERA_IDENTITY.test(identity)) return fail(400, 'Invalid camera identity');
+
+  const existing = await getRecord<CameraRecord>(site.pk, key.camera(identity));
+  if (!existing) return fail(404, 'No such camera');
+  // The scope check used to sit inside `if (assignedTo)`, so a record without
+  // an owner was deleted by anyone in the tenant, and a 200 came back either
+  // way whether or not anything had been there.
+  const outOfScope = existing.assignedTo ? refuseOutOfScope(caller, existing.assignedTo) : null;
+  if (outOfScope) return outOfScope;
+
+  await ddb.send(new DeleteCommand({
+    TableName: TABLE, Key: { pk: site.pk, sk: key.camera(identity) },
+  }));
+  if (existing.assignedTo) await pushConfig(existing.assignedTo);
   return json(200, { removed: identity });
+}
+
+/**
+ * The scopes a credential may be filed under.
+ *
+ * "*" is the first site-wide slot and "*-2" to "*-5" are the rest: a site
+ * commonly has more than one account in use across its cameras, and the
+ * installer's ordering is a judgement about which is most likely to work. Five
+ * is a cap on how many refusals a scan will provoke before giving up, which
+ * matters on devices that lock an account out after a handful.
+ *
+ * Anything else names a single camera by its identity.
+ */
+const SITE_WIDE_SCOPE = /^\*(-[2-5])?$/;
+
+export const MAX_SITE_CREDENTIALS = 5;
+
+function isCredentialScope(scope: string): boolean {
+  return SITE_WIDE_SCOPE.test(scope) || /^[A-Za-z0-9._-]{3,64}$/.test(scope);
+}
+
+/**
+ * What is filed against an agent, without any of the secrets.
+ *
+ * Returns the account names and when they were set, never the ciphertext: the
+ * console needs to show what is configured so it can be corrected, and nothing
+ * here needs the password to do that.
+ */
+async function listCredentials(caller: Caller, thingName: string | undefined) {
+  if (!can(caller, 'manageCredentials')) return fail(403, 'Not permitted to manage credentials');
+  const thing = String(thingName ?? '');
+  const outOfScope = refuseOutOfScope(caller, thing);
+  if (outOfScope) return outOfScope;
+
+  const rows = await queryPrefix<Record<string, unknown>>(
+    siteOfThing(thing), `CREDENTIAL#${thing}#`);
+
+  return json(200, {
+    thingName: thing,
+    maxSiteCredentials: MAX_SITE_CREDENTIALS,
+    credentials: rows
+      .map((row) => ({
+        scope: String(row.scope ?? '*'),
+        username: typeof row.username === 'string' ? row.username : null,
+        storedAt: row.storedAt ?? null,
+        storedBy: row.storedBy ?? null,
+        siteWide: SITE_WIDE_SCOPE.test(String(row.scope ?? '*')),
+      }))
+      .sort((a, b) => a.scope.localeCompare(b.scope)),
+  });
 }
 
 async function storeCredential(caller: Caller, rawBody: string | undefined) {
@@ -538,20 +1289,68 @@ async function storeCredential(caller: Caller, rawBody: string | undefined) {
   const outOfScope = refuseOutOfScope(caller, thing);
   if (outOfScope) return outOfScope;
   if (!/^[A-Za-z0-9+/=]{64,2048}$/.test(ciphertext)) return fail(400, 'Ciphertext must be base64 of plausible RSA size');
-  if (scope !== '*' && !/^[A-Za-z0-9._-]{3,64}$/.test(scope)) return fail(400, 'Invalid scope');
+  if (!isCredentialScope(scope)) return fail(400, 'Invalid scope');
+
+  // The account name travels in the clear, on purpose. It is not the secret -
+  // the password is - and without it the console can only offer "a credential
+  // is set", which cannot be reviewed, corrected or told apart from the other
+  // four.
+  const username = typeof body.username === 'string' ? body.username.trim().slice(0, 64) : '';
 
   // There is deliberately no route that returns a credential: this API is a
   // courier for ciphertext it has no key to open.
   await ddb.send(new PutCommand({
     TableName: TABLE,
     Item: {
-      pk: key.tenant(caller.tenantId), sk: key.credential(thing, scope),
-      thingName: thing, scope, ciphertext,
+      pk: siteOfThing(thing), sk: key.credential(thing, scope),
+      thingName: thing, scope, ciphertext, username,
       storedAt: Math.floor(Date.now() / 1000), storedBy: caller.email,
     },
   }));
-  await pushConfig(caller.tenantId, thing);
+  await pushConfig(thing);
   return json(200, { stored: scope, thingName: thing });
+}
+
+/**
+ * Tells an agent to install a build and restart into it.
+ *
+ * The alternative is walking to every site, which stops scaling at the second
+ * one. The instruction carries a presigned link rather than a bare version so
+ * the agent needs no credentials of its own to fetch it, and the link expires
+ * — an instruction replayed a week later reaches a URL that no longer works.
+ *
+ * The agent decides whether to act: it refuses a version it is already
+ * running, a version that is not a version, and a URL that is not this
+ * bucket. Sending the instruction is not the same as it being obeyed, which
+ * is the right way round for something that replaces a program.
+ */
+async function upgradeAgent(caller: Caller, thing: string | undefined, rawBody: string | undefined) {
+  if (!can(caller, 'manageEstate')) return fail(403, 'Not permitted');
+  if (!isThingName(thing)) return fail(400, 'Invalid agent name');
+  const outOfScope = refuseOutOfScope(caller, thing);
+  if (outOfScope) return outOfScope;
+
+  const body = JSON.parse(rawBody ?? '{}') as Record<string, unknown>;
+  const platform = typeof body.platform === 'string' ? body.platform : 'linux';
+  if (!isPlatform(platform)) {
+    return fail(400, `platform must be one of ${PLATFORMS.join(', ')}`);
+  }
+  // The version this control plane is currently publishing. Naming it in the
+  // instruction is what lets the agent refuse to reinstall what it is running.
+  const version = typeof body.version === 'string' && body.version ? body.version : AGENT_VERSION;
+
+  const [url, build] = await Promise.all([
+    bundleUrl(LIVE_BUCKET, platform, version),
+    bundleBuildId(LIVE_BUCKET, platform, version),
+  ]);
+
+  await iot.send(new PublishCommand({
+    topic: `camstream/${thing}/command`, qos: 1,
+    payload: Buffer.from(JSON.stringify({
+      action: 'update', version, build, url, issuedAt: Math.floor(Date.now() / 1000),
+    })),
+  }));
+  return json(200, { requested: 'update', thingName: thing, version, build });
 }
 
 async function triggerScan(caller: Caller, rawBody: string | undefined) {
@@ -575,10 +1374,19 @@ async function triggerScan(caller: Caller, rawBody: string | undefined) {
  * keeps a large site's credentials and assignments clear of the 128KB message
  * limit while still making the change arrive in under a second.
  */
-async function pushConfig(tenantId: string, thing: string): Promise<void> {
+/**
+ * Bumps an agent's config version and tells it.
+ *
+ * Takes only the thing name, which already encodes the tenant and premises.
+ * It used to take a tenant as well and ignore it, which meant five call sites
+ * passing `caller.tenantId` into a parameter that did nothing - and reading as
+ * though the caller's own tenant were the right answer, which elsewhere in
+ * this file it was not.
+ */
+async function pushConfig(thing: string): Promise<void> {
   const updated = await ddb.send(new UpdateCommand({
     TableName: TABLE,
-    Key: { pk: key.tenant(tenantId), sk: key.device(thing) },
+    Key: { pk: siteOfThing(thing), sk: key.device(thing) },
     UpdateExpression: 'SET configVersion = if_not_exists(configVersion, :zero) + :one',
     ExpressionAttributeValues: { ':zero': 0, ':one': 1 },
     ReturnValues: 'UPDATED_NEW',
@@ -595,29 +1403,58 @@ async function pushConfig(tenantId: string, thing: string): Promise<void> {
 
 // ------------------------------------------------------------------- users
 
-async function listUsers(caller: Caller) {
+async function listUsers(caller: Caller, query: Record<string, string | undefined> | undefined) {
   if (!can(caller, 'manageUsers')) return fail(403, 'Not permitted to manage users');
-  const result = await cognito.send(new ListUsersCommand({ UserPoolId: USER_POOL_ID, Limit: 60 }));
 
-  const users = await Promise.all((result.Users ?? []).map(async (user) => {
-    const attributes = Object.fromEntries((user.Attributes ?? []).map((a) => [a.Name, a.Value]));
+  // Every page, not the first sixty. The cap was applied before the tenant
+  // filter, so a tenant whose users sorted late saw an empty console — and
+  // nothing said the list had been truncated.
+  const found = [];
+  let token: string | undefined;
+  do {
+    const page = await cognito.send(new ListUsersCommand({
+      UserPoolId: USER_POOL_ID, Limit: 60, PaginationToken: token,
+    }));
+    found.push(...(page.Users ?? []));
+    token = page.PaginationToken;
+  } while (token && found.length < 5000);
+
+  const rows = found
+    .map((user) => {
+      const attributes = Object.fromEntries((user.Attributes ?? []).map((a) => [a.Name, a.Value]));
+      return {
+        username: user.Username!,
+        email: attributes.email ?? '',
+        tenantId: attributes['custom:tenantId'],
+        premises: attributes['custom:premises'] ?? '',
+        status: user.UserStatus,
+        enabled: user.Enabled,
+      };
+    })
+    .filter((u) => can(caller, 'crossTenant') || u.tenantId === caller.tenantId);
+
+  const page = paginate(rows as unknown as Record<string, unknown>[], {
+    q: query?.q,
+    sortBy: (u) => String(u.email ?? u.username ?? ''),
+    cursor: query?.cursor,
+    limit: query?.limit,
+  });
+
+  // Roles are read for the page, not the pool. Each one is its own Cognito
+  // call, and at the five hundred users this is sold for, asking for all of
+  // them at once put five hundred parallel requests into a quota measured in
+  // tens per second — the list got slower the more it had to show, which is
+  // exactly backwards.
+  const users = await Promise.all(page.items.map(async (row) => {
     const groups = await cognito.send(new AdminListGroupsForUserCommand({
-      UserPoolId: USER_POOL_ID, Username: user.Username!,
+      UserPoolId: USER_POOL_ID, Username: String(row.username),
     }));
     const held = (groups.Groups ?? []).map((g) => g.GroupName).filter((g): g is Role =>
       (ROLES as readonly string[]).includes(g ?? ''));
-    return {
-      username: user.Username, email: attributes.email,
-      tenantId: attributes['custom:tenantId'],
-      premises: attributes['custom:premises'] ?? '',
-      role: held[0] ?? 'viewer',
-      status: user.UserStatus, enabled: user.Enabled,
-    };
+    return { ...row, role: held[0] ?? 'viewer' };
   }));
 
-  return json(200, {
-    users: users.filter((u) => can(caller, 'crossTenant') || u.tenantId === caller.tenantId),
-  });
+  return json(200, { total: page.total, cursor: page.cursor, users });
 }
 
 async function createUser(caller: Caller, rawBody: string | undefined) {
@@ -635,6 +1472,9 @@ async function createUser(caller: Caller, rawBody: string | undefined) {
 
   const tenantId = targetTenant(caller, body.tenantId);
   if (!tenantId) return fail(403, 'Not permitted to act on that tenant');
+  if (!(await customerExists(tenantId))) {
+    return fail(404, `No customer with the id "${tenantId}"`);
+  }
 
   const requested = Array.isArray(body.premises)
     ? body.premises.filter((p): p is string => typeof p === 'string' && isValidId(p))
@@ -666,6 +1506,128 @@ async function createUser(caller: Caller, rawBody: string | undefined) {
   return json(200, { created: email, tenantId, role, premises });
 }
 
+/**
+ * Removes an account, within the caller's own tenant.
+ *
+ * The tenant check is the point. Listing users has always been filtered by
+ * tenant, but deleting one was not — so an administrator who knew or guessed
+ * an address in another tenant could remove that account, up to and including
+ * a superadmin. Usernames are email addresses, so the guess did not even have
+ * to be an informed one.
+ */
+/**
+ * Changes a user's role, the sites they may see, or both.
+ *
+ * The routes were create, list and delete. AdminRemoveUserFromGroup was
+ * granted to this function and never called, so changing someone's role — or
+ * moving them between sites, which the reasoning for making `custom:premises`
+ * mutable calls routine — meant deleting the account and re-inviting it.
+ *
+ * The same guards as createUser, because this is the same decision made later:
+ * only a superadmin may mint or unmake one, and nobody may grant access to a
+ * premises they cannot see themselves.
+ */
+async function updateUser(caller: Caller, username: string | undefined, rawBody: string | undefined) {
+  if (!can(caller, 'manageUsers')) return fail(403, 'Not permitted to manage users');
+  if (!username) return fail(400, 'Username is required');
+
+  let body: { role?: unknown; premises?: unknown; enabled?: unknown };
+  try {
+    body = JSON.parse(rawBody ?? '{}');
+  } catch {
+    return fail(400, 'Body must be JSON');
+  }
+
+  const target = await cognito
+    .send(new AdminGetUserCommand({ UserPoolId: USER_POOL_ID, Username: username }))
+    .catch((err) => {
+      if (err?.name === 'UserNotFoundException') return null;
+      throw err;
+    });
+  if (!target) return fail(404, 'No such user');
+
+  const targetTenantId = (target.UserAttributes ?? [])
+    .find((attribute) => attribute.Name === 'custom:tenantId')?.Value;
+  // Indistinguishable from absent, as in deleteUser: this must not become a
+  // way to test whether an address exists in another tenant.
+  if (!can(caller, 'crossTenant') && targetTenantId !== caller.tenantId) {
+    return fail(404, 'No such user');
+  }
+
+  const held = (await cognito.send(new AdminListGroupsForUserCommand({
+    UserPoolId: USER_POOL_ID, Username: username,
+  }))).Groups ?? [];
+  const wasSuperadmin = held.some((g) => g.GroupName === 'superadmin');
+  if (wasSuperadmin && !can(caller, 'crossTenant')) {
+    return fail(403, 'Only a superadmin may change a superadmin');
+  }
+
+  const changed: Record<string, unknown> = {};
+
+  if (body.role !== undefined) {
+    const role = String(body.role) as Role;
+    if (!(ROLES as readonly string[]).includes(role)) {
+      return fail(400, `role must be one of ${ROLES.join(', ')}`);
+    }
+    if (role === 'superadmin' && !can(caller, 'crossTenant')) {
+      return fail(403, 'Only a superadmin may create a superadmin');
+    }
+    // Every role is removed before the new one is added, or an account that
+    // was demoted would keep whichever of its old groups outranked the new.
+    for (const group of held) {
+      if (group.GroupName && group.GroupName !== role) {
+        await cognito.send(new AdminRemoveUserFromGroupCommand({
+          UserPoolId: USER_POOL_ID, Username: username, GroupName: group.GroupName,
+        }));
+      }
+    }
+    if (!held.some((g) => g.GroupName === role)) {
+      await cognito.send(new AdminAddUserToGroupCommand({
+        UserPoolId: USER_POOL_ID, Username: username, GroupName: role,
+      }));
+    }
+    changed.role = role;
+  }
+
+  if (body.premises !== undefined) {
+    const requested = Array.isArray(body.premises)
+      ? body.premises.filter((p): p is string => typeof p === 'string' && isValidId(p))
+      : [];
+    const beyond = requested.filter((p) => !visible(caller, p));
+    if (beyond.length > 0) {
+      return fail(403, `You cannot grant access to: ${beyond.join(', ')}`);
+    }
+    // A restricted administrator must not be able to lift someone else's
+    // restriction, which clearing the list would do.
+    if (requested.length === 0 && caller.premises.length > 0) {
+      return fail(403, 'Restricted accounts cannot grant access to every premises');
+    }
+    await cognito.send(new AdminUpdateUserAttributesCommand({
+      UserPoolId: USER_POOL_ID, Username: username,
+      UserAttributes: [{ Name: 'custom:premises', Value: requested.join(',') }],
+    }));
+    changed.premises = requested;
+  }
+
+  if (body.enabled !== undefined) {
+    const enabled = body.enabled === true;
+    // Locking yourself out of the console you administer is not something to
+    // discover after the fact, and there may be no one else who can undo it.
+    if (!enabled && username === caller.sub) {
+      return fail(400, 'You cannot disable your own account');
+    }
+    await cognito.send(enabled
+      ? new AdminEnableUserCommand({ UserPoolId: USER_POOL_ID, Username: username })
+      : new AdminDisableUserCommand({ UserPoolId: USER_POOL_ID, Username: username }));
+    changed.enabled = enabled;
+  }
+
+  if (Object.keys(changed).length === 0) {
+    return fail(400, 'Nothing to change — supply role, premises or enabled');
+  }
+  return json(200, { updated: username, ...changed });
+}
+
 async function deleteUser(caller: Caller, username: string | undefined) {
   if (!can(caller, 'manageUsers')) return fail(403, 'Not permitted to manage users');
   if (!username) return fail(400, 'Username is required');
@@ -673,6 +1635,33 @@ async function deleteUser(caller: Caller, username: string | undefined) {
   if (username === caller.email || username === caller.sub) {
     return fail(400, 'You cannot delete your own account');
   }
+
+  const target = await cognito
+    .send(new AdminGetUserCommand({ UserPoolId: USER_POOL_ID, Username: username }))
+    .catch((err) => {
+      if (err?.name === 'UserNotFoundException') return null;
+      throw err;
+    });
+  // Absent and forbidden are the same answer, so this cannot be used to test
+  // whether an address exists in another tenant.
+  if (!target) return fail(404, 'No such user');
+
+  const targetTenant = (target.UserAttributes ?? [])
+    .find((attribute) => attribute.Name === 'custom:tenantId')?.Value;
+  if (!can(caller, 'crossTenant') && targetTenant !== caller.tenantId) {
+    return fail(404, 'No such user');
+  }
+
+  // An admin removing the platform operator from their own tenant would be a
+  // customer evicting the vendor; only another superadmin may do that.
+  const targetGroups = await cognito.send(new AdminListGroupsForUserCommand({
+    UserPoolId: USER_POOL_ID, Username: username,
+  }));
+  const targetIsSuperadmin = (targetGroups.Groups ?? []).some((g) => g.GroupName === 'superadmin');
+  if (targetIsSuperadmin && !can(caller, 'crossTenant')) {
+    return fail(403, 'Only a superadmin may remove a superadmin');
+  }
+
   await cognito.send(new AdminDeleteUserCommand({ UserPoolId: USER_POOL_ID, Username: username }));
   return json(200, { deleted: username });
 }

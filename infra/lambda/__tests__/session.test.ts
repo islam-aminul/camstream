@@ -36,13 +36,24 @@ describe('single session across every route', () => {
   });
 
   it('allows a session recorded before origin was tracked', async () => {
+    // Also the state a re-authentication leaves behind, which is what makes
+    // the refusal above recoverable rather than a lockout.
     const ddb = stubDdb({ sessionId: 's1' });
     expect(await sessionSuperseded(ddb, 't', 'user', claims('origin-a'))).toBe(false);
   });
 
-  it('allows a token carrying no origin claim', async () => {
+  it('refuses a token carrying no origin claim against a session that recorded one', async () => {
+    // This used to be allowed, which meant any future token shape lacking the
+    // claim would silently switch single-session off across the whole API
+    // rather than fail one request — the wrong default for a control whose
+    // job is to lock people out.
+    //
+    // Failing closed is recoverable: the 409 signs the player out, and signing
+    // in again rewrites the session record, after which the case below
+    // applies. One forced re-login, not a lockout.
     const ddb = stubDdb({ sessionId: 's1', originJti: 'origin-a' });
-    expect(await sessionSuperseded(ddb, 't', 'user', claims())).toBe(false);
-    expect(await sessionSuperseded(ddb, 't', 'user', undefined)).toBe(false);
+    expect(await sessionSuperseded(ddb, 't', 'user', claims())).toBe(true);
+    expect(await sessionSuperseded(ddb, 't', 'user', undefined)).toBe(true);
   });
+
 });

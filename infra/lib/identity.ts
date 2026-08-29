@@ -39,8 +39,21 @@ export class Identity extends Construct {
         requireDigits: true,
         requireSymbols: false,
       },
+      // Optional rather than required, because turning it on for accounts that
+      // already exist locks them out until each one enrols. A single password
+      // between an attacker and live camera feeds — or, for an administrator,
+      // the estate — is thin for CCTV, so this should be required for the
+      // admin, operator and superadmin groups once they have enrolled. That is
+      // a rollout decision, not a deploy-time one.
+      mfa: cognito.Mfa.OPTIONAL,
+      mfaSecondFactor: { sms: false, otp: true },
       accountRecovery: cognito.AccountRecovery.EMAIL_ONLY,
-      removalPolicy: RemovalPolicy.DESTROY,
+      // Every account in the deployment. A pool cannot be restored from a
+      // backup the way a table can, so losing it means re-inviting every
+      // viewer and administrator — and re-tenanting them, since custom
+      // attributes are immutable by design.
+      deletionProtection: true,
+      removalPolicy: RemovalPolicy.RETAIN,
     });
 
     // Roles are groups, not token attributes: a group can be revoked centrally

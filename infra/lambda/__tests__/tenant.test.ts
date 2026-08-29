@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
-  isValidId, thingName, parseThingName, cookieResource, THING_NAME_PATTERN,
+  isValidId, thingName, parseThingName, cookieResource, isThingName,
   premisesScope, withinScope,
 } from '../shared/tenant';
 import { slugFor } from '../shared/registry';
@@ -21,6 +21,26 @@ describe('identifiers', () => {
   });
 });
 
+describe('the thing-name validator agrees with the parser', () => {
+  it('rejects the names the old regex let through', () => {
+    // '-' inside the character class let the first group swallow a separator,
+    // so a four-part name matched as three and a leading hyphen passed —
+    // names parseThingName rejects, and the device lambda therefore refuses
+    // forever once one has been registered.
+    for (const bad of ['acme--hq--gate-01--evil', '-ab--cde--fgh', 'ab--cde--fgh-', 'ac--me--gate--01']) {
+      expect(isThingName(bad), bad).toBe(false);
+      expect(parseThingName(bad), bad).toBeNull();
+    }
+  });
+
+  it('agrees with the parser on well-formed names', () => {
+    for (const good of ['acme--acme-hq--gate-01', 'demo--hq-north--edge-01']) {
+      expect(isThingName(good), good).toBe(true);
+      expect(parseThingName(good), good).not.toBeNull();
+    }
+  });
+});
+
 describe('thing names', () => {
   const identity = { tenantId: 'acme', premisesId: 'acme-hq', deviceId: 'gate-01' };
 
@@ -28,7 +48,7 @@ describe('thing names', () => {
     const name = thingName(identity);
     expect(name).toBe('acme--acme-hq--gate-01');
     expect(parseThingName(name)).toEqual(identity);
-    expect(THING_NAME_PATTERN.test(name)).toBe(true);
+    expect(isThingName(name)).toBe(true);
   });
 
   it('refuses names that are not exactly three parts', () => {
@@ -55,11 +75,32 @@ describe('cookie scoping', () => {
     expect(cookieResource(origin, 'acme', ['acme-hq'])).toBe(`${origin}/live/acme--acme-hq--*`);
   });
 
-  it('falls back to the tenant for several sites', () => {
-    // A CloudFront policy carries a single wildcard, so a partial restriction
-    // cannot be expressed. Widening is the honest failure; silently granting
-    // only the first site would be worse.
-    expect(cookieResource(origin, 'acme', ['acme-hq', 'acme-dc'])).toBe(`${origin}/live/acme--*`);
+  it('grants one of their own sites, never the whole tenant, when several are allowed', () => {
+    // A CloudFront policy carries a single resource, so several sites cannot
+    // be expressed at once. This used to fall back to the tenant wildcard,
+    // which handed a viewer restricted to two sites every site in the
+    // customer — a restriction that blocked nothing.
+    const scope = cookieResource(origin, 'acme', ['acme-hq', 'acme-dc']);
+    expect(scope).toBe(`${origin}/live/acme--acme-dc--*`);
+    expect(scope).not.toBe(`${origin}/live/acme--*`);
+  });
+
+  it('grants the site being watched, when the console says which', () => {
+    expect(cookieResource(origin, 'acme', ['acme-hq', 'acme-dc'], 'acme-hq'))
+      .toBe(`${origin}/live/acme--acme-hq--*`);
+  });
+
+  it('narrows an unrestricted account to the site it is watching', () => {
+    // Tightening, not a restriction: an administrator may see every site, but
+    // a cookie that grants every site is one that leaks every site if taken.
+    expect(cookieResource(origin, 'acme', [], 'acme-hq'))
+      .toBe(`${origin}/live/acme--acme-hq--*`);
+  });
+
+  it('refuses to widen a restriction just because the console asked', () => {
+    // The claim is the authority; the request only ever narrows within it.
+    expect(cookieResource(origin, 'acme', ['acme-hq'], 'acme-secret'))
+      .toBe(`${origin}/live/acme--acme-hq--*`);
   });
 
   it('does not let one tenant wildcard reach another', () => {
