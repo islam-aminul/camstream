@@ -38,7 +38,10 @@ param(
   # unpacked into $InstallDir\runtime and used in preference to the system.
   [string]$DependencyDir,
   # Escape hatch for a box that genuinely does have a curated PATH.
-  [switch]$AllowSystemTools
+  [switch]$AllowSystemTools,
+  # Take this machine over for a different agent, discarding the identity and
+  # certificate of the one installed here now. One machine hosts one agent.
+  [switch]$Replace
 )
 
 $ErrorActionPreference = 'Stop'
@@ -260,6 +263,41 @@ Copy-Item "$Here\camstream-agent.jar" "$InstallDir\camstream-agent.jar" -Force
 
 if ($IdentityPath) {
   if (-not (Test-Path $IdentityPath)) { throw "Identity file not found: $IdentityPath" }
+
+  # One machine hosts one agent: there is a single service and a single data
+  # directory. Installing a second agent over the first used to produce a
+  # mixture that could not work and did not say so - the new identity, the old
+  # configuration, and the previous agent's certificate. The new agent never
+  # enrolled, the old one stopped, and the console showed both as offline with
+  # no explanation.
+  $incoming = (Get-Content $IdentityPath -Raw | ConvertFrom-Json).thingName
+  $existingIdentity = Join-Path $DataDir 'identity.json'
+  if ((Test-Path $existingIdentity) -and -not $Replace) {
+    $current = (Get-Content $existingIdentity -Raw | ConvertFrom-Json).thingName
+    if ($current -and $current -ne $incoming) {
+      throw @"
+This machine is already running $current.
+Installing $incoming here would replace it: there is one service and one data
+directory, and the two cannot share them.
+
+  To move this machine to $incoming, re-run with -Replace. Its certificate and
+  local state are discarded and it enrols again from this installer.
+
+  To upgrade $current instead, download its own installer from the console.
+"@
+    }
+  }
+
+  if ($Replace -and (Test-Path $existingIdentity)) {
+    # A different agent's certificate is worse than none: the agent would
+    # present it, IoT would refuse the identity it does not match, and the
+    # failure would look like a network problem.
+    Write-Host '  replacing the agent previously installed here'
+    foreach ($stale in 'device.crt', 'device.key', 'identity.json', 'agent.yaml') {
+      Remove-Item (Join-Path $DataDir $stale) -Force -ErrorAction SilentlyContinue
+    }
+  }
+
   # The agent enrols itself from this on first boot, then strips the secrets out
   # of it and keeps the endpoints.
   Copy-Item $IdentityPath "$DataDir\identity.json" -Force
@@ -276,7 +314,10 @@ stateDir: $DataDir
 ffmpegPath: $script:FfmpegBin
 ffprobePath: $script:FfprobeBin
 
-segmentDurationMs: 2000
+# Four seconds. Halving this doubles the S3 request bill, which is the largest
+# single cost in the system - see the tile dial in the console, which quotes
+# the price per hour from this number.
+segmentDurationMs: 4000
 playlistWindow: 4
 idleShutdownSeconds: 30
 
