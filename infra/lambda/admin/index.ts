@@ -27,7 +27,7 @@ class Refused extends Error {
   }
 }
 import { key, slugFor, DEFAULT_MAX_TRANSCODES, queryAllPages, encodeCursor, decodeCursor, REGISTRY_PK, type CameraRecord, type CustomerRecord, type DiscoveredRecord, type PremisesRecord } from '../shared/registry';
-import { buildInstaller, buildInstallerArchive, bundleUrl, isPlatform, PLATFORMS } from './installer';
+import { buildInstaller, buildInstallerArchive, bundleUrl, bundleBuildId, isPlatform, PLATFORMS } from './installer';
 
 const TABLE = process.env.REGISTRY_TABLE!;
 const USER_POOL_ID = process.env.USER_POOL_ID!;
@@ -1279,15 +1279,18 @@ async function upgradeAgent(caller: Caller, thing: string | undefined, rawBody: 
   // instruction is what lets the agent refuse to reinstall what it is running.
   const version = typeof body.version === 'string' && body.version ? body.version : AGENT_VERSION;
 
-  const url = await bundleUrl(LIVE_BUCKET, platform, version);
+  const [url, build] = await Promise.all([
+    bundleUrl(LIVE_BUCKET, platform, version),
+    bundleBuildId(LIVE_BUCKET, platform, version),
+  ]);
 
   await iot.send(new PublishCommand({
     topic: `camstream/${thing}/command`, qos: 1,
     payload: Buffer.from(JSON.stringify({
-      action: 'update', version, url, issuedAt: Math.floor(Date.now() / 1000),
+      action: 'update', version, build, url, issuedAt: Math.floor(Date.now() / 1000),
     })),
   }));
-  return json(200, { requested: 'update', thingName: thing, version });
+  return json(200, { requested: 'update', thingName: thing, version, build });
 }
 
 async function triggerScan(caller: Caller, rawBody: string | undefined) {

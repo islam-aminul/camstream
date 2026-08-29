@@ -37,19 +37,36 @@ public final class Updater {
     private static final String JAR_IN_BUNDLE = "camstream-agent.jar";
 
     private final Path installedJar;
+    /**
+     * Where the identity of the installed build is remembered.
+     *
+     * Beside the state rather than the program: an update replaces the jar, so
+     * anything recorded next to it would be replaced with it.
+     */
+    private final Path buildMarker;
     private final HttpClient http;
     private final Runnable exit;
 
-    public Updater(Path installedJar) {
-        this(installedJar,
+    public Updater(Path installedJar, Path stateDir) {
+        this(installedJar, stateDir.resolve("installed-build"),
                 HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(20)).build(),
                 () -> System.exit(SelfUpdate.RESTART_EXIT_CODE));
     }
 
-    Updater(Path installedJar, HttpClient http, Runnable exit) {
+    Updater(Path installedJar, Path buildMarker, HttpClient http, Runnable exit) {
         this.installedJar = installedJar;
+        this.buildMarker = buildMarker;
         this.http = http;
         this.exit = exit;
+    }
+
+    /** The build this agent last installed, or null if it has never recorded one. */
+    String installedBuild() {
+        try {
+            return Files.exists(buildMarker) ? Files.readString(buildMarker).trim() : null;
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     /**
@@ -57,10 +74,13 @@ public final class Updater {
      *
      * @param runningVersion what this agent is
      * @param wantedVersion  what the console asked for
+     * @param wantedBuild    the identity of that bundle, which is what actually
+     *                       distinguishes two builds of the same version
      * @param url            a presigned link to the bundle
      */
-    public void apply(String runningVersion, String wantedVersion, String url) {
-        SelfUpdate.Decision decision = SelfUpdate.decide(runningVersion, wantedVersion, url);
+    public void apply(String runningVersion, String wantedVersion, String wantedBuild, String url) {
+        SelfUpdate.Decision decision =
+                SelfUpdate.decide(runningVersion, installedBuild(), wantedVersion, wantedBuild, url);
         switch (decision) {
             case ALREADY_CURRENT -> {
                 log.info("update to {} ignored: already running it", wantedVersion);
@@ -87,6 +107,14 @@ public final class Updater {
             // the machine that needs it.
             Path previous = installedJar.resolveSibling(installedJar.getFileName() + ".previous");
             Files.copy(installedJar, previous, StandardCopyOption.REPLACE_EXISTING);
+
+            // Recorded before the swap. If the move succeeds and this did not,
+            // the agent would reinstall the same build on every instruction
+            // for ever; the other way round it merely reinstalls once.
+            if (wantedBuild != null && !wantedBuild.isBlank()) {
+                Files.createDirectories(buildMarker.getParent());
+                Files.writeString(buildMarker, wantedBuild);
+            }
 
             // Last, and as close to atomic as the platform allows: everything
             // that could fail has already happened.

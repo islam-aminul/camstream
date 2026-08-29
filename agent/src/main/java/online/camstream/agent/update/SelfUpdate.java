@@ -43,14 +43,23 @@ public final class SelfUpdate {
     /**
      * Decides whether to act on an update instruction.
      *
-     * The version is compared as a string rather than ordered: this is a
-     * command from the console naming an exact build, not a search for the
-     * newest. Downgrades are therefore allowed, deliberately - rolling a site
-     * back to a known-good agent is the thing you most want to be able to do
-     * remotely, and refusing it would mean the one situation where remote
-     * update matters most is the one it cannot help with.
+     * What identifies a build is the bundle it came from, not its version
+     * string. A version changes when somebody remembers to change it, which
+     * is to say rarely: every build of this project so far has called itself
+     * 0.1.0, so comparing versions would have refused every update as already
+     * current - correctly, by its own reasoning, and uselessly.
+     *
+     * So the control plane sends the bundle's identity and the agent
+     * remembers the one it installed. The version is still carried, for the
+     * log and for the older instruction that omits a build.
+     *
+     * Neither is ordered. This is a command naming an exact build, not a
+     * search for the newest, so downgrades are allowed deliberately: rolling
+     * a site back to a known-good agent is the thing you most want to do
+     * remotely, and the moment it matters most is a bad build.
      */
-    public static Decision decide(String runningVersion, String wantedVersion, String url) {
+    public static Decision decide(String runningVersion, String installedBuild,
+                                  String wantedVersion, String wantedBuild, String url) {
         if (wantedVersion == null || wantedVersion.isBlank() || url == null || url.isBlank()) {
             return Decision.MALFORMED;
         }
@@ -60,10 +69,12 @@ public final class SelfUpdate {
         if (!isTrustedSource(url)) {
             return Decision.REFUSED;
         }
-        if (wantedVersion.equals(runningVersion)) {
-            return Decision.ALREADY_CURRENT;
+        if (wantedBuild != null && !wantedBuild.isBlank()) {
+            // An agent that has never recorded a build has no way to know it
+            // is current, so it installs and starts recording.
+            return wantedBuild.equals(installedBuild) ? Decision.ALREADY_CURRENT : Decision.UPDATE;
         }
-        return Decision.UPDATE;
+        return wantedVersion.equals(runningVersion) ? Decision.ALREADY_CURRENT : Decision.UPDATE;
     }
 
     /** Digits, dots and a short qualifier - not a path, and not a shell. */

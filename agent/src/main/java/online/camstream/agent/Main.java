@@ -221,9 +221,10 @@ public final class Main {
                             // event loop: a download of tens of megabytes must
                             // not hold the connection open and silent long
                             // enough to miss a keepalive.
-                            new Updater(Path.of(config.agentJarPath()))
+                            new Updater(Path.of(config.agentJarPath()), Path.of(config.stateDir))
                                     .apply(DeviceClient.version(),
                                             command.path("version").asText(null),
+                                            command.path("build").asText(null),
                                             command.path("url").asText(null));
                         }
                         default -> log.warn("ignoring unknown command \"{}\"", action);

@@ -1,4 +1,4 @@
-import { S3Client, GetObjectCommand } from '@aws-sdk/client-s3';
+import { S3Client, GetObjectCommand, HeadObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { makeZip, type ZipEntry } from './zip';
 
@@ -358,4 +358,32 @@ ${identity}
   Remove-Item -Recurse -Force $Work -ErrorAction SilentlyContinue
 }
 `;
+}
+
+/**
+ * What identifies a build, as opposed to what it calls itself.
+ *
+ * S3's ETag changes whenever the object does, which a version string does not:
+ * every build of this project so far has called itself 0.1.0, so an agent
+ * comparing versions would refuse them all as already installed. The ETag is
+ * the answer to "is this the same bundle I am running", which is the question
+ * actually being asked.
+ */
+export async function bundleBuildId(
+  bucket: string,
+  platform: Platform,
+  version: string,
+): Promise<string | undefined> {
+  const extension = platform === 'windows' ? 'zip' : 'tar.gz';
+  try {
+    const head = await s3.send(new HeadObjectCommand({
+      Bucket: bucket,
+      Key: `downloads/camstream-agent-${version}-${platform}.${extension}`,
+    }));
+    return head.ETag?.replaceAll('"', '');
+  } catch {
+    // Without one the agent falls back to comparing versions, which is worse
+    // but not wrong. Failing the whole instruction over it would be.
+    return undefined;
+  }
 }
