@@ -331,3 +331,36 @@ describe('the cookies that authorise the video', () => {
     expect(live.error).toContain('Could not authorise video');
   });
 });
+
+describe('asking for a site before the session exists', () => {
+  it('re-cuts the cookie on the next attempt rather than never', async () => {
+    // The live view can reach loadPage before the session has been
+    // established. The first attempt cannot act; the point is that the second
+    // one still can. Recording the request before performing it meant the
+    // cookie stayed cut to the account's own tenant, every segment came back
+    // 403, and the agent published into a stream nobody was allowed to fetch.
+    const session = useSessionStore();
+    session.info = null;
+
+    await session.watch('hq', 'acme');
+    expect(sessionCalls).toHaveLength(0);
+    expect(session.watching).toBeNull();
+
+    session.info = {
+      sessionId: 'sess-1', tenantId: 'acme', expiresAt: 0,
+      refreshInSeconds: 240, displacedPreviousSession: false, scope: '',
+    };
+    await session.watch('hq', 'acme');
+
+    expect(sessionCalls.at(-1)).toMatchObject({ premisesId: 'hq' });
+    expect(session.watching).toBe('hq');
+  });
+
+  it('still does nothing when the site has not changed', async () => {
+    const session = useSessionStore();
+    await session.watch('hq', 'acme');
+    const calls = sessionCalls.length;
+    await session.watch('hq', 'acme');
+    expect(sessionCalls).toHaveLength(calls);
+  });
+});

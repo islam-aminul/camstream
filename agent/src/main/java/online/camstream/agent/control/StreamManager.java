@@ -350,6 +350,10 @@ public final class StreamManager implements AutoCloseable {
                 publisher.meter(monitor);
             }
 
+            // So a playlist built without ffmpeg's own still carries the right
+            // nominal duration rather than a guess.
+            publisher.segmentSeconds(config.segmentDurationMs / 1000.0);
+
             if (restartedRenditions.remove(rendition)) {
                 publisher.encoderRestarted();
             }
