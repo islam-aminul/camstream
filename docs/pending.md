@@ -67,6 +67,9 @@ read it. Flagged in case the other behaviour is preferred.
 
 ## Housekeeping
 
+- **`rpi4b` is a real agent now holding the only camera.** The Windows
+  `gate-house` agent has zero cameras since the reassignment; move it back if
+  the Pi is switched off.
 - **`gate-house-new` is a phantom agent.** Created during installer testing on
   2026-08-29, connected once, never ran a build. It appears in the Agents list
   as an agent that has never checked in.
@@ -84,13 +87,41 @@ read it. Flagged in case the other behaviour is preferred.
 
 ## Unproven rather than unbuilt
 
-The console was measured against ten thousand synthetic cameras, and the Linux
-installer runs against real systemd in CI. But the live estate is one agent and
-one camera. None of the following has been exercised against real hardware:
+A Raspberry Pi 4B (`rpi4b`, Ubuntu 26.04, aarch64) now runs a second agent
+against the same camera, which settled several open questions: the AWS CRT
+native loads on aarch64, fleet provisioning works, discovery and streaming work,
+and the installer's dependency extraction, architecture detection and sudo
+re-exec all behave. It also found three bugs that Windows could not have shown
+— see the git history for 2026-09-03.
 
-- more than one agent publishing at once
+Still unexercised against real hardware:
+
+- more than one agent *publishing* at once (the two exist, but ownership of the
+  single camera moves between them rather than being held by both)
 - more than one viewer on the same site
 - a second premises with real cameras
 - the macOS bundle, on any Mac
 - anything near the 128-stream ceiling, or the hardware-pressure logic that is
   supposed to shed conversions before it is reached
+
+### macOS remote update is probably still broken
+
+The updater's zip-only assumption was fixed by sniffing the gzip magic, which
+covers macOS too since it ships a .tar.gz. But no Mac has ever run this agent,
+and the launchd equivalent of the systemd staging fix has not been looked at at
+all — the same three-way permission problem may or may not exist there.
+
+### A Pi cannot recover its own clock
+
+A Pi has no RTC battery, and Ubuntu's chrony is configured against NTS servers,
+whose key exchange runs over TLS. A box that sits powered off long enough boots
+with a clock far enough out that the TLS handshake fails on certificate
+validity — so it can never fetch the time that would fix the clock. On rpi4b it
+was four months behind and stuck.
+
+Once nudged into range by hand it corrects itself and stays right, but a
+customer's Pi would land in that trap permanently after a long power-off, and
+the first symptom is a TLS failure against AWS IoT that says nothing about
+time. Worth either shipping a non-NTS fallback pool in the installer, writing a
+coarse timestamp at install and restoring it at boot, or at minimum detecting a
+wildly wrong clock at start-up and saying so plainly.
