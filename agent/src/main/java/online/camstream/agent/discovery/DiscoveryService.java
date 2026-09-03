@@ -299,8 +299,12 @@ public final class DiscoveryService implements CameraSource {
         }
     }
 
-    private static String macIdentity(DiscoveredCamera camera) {
-        if (camera.macAddress == null || camera.macAddress.isBlank()) {
+    static String macIdentity(DiscoveredCamera camera) {
+        // Not merely "present": usable. A hardware address can also arrive
+        // from the camera's own ONVIF answer, and an ARP placeholder or a
+        // broadcast address would give every device that produced one the
+        // same identity.
+        if (!MacResolver.isUsable(camera.macAddress)) {
             return null;
         }
         return "mac-" + camera.macAddress.replace(":", "").toLowerCase(java.util.Locale.ROOT);
