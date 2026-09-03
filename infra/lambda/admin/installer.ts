@@ -22,11 +22,38 @@ export function isPlatform(value: unknown): value is Platform {
  * maps to, so it is reachable only through a link signed here — the binary is
  * not a secret, but it should not be anonymously enumerable either.
  */
+/**
+ * One container format for every platform.
+ *
+ * Windows used to get a .zip and the others a .tar.gz, and that split was the
+ * bug rather than an incidental detail of it: the agent's updater opened every
+ * bundle as a zip, so a remote update on Linux failed on the archive header and
+ * stayed on the old build. Two formats meant one of them was always the one
+ * nobody had exercised - the same reason the Windows bundle once silently
+ * stayed months behind the other two when the zip step failed and the tarballs
+ * published anyway.
+ *
+ * tar.gz is the format that exists everywhere. Windows has shipped bsdtar as
+ * \Windows\System32\tar.exe since Windows 10 1803, and Linux and macOS have
+ * always had tar. `unzip` is the one with the extra dependency: it is not
+ * installed by default on a current Ubuntu, and was missing on the first
+ * Raspberry Pi this was deployed to.
+ *
+ * The per-agent installer folder is still a .zip. A person downloads that one
+ * and opens it in Explorer or Finder, which is a different requirement from an
+ * archive only scripts ever read.
+ */
+export const BUNDLE_EXTENSION = 'tar.gz';
+
+/** Where a platform's bundle lives. The one place that spells this out. */
+export function bundleKey(version: string, platform: Platform): string {
+  return `downloads/camstream-agent-${version}-${platform}.${BUNDLE_EXTENSION}`;
+}
+
 export async function bundleUrl(bucket: string, platform: Platform, version: string): Promise<string> {
-  const extension = platform === 'windows' ? 'zip' : 'tar.gz';
   return getSignedUrl(
     s3,
-    new GetObjectCommand({ Bucket: bucket, Key: `downloads/camstream-agent-${version}-${platform}.${extension}` }),
+    new GetObjectCommand({ Bucket: bucket, Key: bundleKey(version, platform) }),
     { expiresIn: DOWNLOAD_TTL_SECONDS },
   );
 }
@@ -360,8 +387,13 @@ if (-not (New-Object Security.Principal.WindowsPrincipal($identity)).IsInRole(
 New-Item -ItemType Directory -Force -Path $Work | Out-Null
 try {
   Write-Host "Fetching the CamStream agent (${version}, windows)..."
-  Invoke-WebRequest -Uri $BundleUrl -OutFile "$Work\\agent.zip" -UseBasicParsing
-  Expand-Archive -Path "$Work\\agent.zip" -DestinationPath $Work -Force
+  Invoke-WebRequest -Uri $BundleUrl -OutFile "$Work\\agent.tar.gz" -UseBasicParsing
+  # tar.exe rather than Expand-Archive: the bundle is a .tar.gz on every
+  # platform now. Windows has shipped bsdtar since 10/1803, and it is the
+  # same single format the Linux and macOS installers and the agent's own
+  # updater read.
+  & tar.exe -xzf "$Work\\agent.tar.gz" -C $Work
+  if ($LASTEXITCODE -ne 0) { throw "Could not unpack the agent bundle (tar exit $LASTEXITCODE)." }
 
   $identityJson = @'
 ${identity}
@@ -401,11 +433,10 @@ export async function bundleBuildId(
   platform: Platform,
   version: string,
 ): Promise<string | undefined> {
-  const extension = platform === 'windows' ? 'zip' : 'tar.gz';
   try {
     const head = await s3.send(new HeadObjectCommand({
       Bucket: bucket,
-      Key: `downloads/camstream-agent-${version}-${platform}.${extension}`,
+      Key: bundleKey(version, platform),
     }));
     return head.ETag?.replaceAll('"', '');
   } catch {
