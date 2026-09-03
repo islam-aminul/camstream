@@ -58,6 +58,7 @@ public final class Updater {
      * anything recorded next to it would be replaced with it.
      */
     private final Path buildMarker;
+    private final Path stateDir;
     private final HttpClient http;
     private final Runnable exit;
 
@@ -70,8 +71,36 @@ public final class Updater {
     Updater(Path installedJar, Path buildMarker, HttpClient http, Runnable exit) {
         this.installedJar = installedJar;
         this.buildMarker = buildMarker;
+        this.stateDir = buildMarker.getParent();
         this.http = http;
         this.exit = exit;
+    }
+
+    /**
+     * Where a downloaded build can actually be put down.
+     *
+     * Beside the installed jar when that is possible, which is the Windows
+     * service and anything running as an administrator, and is what the
+     * launcher there already looks for.
+     *
+     * Otherwise the state directory. A hardened systemd unit runs as an
+     * unprivileged user under ProtectSystem=strict, so the installation
+     * directory is read-only to it twice over - by ownership and by the
+     * sandbox. Staging beside the jar could never have worked there, and the
+     * failure was silent: the update downloaded, extracted, verified, and then
+     * could not put the file down.
+     *
+     * Keeping the program directory unwritable by the service is worth more
+     * than the simpler path, so the unit installs the staged jar as root
+     * before the JVM starts.
+     */
+    Path stagingPath() {
+        Path beside = installedJar.resolveSibling(installedJar.getFileName() + ".new");
+        Path directory = installedJar.getParent();
+        if (directory != null && Files.isWritable(directory)) {
+            return beside;
+        }
+        return stateDir.resolve(installedJar.getFileName() + ".new");
     }
 
     /** The build this agent last installed, or null if it has never recorded one. */
@@ -116,10 +145,11 @@ public final class Updater {
             download(url, bundle);
             Path staged = extractJar(bundle, work);
 
-            // Beside the installed jar, not over it. The launcher moves it into
-            // place before the next JVM starts; nothing here touches a file
-            // that something is currently running from.
-            Path pending = installedJar.resolveSibling(installedJar.getFileName() + ".new");
+            // Never over the installed jar. The launcher or the unit moves it
+            // into place before the next JVM starts; nothing here touches a
+            // file that something is currently running from.
+            Path pending = stagingPath();
+            Files.createDirectories(pending.getParent());
             Files.move(staged, pending, StandardCopyOption.REPLACE_EXISTING);
 
             // Recorded before the exit. If the agent restarted into the new
