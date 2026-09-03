@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, QueryCommand, PutCommand, DeleteCommand, UpdateCommand, GetCommand } from '@aws-sdk/lib-dynamodb';
+import { DynamoDBDocumentClient, QueryCommand, PutCommand, DeleteCommand, UpdateCommand, GetCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
 import { IoTDataPlaneClient, PublishCommand } from '@aws-sdk/client-iot-data-plane';
 import {
   IoTClient, ListThingPrincipalsCommand, DetachThingPrincipalCommand, ListAttachedPoliciesCommand,
@@ -97,6 +97,8 @@ export async function handler(
       case 'GET /api/admin/discovered':  return await listDiscovered(caller,
           event.queryStringParameters?.premisesId, event.queryStringParameters?.tenantId);
       case 'POST /api/admin/cameras':    return await approveCamera(caller, event.body);
+      case 'POST /api/admin/cameras/move':
+        return await moveCameras(caller, event.body);
       case 'PATCH /api/admin/cameras/{identity}':
         return await renameCamera(caller, event.pathParameters?.identity, event.body);
       case 'DELETE /api/admin/cameras/{identity}':
@@ -1140,6 +1142,107 @@ async function approveCamera(caller: Caller, rawBody: string | undefined) {
     await pushConfig(previousOwner);
   }
   return json(200, { approved: camera.cameraId, assignedTo, reassignedFrom: previousOwner ?? null });
+}
+
+/**
+ * Moves cameras between the agents of one premises, all or nothing.
+ *
+ * A move is one entry and a swap is two, which is why this takes a list rather
+ * than a single camera. Two cameras exchanging agents cannot be done as two
+ * requests: the first would succeed, the second could fail its reachability
+ * check, and the estate would be left in a state nobody asked for - both
+ * cameras on one agent, one of them dark. DynamoDB applies the whole set or
+ * none of it.
+ *
+ * Reassignment already existed inside approveCamera, but only as a side effect
+ * of re-approving, which meant re-stating a camera's name and profile tokens to
+ * change the one field being changed. This does only the thing it says.
+ *
+ * Every agent that gains or loses a camera is told. That matters more than it
+ * looks: an agent that is not told goes on publishing into the same S3 prefix
+ * the new owner now writes, and two agents interleaving segments under one key
+ * is exactly what single ownership exists to prevent.
+ */
+async function moveCameras(caller: Caller, rawBody: string | undefined) {
+  if (!can(caller, 'manageEstate')) return fail(403, 'Not permitted to move cameras');
+
+  let body: { moves?: unknown; premisesId?: unknown; tenantId?: unknown };
+  try {
+    body = JSON.parse(rawBody ?? '{}');
+  } catch {
+    return fail(400, 'Body must be JSON');
+  }
+
+  const raw = Array.isArray(body.moves) ? body.moves : [];
+  if (raw.length === 0) return fail(400, 'moves must be a non-empty array');
+  // The transaction limit is 100; a premises-wide reshuffle should be several
+  // requests rather than one that half-applies at an unpredictable boundary.
+  if (raw.length > 25) return fail(400, 'at most 25 moves at a time');
+
+  const moves = raw.map((entry) => {
+    const move = entry as { identity?: unknown; assignedTo?: unknown };
+    return { identity: String(move.identity ?? ''), assignedTo: String(move.assignedTo ?? '') };
+  });
+  for (const move of moves) {
+    if (!CAMERA_IDENTITY.test(move.identity)) return fail(400, `Invalid camera identity: ${move.identity}`);
+    if (!isThingName(move.assignedTo)) return fail(400, `Invalid agent name: ${move.assignedTo}`);
+  }
+  if (new Set(moves.map((m) => m.identity)).size !== moves.length) {
+    return fail(400, 'the same camera appears twice');
+  }
+
+  const forTenant = readTenant(caller, typeof body.tenantId === 'string' ? body.tenantId : undefined);
+  if (!forTenant) return fail(403, 'Not permitted to act on that tenant');
+  const site = siteOf(caller, forTenant, typeof body.premisesId === 'string' ? body.premisesId : undefined);
+  if (site.refusal) return site.refusal;
+
+  // Cameras move between the agents of one premises. Across premises the S3
+  // prefix, the video cookie and the viewer's scope all change, so it is a
+  // different operation and not one to reach by accident.
+  for (const move of moves) {
+    const target = parseThingName(move.assignedTo)!;
+    if (key.site(target.tenantId, target.premisesId) !== site.pk) {
+      return fail(400, `${move.assignedTo} is not an agent of this premises`);
+    }
+    const outOfScope = refuseOutOfScope(caller, move.assignedTo);
+    if (outOfScope) return outOfScope;
+  }
+
+  const touched = new Set<string>();
+  for (const move of moves) {
+    const camera = await getRecord<CameraRecord>(site.pk!, key.camera(move.identity));
+    if (!camera) return fail(404, `No such camera: ${move.identity}`);
+    // An agent that cannot see the camera cannot publish it, so the move would
+    // produce a tile that never starts and no explanation of why.
+    const discovered = await getRecord<DiscoveredRecord>(site.pk!, key.discovered(move.identity));
+    if (!Object.keys(discovered?.reachableBy ?? {}).includes(move.assignedTo)) {
+      return fail(400,
+        `${move.assignedTo} cannot reach ${camera.displayName || move.identity}. `
+        + 'Only an agent that has discovered a camera can publish it.');
+    }
+    touched.add(camera.assignedTo);
+    touched.add(move.assignedTo);
+  }
+
+  await ddb.send(new TransactWriteCommand({
+    TransactItems: moves.map((move) => ({
+      Update: {
+        TableName: TABLE,
+        Key: { pk: site.pk!, sk: key.camera(move.identity) },
+        UpdateExpression: 'SET assignedTo = :to',
+        ExpressionAttributeValues: { ':to': move.assignedTo },
+        // The record was read a moment ago; this refuses a camera deleted in
+        // between rather than recreating it as a fragment.
+        ConditionExpression: 'attribute_exists(sk)',
+      },
+    })),
+  }));
+
+  // After the writes, so an agent cannot fetch a configuration describing a
+  // state the transaction then failed to reach.
+  await Promise.all([...touched].map((thing) => pushConfig(thing)));
+
+  return json(200, { moved: moves.length, agentsNotified: [...touched].sort() });
 }
 
 /**

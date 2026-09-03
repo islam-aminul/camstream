@@ -191,6 +191,18 @@ export const api = {
       .then((r): Page<Camera> => ({ total: r.total, cursor: r.cursor, items: r.cameras })),
 
   /**
+   * Moves cameras between the agents of one premises, all or nothing.
+   *
+   * A move is one entry and a swap is two. Two requests would not do: the
+   * first would succeed, the second could be refused, and both cameras would
+   * end up on one agent with nobody having asked for that.
+   */
+  moveCameras: (body: {
+    moves: { identity: string; assignedTo: string }[];
+    premisesId: string; tenantId?: string;
+  }) => post<{ moved: number; agentsNotified: string[] }>('/api/admin/cameras/move', body),
+
+  /**
    * Renames one camera. The only thing about a camera an operator chooses,
    * and until this existed it could only be chosen at approval time.
    */
