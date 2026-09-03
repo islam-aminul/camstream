@@ -13,6 +13,13 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.time.Duration;
 import java.util.Enumeration;
+import java.io.BufferedInputStream;
+import java.io.EOFException;
+import java.io.IOException;
+import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.StandardOpenOption;
+import java.util.zip.GZIPInputStream;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 
@@ -159,24 +166,140 @@ public final class Updater {
      * fails here, on a temporary file, rather than after it has replaced the
      * program that would have reported the problem.
      */
-    private Path extractJar(Path bundle, Path work) throws Exception {
+    Path extractJar(Path bundle, Path work) throws Exception {
+        Path staged = work.resolve("camstream-agent.jar");
+        if (isGzip(bundle)) {
+            extractFromTarGz(bundle, staged);
+        } else {
+            extractFromZip(bundle, staged);
+        }
+        // The extracted jar must itself be a readable archive with a manifest,
+        // or the JVM will refuse it after the swap.
+        try (ZipFile check = new ZipFile(staged.toFile())) {
+            if (check.getEntry("META-INF/MANIFEST.MF") == null) {
+                throw new IllegalStateException("extracted jar has no manifest");
+            }
+        }
+        return staged;
+    }
+
+    /**
+     * Which shape of bundle this is, from its first two bytes.
+     *
+     * Windows ships a .zip and the other platforms a .tar.gz, and this used to
+     * assume the former unconditionally - so a remote update on Linux or macOS
+     * downloaded the right bundle, failed with "zip END header not found", and
+     * stayed on the old build. Every agent not on Windows could only be
+     * upgraded by walking to it, which is the thing remote update exists to
+     * avoid.
+     *
+     * Sniffed rather than taken from the URL: the URL is presigned and carries
+     * a query string, and a redirect could change the extension without
+     * changing what arrives.
+     */
+    private static boolean isGzip(Path bundle) throws IOException {
+        try (InputStream in = Files.newInputStream(bundle)) {
+            byte[] magic = in.readNBytes(2);
+            return magic.length == 2 && (magic[0] & 0xff) == 0x1f && (magic[1] & 0xff) == 0x8b;
+        }
+    }
+
+    private static void extractFromZip(Path bundle, Path staged) throws Exception {
         try (ZipFile zip = new ZipFile(bundle.toFile())) {
             ZipEntry entry = findJar(zip);
             if (entry == null) {
                 throw new IllegalStateException("bundle contains no " + JAR_IN_BUNDLE);
             }
-            Path staged = work.resolve("camstream-agent.jar");
             try (InputStream in = zip.getInputStream(entry)) {
                 Files.copy(in, staged, StandardCopyOption.REPLACE_EXISTING);
             }
-            // And the extracted jar must itself be a readable archive with a
-            // manifest, or the JVM will refuse it after the swap.
-            try (ZipFile check = new ZipFile(staged.toFile())) {
-                if (check.getEntry("META-INF/MANIFEST.MF") == null) {
-                    throw new IllegalStateException("extracted jar has no manifest");
+        }
+    }
+
+    /**
+     * Reads the jar out of a gzipped tar, without shelling out to tar.
+     *
+     * The format is simple enough to read directly: 512-byte headers, a name
+     * in the first 100 bytes, a size in octal at offset 124, and file content
+     * padded to the next 512-byte boundary. Doing it here keeps the code that
+     * replaces the program self-contained and testable, rather than depending
+     * on a tar binary being present and behaving the same everywhere.
+     */
+    private static void extractFromTarGz(Path bundle, Path staged) throws Exception {
+        try (InputStream in = new GZIPInputStream(
+                new BufferedInputStream(Files.newInputStream(bundle)))) {
+            byte[] header = new byte[512];
+            while (true) {
+                if (in.readNBytes(header, 0, 512) != 512) {
+                    break;
                 }
+                String name = tarString(header, 0, 100);
+                if (name.isEmpty()) {
+                    break;  // Two zero blocks end the archive.
+                }
+                long size = tarSize(header);
+                boolean wanted = name.equals(JAR_IN_BUNDLE) || name.endsWith("/" + JAR_IN_BUNDLE);
+                // Type '0' and NUL are regular files; anything else is a
+                // directory, a link or an extended header and has no content
+                // we want, though it still occupies its padded blocks.
+                char type = (char) header[156];
+                if (wanted && (type == '0' || type == 0)) {
+                    try (OutputStream out = Files.newOutputStream(staged,
+                            StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING)) {
+                        copyExactly(in, out, size);
+                    }
+                    return;
+                }
+                skipExactly(in, padded(size));
             }
-            return staged;
+        }
+        throw new IllegalStateException("bundle contains no " + JAR_IN_BUNDLE);
+    }
+
+    private static String tarString(byte[] header, int offset, int length) {
+        int end = offset;
+        while (end < offset + length && header[end] != 0) {
+            end++;
+        }
+        return new String(header, offset, end - offset, StandardCharsets.US_ASCII).trim();
+    }
+
+    /** The size field: octal, space or NUL padded. */
+    private static long tarSize(byte[] header) {
+        String raw = tarString(header, 124, 12);
+        return raw.isEmpty() ? 0L : Long.parseLong(raw, 8);
+    }
+
+    private static long padded(long size) {
+        long remainder = size % 512;
+        return remainder == 0 ? size : size + (512 - remainder);
+    }
+
+    private static void copyExactly(InputStream in, OutputStream out, long size) throws IOException {
+        byte[] buffer = new byte[64 * 1024];
+        long left = size;
+        while (left > 0) {
+            int read = in.read(buffer, 0, (int) Math.min(buffer.length, left));
+            if (read < 0) {
+                throw new EOFException("bundle ended inside " + JAR_IN_BUNDLE);
+            }
+            out.write(buffer, 0, read);
+            left -= read;
+        }
+        skipExactly(in, padded(size) - size);
+    }
+
+    private static void skipExactly(InputStream in, long count) throws IOException {
+        long left = count;
+        while (left > 0) {
+            long skipped = in.skip(left);
+            if (skipped <= 0) {
+                if (in.read() < 0) {
+                    return;
+                }
+                skipped = 1;
+            }
+            left -= skipped;
         }
     }
 
