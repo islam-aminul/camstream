@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { BUNDLE_EXTENSION, bundleKey, PLATFORMS } from '../lambda/admin/installer';
+import { BUNDLE_EXTENSION, BUNDLE_FORMATS, bundleKey, isBundleFormat, PLATFORMS } from '../lambda/admin/installer';
 
 /**
  * One container format, for every platform.
@@ -58,5 +58,26 @@ describe('the agent bundle', () => {
       expect(body, `${platform} installer should not expand a zip bundle`)
         .not.toContain('Expand-Archive -Path "$Work');
     }
+  });
+
+  it('can still point an agent at the format it was built to read', () => {
+    // The migration affordance. An agent built before the formats were
+    // unified reads zip and nothing else, so telling it to fetch a tarball
+    // fails on the archive header and it stays on the old build for ever -
+    // unable to take the very update that would teach it the new format.
+    // Without this, pass one of a format change needs a person at a keyboard.
+    expect(bundleKey('0.1.0', 'windows', 'zip'))
+      .toBe('downloads/camstream-agent-0.1.0-windows.zip');
+    expect(bundleKey('0.1.0', 'windows')).toBe('downloads/camstream-agent-0.1.0-windows.tar.gz');
+  });
+
+  it('refuses a format it does not publish', () => {
+    expect(isBundleFormat('tar.gz')).toBe(true);
+    expect(isBundleFormat('zip')).toBe(true);
+    expect(isBundleFormat('7z')).toBe(false);
+    expect(isBundleFormat(undefined)).toBe(false);
+    // The current format has to be first: it is the default everything else
+    // falls back to.
+    expect(BUNDLE_FORMATS[0]).toBe(BUNDLE_EXTENSION);
   });
 });

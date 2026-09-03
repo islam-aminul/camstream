@@ -27,7 +27,8 @@ class Refused extends Error {
   }
 }
 import { key, slugFor, DEFAULT_MAX_TRANSCODES, MAX_CONCURRENT_TRANSCODES, queryAllPages, encodeCursor, decodeCursor, REGISTRY_PK, type CameraRecord, type CustomerRecord, type DiscoveredRecord, type PremisesRecord } from '../shared/registry';
-import { buildInstaller, buildInstallerArchive, bundleUrl, bundleBuildId, isPlatform, PLATFORMS } from './installer';
+import { buildInstaller, buildInstallerArchive, bundleUrl, bundleBuildId, isPlatform, PLATFORMS,
+  BUNDLE_EXTENSION, BUNDLE_FORMATS, isBundleFormat } from './installer';
 
 const TABLE = process.env.REGISTRY_TABLE!;
 const USER_POOL_ID = process.env.USER_POOL_ID!;
@@ -1442,9 +1443,20 @@ async function upgradeAgent(caller: Caller, thing: string | undefined, rawBody: 
   // instruction is what lets the agent refuse to reinstall what it is running.
   const version = typeof body.version === 'string' && body.version ? body.version : AGENT_VERSION;
 
+  // Almost always the current format. The exception is migrating a fleet off
+  // an old one: an agent built before the formats were unified reads zip and
+  // nothing else, so pointing it at a tarball fails on the archive header and
+  // it stays on the old build for ever - unable to take the very update that
+  // would teach it the new format. Naming the old format here is how such an
+  // agent is brought forward without somebody driving to it.
+  const format = body.format === undefined ? BUNDLE_EXTENSION : body.format;
+  if (!isBundleFormat(format)) {
+    return fail(400, `format must be one of ${BUNDLE_FORMATS.join(', ')}`);
+  }
+
   const [url, build] = await Promise.all([
-    bundleUrl(LIVE_BUCKET, platform, version),
-    bundleBuildId(LIVE_BUCKET, platform, version),
+    bundleUrl(LIVE_BUCKET, platform, version, format),
+    bundleBuildId(LIVE_BUCKET, platform, version, format),
   ]);
 
   await iot.send(new PublishCommand({
@@ -1453,7 +1465,7 @@ async function upgradeAgent(caller: Caller, thing: string | undefined, rawBody: 
       action: 'update', version, build, url, issuedAt: Math.floor(Date.now() / 1000),
     })),
   }));
-  return json(200, { requested: 'update', thingName: thing, version, build });
+  return json(200, { requested: 'update', thingName: thing, version, build, format });
 }
 
 async function triggerScan(caller: Caller, rawBody: string | undefined) {

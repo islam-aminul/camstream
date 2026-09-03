@@ -45,15 +45,45 @@ export function isPlatform(value: unknown): value is Platform {
  */
 export const BUNDLE_EXTENSION = 'tar.gz';
 
-/** Where a platform's bundle lives. The one place that spells this out. */
-export function bundleKey(version: string, platform: Platform): string {
-  return `downloads/camstream-agent-${version}-${platform}.${BUNDLE_EXTENSION}`;
+/**
+ * Formats an agent may be pointed at, newest first.
+ *
+ * "zip" is here only so a fleet can be migrated off it. An agent built before
+ * the formats were unified reads zip and nothing else, so telling it to fetch
+ * a tarball fails on the archive header and it stays on the old build for
+ * ever - it cannot take the very update that would teach it the new format.
+ *
+ * Changing a container format therefore needs two passes: publish a build that
+ * reads both, in the format the fleet can still read; then, once every agent
+ * has it, switch what is published. This parameter is what makes the first
+ * pass possible without visiting machines, which is the whole point of remote
+ * update.
+ */
+export const BUNDLE_FORMATS = ['tar.gz', 'zip'] as const;
+export type BundleFormat = (typeof BUNDLE_FORMATS)[number];
+
+export function isBundleFormat(value: unknown): value is BundleFormat {
+  return typeof value === 'string' && (BUNDLE_FORMATS as readonly string[]).includes(value);
 }
 
-export async function bundleUrl(bucket: string, platform: Platform, version: string): Promise<string> {
+/** Where a platform's bundle lives. The one place that spells this out. */
+export function bundleKey(
+  version: string,
+  platform: Platform,
+  format: BundleFormat = BUNDLE_EXTENSION,
+): string {
+  return `downloads/camstream-agent-${version}-${platform}.${format}`;
+}
+
+export async function bundleUrl(
+  bucket: string,
+  platform: Platform,
+  version: string,
+  format: BundleFormat = BUNDLE_EXTENSION,
+): Promise<string> {
   return getSignedUrl(
     s3,
-    new GetObjectCommand({ Bucket: bucket, Key: bundleKey(version, platform) }),
+    new GetObjectCommand({ Bucket: bucket, Key: bundleKey(version, platform, format) }),
     { expiresIn: DOWNLOAD_TTL_SECONDS },
   );
 }
@@ -432,11 +462,12 @@ export async function bundleBuildId(
   bucket: string,
   platform: Platform,
   version: string,
+  format: BundleFormat = BUNDLE_EXTENSION,
 ): Promise<string | undefined> {
   try {
     const head = await s3.send(new HeadObjectCommand({
       Bucket: bucket,
-      Key: bundleKey(version, platform),
+      Key: bundleKey(version, platform, format),
     }));
     return head.ETag?.replaceAll('"', '');
   } catch {
