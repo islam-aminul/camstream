@@ -957,7 +957,6 @@ async function listCameras(caller: Caller, query: Record<string, string | undefi
       approvedAt: typeof c.approvedAt === 'number' ? c.approvedAt : null,
       approvedBy: c.approvedBy ?? null,
       sourceCodec: c.sourceCodec ?? null,
-      approvedAt: c.approvedAt,
       publishing: publishing.has(`${c.assignedTo}/${c.cameraId}`),
     }))
     .filter((c) => query?.status !== 'publishing' || c.publishing);
