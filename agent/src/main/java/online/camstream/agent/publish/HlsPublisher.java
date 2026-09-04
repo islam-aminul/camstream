@@ -54,6 +54,24 @@ public final class HlsPublisher {
     /** How many segment names to remember. Set from the playlist window. */
     private int uploadedMemory = 64;
 
+    /**
+     * Media that ffmpeg never deletes, and which therefore must never be
+     * forgotten.
+     *
+     * The bound above is safe for segments precisely because ffmpeg removes
+     * them: a name that ages out of the set has already left the directory, so
+     * it is never listed again. The init segment breaks that assumption. It is
+     * written once and stays for the life of the run, so when its name aged out
+     * it looked unuploaded and was sent again — once every uploadedMemory
+     * segments, for as long as anybody watched.
+     *
+     * Small in bytes and invisible in behaviour, which is why it survived: the
+     * only trace is the object's last-modified time marching forward on a file
+     * served as immutable. At two-second segments it is roughly a thousand
+     * pointless requests a day per stream.
+     */
+    private final Set<String> permanent = new java.util.HashSet<>();
+
     private final S3Client s3;
     private final String bucket;
     private final String keyPrefix;
@@ -121,6 +139,16 @@ public final class HlsPublisher {
         }
     }
 
+    /**
+     * ffmpeg's own naming for the fMP4 initialisation segment.
+     *
+     * Named in one place because two behaviours depend on it: the playlist
+     * points at it with EXT-X-MAP, and the uploader must never forget it.
+     */
+    private static boolean isInitSegment(String name) {
+        return name.endsWith("_init.mp4");
+    }
+
     private void uploadMediaFirst() throws IOException {
         if (!Files.isDirectory(directory)) {
             return;
@@ -131,7 +159,8 @@ public final class HlsPublisher {
                     .filter(Files::isRegularFile)
                     .filter(p -> {
                         String name = p.getFileName().toString();
-                        return (name.endsWith(".mp4") || name.endsWith(".m4s")) && !uploaded.contains(name);
+                        return (name.endsWith(".mp4") || name.endsWith(".m4s"))
+                                && !uploaded.contains(name) && !permanent.contains(name);
                     })
                     // Segment names are zero-padded, so lexical order is
                     // chronological — upload oldest first.
@@ -152,7 +181,13 @@ public final class HlsPublisher {
                 continue;
             }
             put(name, content, "video/mp4", "public, max-age=31536000, immutable");
-            uploaded.add(name);
+            // The init segment outlives every window, so it is remembered
+            // outright rather than in the bounded set.
+            if (isInitSegment(name)) {
+                permanent.add(name);
+            } else {
+                uploaded.add(name);
+            }
         }
     }
 
@@ -246,7 +281,7 @@ public final class HlsPublisher {
         try (Stream<Path> entries = Files.list(directory)) {
             return entries
                     .map(path -> path.getFileName().toString())
-                    .filter(name -> name.endsWith("_init.mp4"))
+                    .filter(HlsPublisher::isInitSegment)
                     .findFirst()
                     .orElse(null);
         }

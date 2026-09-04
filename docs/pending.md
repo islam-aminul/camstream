@@ -131,6 +131,26 @@ the same problem — two container formats, which is what actually caused the
 bug — has been done, and `updating.md` records the migration rule that makes a
 future format change survivable.
 
+### Deploying is two steps and the second one is silent
+
+`npx cdk deploy CamStreamApp` ships the lambdas. It does **not** ship the
+console — that is `./scripts/deploy-web.sh`, step 4 in the README, which
+builds the player and syncs it to the bucket.
+
+Nothing connects them. Run only the first and the deploy reports success, the
+API gains its new endpoints, and the site keeps serving whatever build was
+last synced. Found on 2026-09-04: `camstream.online` was serving a bundle from
+28 August, so the clock-drift tag, the "last report" and "in service" columns
+and the rename action had been merged for days and existed nowhere a user
+could see. The API had been redeployed repeatedly in that time, which is what
+makes it convincing — everything that reports success was succeeding.
+
+The failure is silent in both directions: there is no version stamp in the
+console and no check that the bundle behind CloudFront matches the commit, so
+the only way to notice is to fetch the deployed JavaScript and grep it, which
+is how it was found. Worth either folding the web sync into the app stack, or
+printing the deployed bundle's commit somewhere the console shows it.
+
 ## Housekeeping
 
 - **`rpi4b` holds the only camera.** The Windows `gate-house` agent has zero
