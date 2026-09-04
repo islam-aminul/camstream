@@ -6,6 +6,7 @@ import { parseThingName, isValidId } from '../shared/tenant';
 import { key, queryAllPages, type CameraRecord, DEFAULT_MAX_TRANSCODES } from '../shared/registry';
 import { base64Key, bounded, ipAddress, label, macAddress, oneOf } from '../shared/sanitise';
 import { fail, json } from '../shared/http';
+import { emit, METRICS } from '../shared/metrics';
 
 const TABLE = process.env.REGISTRY_TABLE!;
 const DISCOVERY_TTL_SECONDS = 7 * 24 * 60 * 60;
@@ -72,6 +73,11 @@ export async function handler(
     return await sendConfig(pk, thingName);
   }
   if (route === '/api/device/report') {
+    // Agents report on connect and every twenty seconds after. A fleet-wide
+    // sum of zero therefore means nothing is talking to the control plane at
+    // all, which is the alarm worth having - one agent going quiet is a site
+    // losing power and belongs in the console instead.
+    emit(METRICS.AGENT_REPORTS, 1);
     return await acceptReport(pk, thingName, identity.premisesId, event.body);
   }
   return fail(404, `Unknown device route: ${route}`);

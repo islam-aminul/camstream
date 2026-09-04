@@ -1,7 +1,8 @@
-import { CfnOutput, Duration, Stack, StackProps } from 'aws-cdk-lib';
+import { Annotations, CfnOutput, Duration, Stack, StackProps } from 'aws-cdk-lib';
 import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as cloudwatchActions from 'aws-cdk-lib/aws-cloudwatch-actions';
 import * as sns from 'aws-cdk-lib/aws-sns';
+import * as subscriptions from 'aws-cdk-lib/aws-sns-subscriptions';
 import * as acm from 'aws-cdk-lib/aws-certificatemanager';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as route53 from 'aws-cdk-lib/aws-route53';
@@ -92,6 +93,33 @@ export class CamStreamAppStack extends Stack {
       value: alarmTopic.topicArn,
     });
 
+    /*
+     * Who gets told.
+     *
+     * Taken from context rather than written here, because an alarm address is
+     * deployment configuration and often a shared mailbox nobody wants in a
+     * public repository:
+     *
+     *   npx cdk deploy CamStreamApp -c alarmEmail=alerts@example.com
+     *
+     * or set `alarmEmail` in cdk.json to make it stick. AWS sends a
+     * confirmation link once; until it is clicked nothing is delivered, and
+     * "the subscription exists" is not the same as "somebody is being told".
+     *
+     * Without it the alarms still exist and still fire - into a topic with no
+     * subscribers, which is exactly the state this is here to end - so synth
+     * says so out loud rather than deploying a quiet nothing.
+     */
+    const alarmEmail = this.node.tryGetContext('alarmEmail');
+    if (typeof alarmEmail === 'string' && alarmEmail.includes('@')) {
+      alarmTopic.addSubscription(new subscriptions.EmailSubscription(alarmEmail));
+    } else {
+      Annotations.of(this).addWarning(
+        'No alarmEmail in context: alarms will fire into a topic with no subscribers. '
+        + 'Deploy with -c alarmEmail=you@example.com, and confirm the email AWS sends.',
+      );
+    }
+
     for (const [name, fn] of Object.entries(api.functions)) {
       new cloudwatch.Alarm(this, `${name}Errors`, {
         alarmDescription: `${name} is returning errors`,
@@ -109,6 +137,101 @@ export class CamStreamAppStack extends Stack {
       metric: api.httpApi.metricServerError({ period: Duration.minutes(5) }),
       threshold: 5,
       evaluationPeriods: 1,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    }).addAlarmAction(new cloudwatchActions.SnsAction(alarmTopic));
+
+    /*
+     * Throttling, which errors do not cover.
+     *
+     * A throttled invocation is not an error, it is an invocation that never
+     * happened - the caller gets a 429 and the function's own error metric
+     * stays at zero. This account spent weeks capped at ten concurrent
+     * executions against a default of a thousand, shedding requests, and no
+     * alarm here would have said so.
+     */
+    for (const [name, fn] of Object.entries(api.functions)) {
+      new cloudwatch.Alarm(this, `${name}Throttles`, {
+        alarmDescription: `${name} is being throttled - requests are being shed`,
+        metric: fn.metricThrottles({ period: Duration.minutes(5) }),
+        threshold: 1,
+        evaluationPeriods: 1,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      }).addAlarmAction(new cloudwatchActions.SnsAction(alarmTopic));
+    }
+
+    /*
+     * The registry refusing reads or writes.
+     *
+     * On-demand billing makes this rare, but a hot partition does not care
+     * about billing mode: every camera at one site shares a partition key, so
+     * a large site under load is exactly where this would appear. It surfaces
+     * to a viewer as a blank estate rather than as an error.
+     */
+    new cloudwatch.Alarm(this, 'RegistryThrottled', {
+      alarmDescription: 'DynamoDB is throttling the registry',
+      metric: new cloudwatch.MathExpression({
+        expression: 'reads + writes',
+        usingMetrics: {
+          reads: registry.table.metric('ReadThrottleEvents', { statistic: 'Sum' }),
+          writes: registry.table.metric('WriteThrottleEvents', { statistic: 'Sum' }),
+        },
+        period: Duration.minutes(5),
+      }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    }).addAlarmAction(new cloudwatchActions.SnsAction(alarmTopic));
+
+    /*
+     * Nothing is talking to us.
+     *
+     * Every agent reports on connect and on a twenty-second heartbeat, so a
+     * fleet-wide sum of zero over fifteen minutes is not a quiet period - it is
+     * the IoT endpoint, the credential path, or a policy change having locked
+     * every agent out at once. Cameras would go on looking registered in the
+     * console while nothing could publish.
+     *
+     * Deliberately fleet-wide. One agent going quiet is a site losing power,
+     * which belongs in the console rather than in an ops alarm at three in the
+     * morning.
+     *
+     * Missing data breaches here, unlike everywhere else above: no data points
+     * at all is precisely the condition being alarmed on.
+     */
+    new cloudwatch.Alarm(this, 'NoAgentReports', {
+      alarmDescription: 'No agent has reported for fifteen minutes',
+      metric: new cloudwatch.Metric({
+        namespace: 'CamStream',
+        metricName: 'AgentReports',
+        statistic: 'Sum',
+        period: Duration.minutes(15),
+      }),
+      threshold: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD,
+      evaluationPeriods: 1,
+      treatMissingData: cloudwatch.TreatMissingData.BREACHING,
+    }).addAlarmAction(new cloudwatchActions.SnsAction(alarmTopic));
+
+    /*
+     * Viewers being refused.
+     *
+     * A declined rendition is a tile showing "the site is at capacity" that
+     * will not recover by itself: the agent has been asked to convert more
+     * cameras at once than it may. Sustained rather than instantaneous,
+     * because one refusal during a busy minute is the cap working as intended
+     * and an hour of them is a site that needs a bigger machine or a higher
+     * ceiling.
+     */
+    new cloudwatch.Alarm(this, 'TranscodesDeclined', {
+      alarmDescription: 'Viewers are being refused conversions - a site is at capacity',
+      metric: new cloudwatch.Metric({
+        namespace: 'CamStream',
+        metricName: 'TranscodesDeclined',
+        statistic: 'Sum',
+        period: Duration.minutes(15),
+      }),
+      threshold: 10,
+      evaluationPeriods: 2,
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     }).addAlarmAction(new cloudwatchActions.SnsAction(alarmTopic));
 

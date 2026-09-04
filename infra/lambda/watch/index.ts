@@ -8,6 +8,7 @@ import { identify, targetTenant } from '../shared/roles';
 import { readSession, sessionSuperseded } from '../shared/session';
 import { canDecode } from '../shared/playability';
 import { DEFAULT_MAX_TRANSCODES, key, queryAllPages } from '../shared/registry';
+import { emit, METRICS } from '../shared/metrics';
 
 const TABLE = process.env.REGISTRY_TABLE!;
 const IOT_ENDPOINT = process.env.IOT_DATA_ENDPOINT!;
@@ -494,9 +495,14 @@ function applyTranscodeCap(
     }
   }
 
-  return declined.length > 0
-    ? { thingName, renditions: kept, declined, maxConcurrentTranscodes: cap }
-    : { thingName, renditions: kept };
+  if (declined.length > 0) {
+    // Somebody is looking at a tile that says the site is at capacity and will
+    // not recover on its own. Counted fleet-wide: the question an alarm can
+    // answer is "are viewers being refused", not which camera.
+    emit(METRICS.TRANSCODES_DECLINED, declined.length);
+    return { thingName, renditions: kept, declined, maxConcurrentTranscodes: cap };
+  }
+  return { thingName, renditions: kept };
 }
 
 function queryPrefix<T>(pk: string, prefix: string): Promise<T[]> {
