@@ -189,7 +189,12 @@ up, answers ping, and serves SSH.
 
 `fake-hwclock` is now installed on rpi4b, which closes the common case: it
 saves the time on a timer and at shutdown and restores it at boot, so chrony
-starts close enough to finish a handshake. Note that the package's own units
+starts close enough to finish a handshake. Its timer ships as `OnCalendar=hourly`,
+which is too coarse — a power cut then restores a clock up to an hour stale,
+outside the roughly five minutes AWS will sign for, so the agent spends a
+couple of minutes being refused before chrony steps it. Overridden to `*:0/5`
+on rpi4b, which keeps the restored clock inside signing tolerance. Worth
+baking into the installer if Pis become a supported target. Note that the package's own units
 (`fake-hwclock-load`, `-save`, `-save.timer`) are what do the work — the
 SysV-compatible `fake-hwclock.service` is masked deliberately, so trying to
 enable that one fails and is meant to.
