@@ -67,6 +67,24 @@ public final class DeviceClient {
     private volatile int lastReportHash;
     private volatile long configVersion = -1;
 
+    /**
+     * Whether the last attempt to fetch configuration failed.
+     *
+     * Configuration is fetched when the agent connects and when the control
+     * plane pushes a new version. Both are events: if the fetch on connect
+     * fails and no push follows, nothing tries again, and the agent runs
+     * indefinitely with no credentials and no cameras while looking perfectly
+     * healthy - connected, heartbeating, discovering devices it cannot
+     * authenticate against.
+     *
+     * That is not hypothetical. A Raspberry Pi with no clock battery booted
+     * thirty-nine days behind, every signed request was refused as 403, and
+     * the agent sat inert for a day; the console said the camera was
+     * registered but its agent had not reported it. Any throttle, 5xx or
+     * network blip at start-up does the same thing.
+     */
+    private volatile boolean configurationOwed = true;
+
     public DeviceClient(
             AgentConfig config,
             AwsCredentialsProvider credentials,
@@ -120,6 +138,45 @@ public final class DeviceClient {
         }
     }
 
+    /**
+     * Whether this agent still needs its configuration.
+     *
+     * True until a fetch has succeeded, and true again after one fails, so the
+     * supervisor can keep asking. A configured agent answers false and the
+     * retry costs nothing.
+     */
+    public boolean needsConfiguration() {
+        return configurationOwed || configVersion < 0;
+    }
+
+    /**
+     * Says so when the clock is why a request was refused.
+     *
+     * Every signed request carries a timestamp, and AWS refuses one more than
+     * a few minutes out. The refusal itself says only "Forbidden", which sends
+     * whoever reads the log looking at credentials and IAM policies - the two
+     * things that are fine. The server's own Date header is the answer, and it
+     * arrives on the very response that failed.
+     */
+    private static void warnAboutClockSkew(HttpResponse<String> response) {
+        response.headers().firstValue("date").ifPresent(header -> {
+            try {
+                long server = java.time.ZonedDateTime
+                        .parse(header, java.time.format.DateTimeFormatter.RFC_1123_DATE_TIME)
+                        .toInstant().toEpochMilli();
+                long skew = Math.abs(System.currentTimeMillis() - server) / 1000;
+                if (skew > 300) {
+                    log.error("this machine's clock is {} minutes from the server's ({} vs {}). "
+                            + "Signed requests are refused until it is corrected - check NTP; "
+                            + "a board with no clock battery cannot fix this by itself.",
+                            skew / 60, java.time.Instant.now(), java.time.Instant.ofEpochMilli(server));
+                }
+            } catch (Exception ignored) {
+                // A header we cannot parse is not worth a second failure.
+            }
+        });
+    }
+
     /** Fetches configuration if the pushed version is newer than what we hold. */
     public void fetchConfig(long pushedVersion) {
         if (pushedVersion >= 0 && pushedVersion == configVersion) {
@@ -129,10 +186,13 @@ public final class DeviceClient {
             HttpResponse<String> response = send(SdkHttpMethod.GET, "/api/device/config", null);
             if (response.statusCode() / 100 != 2) {
                 log.warn("config fetch rejected: {} {}", response.statusCode(), response.body());
+                warnAboutClockSkew(response);
+                configurationOwed = true;
                 return;
             }
             JsonNode root = MAPPER.readTree(response.body());
             configVersion = root.path("configVersion").asLong(0);
+            configurationOwed = false;
 
             Map<String, String> envelopes = new java.util.LinkedHashMap<>();
             for (JsonNode node : root.path("credentials")) {

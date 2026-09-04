@@ -1148,6 +1148,13 @@ async function approveCamera(caller: Caller, rawBody: string | undefined) {
   // is the exact outcome single ownership exists to prevent.
   if (previousOwner && previousOwner !== assignedTo) {
     await pushConfig(previousOwner);
+    // And take the old owner's live record with it, for the same reason as in
+    // moveCameras: it is what /api/streams hands a player, and it would point
+    // at a prefix the previous agent has stopped writing.
+    await ddb.send(new DeleteCommand({
+      TableName: TABLE,
+      Key: { pk: siteOfThing(assignedTo), sk: key.liveCamera(previousOwner, camera.cameraId) },
+    }));
   }
   return json(200, { approved: camera.cameraId, assignedTo, reassignedFrom: previousOwner ?? null });
 }
@@ -1322,6 +1329,7 @@ async function moveCameras(caller: Caller, rawBody: string | undefined) {
   }
 
   const touched = new Set<string>();
+  const stale: { pk: string; sk: string }[] = [];
   for (const move of moves) {
     const camera = await getRecord<CameraRecord>(site.pk!, key.camera(move.identity));
     if (!camera) return fail(404, `No such camera: ${move.identity}`);
@@ -1335,20 +1343,36 @@ async function moveCameras(caller: Caller, rawBody: string | undefined) {
     }
     touched.add(camera.assignedTo);
     touched.add(move.assignedTo);
+    if (camera.assignedTo !== move.assignedTo) {
+      // The record that tells a viewer where to fetch this camera is written
+      // per agent, so the previous owner's copy has to go with the camera.
+      // Left behind it is not merely untidy: /api/streams returns it, the
+      // player follows it, and every segment request 403s against a prefix
+      // nobody is writing any more. An agent that is still running clears its
+      // own on the next report - but a moved camera is very often one whose
+      // agent has stopped, which is why it was moved.
+      stale.push({ pk: site.pk!, sk: key.liveCamera(camera.assignedTo, camera.cameraId) });
+    }
   }
 
   await ddb.send(new TransactWriteCommand({
-    TransactItems: moves.map((move) => ({
-      Update: {
-        TableName: TABLE,
-        Key: { pk: site.pk!, sk: key.camera(move.identity) },
-        UpdateExpression: 'SET assignedTo = :to',
-        ExpressionAttributeValues: { ':to': move.assignedTo },
-        // The record was read a moment ago; this refuses a camera deleted in
-        // between rather than recreating it as a fragment.
-        ConditionExpression: 'attribute_exists(sk)',
-      },
-    })),
+    TransactItems: [
+      ...moves.map((move) => ({
+        Update: {
+          TableName: TABLE,
+          Key: { pk: site.pk!, sk: key.camera(move.identity) },
+          UpdateExpression: 'SET assignedTo = :to',
+          ExpressionAttributeValues: { ':to': move.assignedTo },
+          // The record was read a moment ago; this refuses a camera deleted in
+          // between rather than recreating it as a fragment.
+          ConditionExpression: 'attribute_exists(sk)',
+        },
+      })),
+      // In the same transaction as the move itself. Done afterwards, a failure
+      // between the two would leave a camera owned by one agent and advertised
+      // from another, which is the state this is here to prevent.
+      ...stale.map((key_) => ({ Delete: { TableName: TABLE, Key: key_ } })),
+    ],
   }));
 
   // After the writes, so an agent cannot fetch a configuration describing a

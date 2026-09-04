@@ -262,6 +262,33 @@ public final class Main {
                             }
                         }));
 
+                /*
+                 * Keep asking for configuration until we have it.
+                 *
+                 * Both existing paths are events - the fetch on connect, and a
+                 * push when the control plane changes something. If the first
+                 * fails and no push follows, nothing tries again, and the agent
+                 * runs with no credentials and no cameras while looking
+                 * healthy: connected, heartbeating, discovering devices it
+                 * cannot authenticate against.
+                 *
+                 * A Pi that booted thirty-nine days behind spent a day in
+                 * exactly that state. Every signed request was refused, and the
+                 * console reported the camera as registered but never seen.
+                 *
+                 * Silent once configured: needsConfiguration() answers false
+                 * and this costs one comparison a minute.
+                 */
+                supervisor.supervise(new Supervisor.Task(
+                        "configuration",
+                        Duration.ofMinutes(1),
+                        false,
+                        () -> {
+                            if (device.needsConfiguration()) {
+                                device.fetchConfig(-1);
+                            }
+                        }));
+
                 if (config.discoveryEnabled) {
                     supervisor.supervise(new Supervisor.Task(
                             "discovery",
