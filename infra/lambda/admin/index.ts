@@ -926,6 +926,48 @@ async function agentInstaller(
  * video". This answers "what cameras exist here", which is what the console's
  * table and the rail's third dropdown are built on.
  */
+/**
+ * A codec name off the live record, which is typed as unknown here.
+ *
+ * The device lambda already bounds and lowercases this on the way in; the
+ * narrowing is so the value can be used, not a second validation. Anything
+ * unexpected becomes absent rather than a string the console would render as
+ * though a camera had reported it.
+ */
+function codec(value: unknown): string | undefined {
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+/**
+ * One row of the cameras listing: what was approved, plus what the agent
+ * holding it last reported.
+ *
+ * Separated out because the interesting part is the join, and it was wrong.
+ * A codec is only ever written to the live record - the agent learns it from
+ * ffprobe once a stream runs - while the listing read it from the approved
+ * record, which only carries one if it happened to be known at approval time.
+ * At approval nothing has looked at the stream yet, so it never is, and the
+ * console showed an empty column for every camera forever.
+ */
+export function cameraRow(c: CameraRecord, seen: Record<string, unknown> | undefined) {
+  return {
+    identity: c.identity,
+    cameraId: c.cameraId,
+    displayName: c.displayName,
+    assignedTo: c.assignedTo,
+    // When it entered service, and who put it there. Until now the console
+    // could not answer "how long has this been here" about anything at all.
+    approvedAt: typeof c.approvedAt === 'number' ? c.approvedAt : null,
+    approvedBy: c.approvedBy ?? null,
+    // The approved record wins when it has one: an operator who set it meant
+    // it, and should not be overruled by what a stream happened to report.
+    sourceCodec: c.sourceCodec ?? codec(seen?.sourceCodec) ?? null,
+    // Presence of a live record is what publishing means; it expires on its
+    // own when an agent stops reporting.
+    publishing: seen !== undefined,
+  };
+}
+
 async function listCameras(caller: Caller, query: Record<string, string | undefined> | undefined) {
   if (!can(caller, 'viewStreams')) return fail(403, 'Not permitted');
   const tenantId = readTenant(caller, query?.tenantId);
@@ -937,7 +979,16 @@ async function listCameras(caller: Caller, query: Record<string, string | undefi
     queryPrefix<CameraRecord>(site.pk, 'CAMERA#'),
     queryPrefix<Record<string, unknown>>(site.pk, 'LIVECAMERA#'),
   ]);
-  const publishing = new Set(live.map((c) => `${c.thingName}/${c.cameraId}`));
+  /**
+   * What each agent last reported about the cameras it holds.
+   *
+   * Kept as a map rather than a set of keys because the live record carries
+   * more than the fact of publishing: the codec, its profile and the frame
+   * size all arrive here from ffprobe, and this is the only place they are
+   * written. Reading only the approved record meant the console asked for a
+   * codec that nothing ever put there.
+   */
+  const reported = new Map(live.map((c) => [`${c.thingName}/${c.cameraId}`, c]));
 
   const rows = approved
     // Narrowing by agent is the rail's second dropdown feeding the third.
@@ -947,18 +998,7 @@ async function listCameras(caller: Caller, query: Record<string, string | undefi
     // for the name would match every camera that happens to contain it, and
     // choosing a camera in the rail means that camera and no other.
     .filter((c) => !query?.cameraId || c.cameraId === query.cameraId)
-    .map((c) => ({
-      identity: c.identity,
-      cameraId: c.cameraId,
-      displayName: c.displayName,
-      assignedTo: c.assignedTo,
-      // When it entered service, and who put it there. Until now the console
-      // could not answer "how long has this been here" about anything at all.
-      approvedAt: typeof c.approvedAt === 'number' ? c.approvedAt : null,
-      approvedBy: c.approvedBy ?? null,
-      sourceCodec: c.sourceCodec ?? null,
-      publishing: publishing.has(`${c.assignedTo}/${c.cameraId}`),
-    }))
+    .map((c) => cameraRow(c, reported.get(`${c.assignedTo}/${c.cameraId}`)))
     .filter((c) => query?.status !== 'publishing' || c.publishing);
 
   const page = paginate(rows as unknown as Record<string, unknown>[], {
