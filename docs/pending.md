@@ -31,6 +31,40 @@ no answer. For some buyers of a CCTV product that is the entire product, so
 this is a scope decision that should be made deliberately rather than by
 default.
 
+### Customers are never told anything
+
+Alerting today is one SNS topic for the platform operator: the control plane is
+broken, throttled, or hearing from nobody. Deliberately fleet-wide — one agent
+going quiet is a site losing power, which is the customer's problem and not an
+ops page at three in the morning.
+
+But nothing tells the customer either. Their camera can be dark for a week and
+the only way to find out is to open the console and look. For a CCTV product
+that is arguably the feature: "your front gate stopped recording an hour ago"
+is what somebody is paying for.
+
+CloudWatch is the wrong instrument. Its alarms are fleet-wide aggregates, and
+per-agent alarms would mean one alarm per agent — a thousand of them at the
+shape this is built for, about $100 a month, created and destroyed as agents
+come and go, by CloudFormation, which does not know the estate. The registry
+does. Worse, SNS has no concept of a tenant, so routing per customer through
+topics risks telling one customer about another's site, which is a disclosure
+rather than noise.
+
+What it actually is: a scheduled Lambda over the registry, which already holds
+`connected`, `lastSeen` and per-camera `publishing`; recipients stored per
+tenant and premises and managed in the console, so a customer configures their
+own without a deploy; `notifiedAt` on the record so it tells you once rather
+than every five minutes, and says so again when it recovers; delivery by SES.
+
+SES rather than SNS because an SNS email subscription must be confirmed per
+address, which is hopeless for customers. Cost is not the constraint — SES is
+$0.10 per thousand — but **the account is in the SES sandbox**
+(`ProductionAccessEnabled: false`, 200 a day, verified recipients only), so
+nothing can be sent to a customer until production access is requested. That is
+a support ticket, usually granted within a day, and worth raising early because
+it is refused more often for accounts with no sending history.
+
 ### No password reset
 
 There is no forgot-password flow in the console and none in the auth client. A
