@@ -128,7 +128,7 @@ export interface Discovered {
   approved: { cameraId: string; displayName: string; assignedTo: string } | null;
 }
 
-export type Platform = 'linux' | 'windows' | 'macos';
+export type Platform = 'linux' | 'windows';
 
 /**
  * A credential as the console may see it: which slot, whose account, when set.

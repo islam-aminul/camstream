@@ -6,7 +6,6 @@
 # Produces, under dist/:
 #   camstream-agent-<version>-linux.tar.gz
 #   camstream-agent-<version>-windows.tar.gz
-#   camstream-agent-<version>-macos.tar.gz
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -64,9 +63,6 @@ windows_dir="$(stage windows   "$ROOT/packaging/windows/install.ps1"   "$ROOT/pa
 # from - unlike zip, which needed a three-way fallback here to cope with not
 # being installed.
 tar -czf "$OUT/camstream-agent-$VERSION-windows.tar.gz" -C "$windows_dir" .
-
-macos_dir="$(stage macos "$ROOT/packaging/macos/online.camstream.agent.plist")"
-tar -czf "$OUT/camstream-agent-$VERSION-macos.tar.gz" -C "$macos_dir" .
 
 rm -rf "$OUT"/stage-*
 echo

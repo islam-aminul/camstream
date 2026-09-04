@@ -100,7 +100,6 @@ final class EncoderArguments {
             }
             case QSV -> args.addAll(List.of("-preset", "veryfast", "-low_power", "1"));
             case AMF -> args.addAll(List.of("-usage", "lowlatency", "-quality", "speed"));
-            case VIDEOTOOLBOX -> args.addAll(List.of("-realtime", "1"));
             case OPENH264 -> args.addAll(List.of("-profile:v", "main"));
             default -> {
             }

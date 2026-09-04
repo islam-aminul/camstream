@@ -227,7 +227,7 @@ async function create() {
         <span v-if="complaint" class="create__hint">{{ complaint }}</span>
 
         <Select
-          v-model="platform" :options="['linux', 'windows', 'macos']"
+          v-model="platform" :options="['linux', 'windows']"
           size="small" aria-label="Agent platform"
         />
         <span class="create__hint">

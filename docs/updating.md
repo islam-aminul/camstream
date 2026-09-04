@@ -12,9 +12,9 @@ to how updates work only takes effect on the *next* update — and a bug in that
 code cannot be fixed remotely at all. That is not a wrinkle, it is the defining
 constraint, and it has bitten twice:
 
-- The updater opened every bundle as a zip while Linux and macOS shipped
-  tarballs, so remote update worked on Windows only. No Linux agent could take
-  the fix, because taking it required reading a tarball.
+- The updater opened every bundle as a zip while Linux shipped tarballs, so
+  remote update worked on Windows only. No Linux agent could take the fix,
+  because taking it required reading a tarball.
 - The agent staged downloads beside the installed jar, which a hardened systemd
   unit cannot write. Same shape: the fix could not be delivered by the thing it
   was fixing.

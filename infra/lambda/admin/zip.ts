@@ -56,7 +56,7 @@ export interface ZipEntry {
    * Whether the file should be executable once extracted.
    *
    * Written into the external attributes as a Unix mode, which is what `unzip`
-   * on Linux and macOS reads. Windows ignores it, which is correct: a .cmd is
+   * on Linux reads. Windows ignores it, which is correct: a .cmd is
    * executable there by extension.
    */
   executable?: boolean;

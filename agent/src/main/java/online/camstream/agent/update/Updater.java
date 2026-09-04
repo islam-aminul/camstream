@@ -217,7 +217,7 @@ public final class Updater {
      * Which shape of bundle this is, from its first two bytes.
      *
      * Windows ships a .zip and the other platforms a .tar.gz, and this used to
-     * assume the former unconditionally - so a remote update on Linux or macOS
+     * assume the former unconditionally - so a remote update on Linux
      * downloaded the right bundle, failed with "zip END header not found", and
      * stayed on the old build. Every agent not on Windows could only be
      * upgraded by walking to it, which is the thing remote update exists to

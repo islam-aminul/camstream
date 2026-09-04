@@ -286,7 +286,7 @@ onMounted(() => {
               placeholder="Which agent" aria-label="Agent" class="grow"
             />
             <Select
-              v-model="platform" :options="['linux', 'windows', 'macos']"
+              v-model="platform" :options="['linux', 'windows']"
               aria-label="Platform"
             />
             <Button

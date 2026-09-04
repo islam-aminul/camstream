@@ -30,7 +30,6 @@ import java.util.Locale;
  *   <tr><td>{@link #AMF}</td><td>x86_64, AMD on Windows</td></tr>
  *   <tr><td>{@link #NVENC}</td><td>x86_64 with an NVIDIA GPU, or arm64 on Jetson</td></tr>
  *   <tr><td>{@link #V4L2M2M}</td><td>arm64/armv7 SoCs — Raspberry Pi and similar</td></tr>
- *   <tr><td>{@link #VIDEOTOOLBOX}</td><td>macOS, both architectures</td></tr>
  *   <tr><td>{@link #OPENH264}</td><td>anywhere, in software — the no-GPU fallback</td></tr>
  * </table>
  */
@@ -53,9 +52,6 @@ public enum EncoderProfile {
 
     /** AMD GPUs on Windows. */
     AMF,
-
-    /** macOS, for completeness — not a supported edge platform. */
-    VIDEOTOOLBOX,
 
     /**
      * Cisco's libopenh264, in software.
@@ -101,7 +97,6 @@ public enum EncoderProfile {
             case V4L2M2M -> "h264_v4l2m2m";
             case QSV -> "h264_qsv";
             case AMF -> "h264_amf";
-            case VIDEOTOOLBOX -> "h264_videotoolbox";
             case OPENH264 -> "libopenh264";
         };
     }

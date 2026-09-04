@@ -155,16 +155,8 @@ Still unexercised against real hardware:
   single camera moves between them rather than being held by both)
 - more than one viewer on the same site
 - a second premises with real cameras
-- the macOS bundle, on any Mac
 - anything near the 128-stream ceiling, or the hardware-pressure logic that is
   supposed to shed conversions before it is reached
-
-### macOS is entirely untested
-
-The bundle is built and published, and it is now the same tar.gz every other
-platform gets, so the updater reads it. But no Mac has ever run this agent, and
-the launchd equivalent of the systemd staging fix has not been looked at — the
-same three-way permission problem may or may not exist there.
 
 ### A Pi cannot recover its own clock
 

@@ -31,7 +31,7 @@ public final class CameraConfig {
      * camera's native codec. Only consulted for transcoded renditions; the
      * default publishes the camera's own bytes untouched.
      *
-     * One of: copy, vaapi, nvenc, v4l2m2m, qsv, amf, videotoolbox, custom.
+     * One of: copy, vaapi, nvenc, v4l2m2m, qsv, amf, custom.
      */
     public String encoder = "copy";
 

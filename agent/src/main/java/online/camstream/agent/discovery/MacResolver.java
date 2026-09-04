@@ -72,7 +72,7 @@ final class MacResolver {
         return table;
     }
 
-    /** Windows and macOS: parse `arp -a`, whose columns differ per platform. */
+    /** Windows: parse `arp -a`, whose columns differ from the Linux file. */
     private static Map<String, String> readArpCommand() {
         Map<String, String> table = new LinkedHashMap<>();
         try {

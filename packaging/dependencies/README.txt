@@ -11,7 +11,7 @@ Two archives. Download them on any machine and copy them in — the installer
 needs no internet access.
 
   1. A Java runtime, version 21 or newer
-     Windows / Linux / macOS:  https://adoptium.net/temurin/releases/
+     Windows / Linux:  https://adoptium.net/temurin/releases/
      Choose "JRE", your platform, and the .zip or .tar.gz package.
 
      On Windows choose the x64 build even on an ARM machine. The AWS IoT
@@ -22,8 +22,6 @@ needs no internet access.
      Windows:  https://www.gyan.dev/ffmpeg/builds/  (.7z or .zip)
                https://github.com/BtbN/FFmpeg-Builds/releases  (.zip)
      Linux:    https://johnvansickle.com/ffmpeg/  (.tar.xz)
-     macOS:    https://evermeet.cx/ffmpeg/  (.7z or .zip, ffmpeg and ffprobe
-               are separate downloads — put both here)
 
 ACCEPTED ARCHIVE FORMATS
 ------------------------

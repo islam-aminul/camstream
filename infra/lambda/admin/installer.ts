@@ -7,9 +7,9 @@ const s3 = new S3Client({});
 /** How long the installer has to download the agent bundle. */
 const DOWNLOAD_TTL_SECONDS = 24 * 60 * 60;
 
-export type Platform = 'linux' | 'windows' | 'macos';
+export type Platform = 'linux' | 'windows';
 
-export const PLATFORMS: Platform[] = ['linux', 'windows', 'macos'];
+export const PLATFORMS: Platform[] = ['linux', 'windows'];
 
 export function isPlatform(value: unknown): value is Platform {
   return typeof value === 'string' && (PLATFORMS as string[]).includes(value);
@@ -34,8 +34,8 @@ export function isPlatform(value: unknown): value is Platform {
  * published anyway.
  *
  * tar.gz is the format that exists everywhere. Windows has shipped bsdtar as
- * \Windows\System32\tar.exe since Windows 10 1803, and Linux and macOS have
- * always had tar. `unzip` is the one with the extra dependency: it is not
+ * \Windows\System32\tar.exe since Windows 10 1803, and Linux has always
+ * had tar. `unzip` is the one with the extra dependency: it is not
  * installed by default on a current Ubuntu, and was missing on the first
  * Raspberry Pi this was deployed to.
  *
@@ -420,7 +420,7 @@ try {
   Invoke-WebRequest -Uri $BundleUrl -OutFile "$Work\\agent.tar.gz" -UseBasicParsing
   # tar.exe rather than Expand-Archive: the bundle is a .tar.gz on every
   # platform now. Windows has shipped bsdtar since 10/1803, and it is the
-  # same single format the Linux and macOS installers and the agent's own
+  # same single format the Linux installer and the agent's own
   # updater read.
   & tar.exe -xzf "$Work\\agent.tar.gz" -C $Work
   if ($LASTEXITCODE -ne 0) { throw "Could not unpack the agent bundle (tar exit $LASTEXITCODE)." }
