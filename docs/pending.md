@@ -187,6 +187,20 @@ the date by hand.
 So it is not reliably self-healing, and the failure is silent: the box looks
 up, answers ping, and serves SSH.
 
+`fake-hwclock` is now installed on rpi4b, which closes the common case: it
+saves the time on a timer and at shutdown and restores it at boot, so chrony
+starts close enough to finish a handshake. Note that the package's own units
+(`fake-hwclock-load`, `-save`, `-save.timer`) are what do the work — the
+SysV-compatible `fake-hwclock.service` is masked deliberately, so trying to
+enable that one fails and is meant to.
+
+What it does not close is a board powered off for months: the restored
+timestamp is then months old too. Every source Ubuntu configures carries
+`nts`, so all five depend on TLS and none can be reached from a badly wrong
+clock. Adding one plain, non-NTS pool would remove that dependency, at the
+price of accepting unauthenticated time as a last resort — chrony would still
+prefer the NTS sources, which are marked `prefer`.
+
 The agent no longer *stays* broken because of it — a supervised task retries
 configuration until it succeeds, and a skewed clock is now named in the log
 rather than appearing as a bare 403. But the underlying box still needs
