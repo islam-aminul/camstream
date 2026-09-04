@@ -8,6 +8,8 @@ import Select from 'primevue/select';
 import InputNumber from 'primevue/inputnumber';
 import Message from 'primevue/message';
 import PagedTable from '@/components/PagedTable.vue';
+import WhenAgo from '@/components/WhenAgo.vue';
+import ClockDrift from '@/components/ClockDrift.vue';
 import { useSelectionStore } from '@/stores/selection';
 import { api, type Agent, type Platform } from '@/api';
 import { isValidDisplayName, nameComplaint } from '@/naming';
@@ -296,6 +298,16 @@ async function create() {
               {{ data.maxConcurrentTranscodes === 0 ? 'none' : `${data.maxConcurrentTranscodes} at a time` }}
               <i class="pi pi-pencil" aria-hidden="true" />
             </button>
+          </template>
+        </Column>
+        <Column header="Last report">
+          <template #body="{ data }">
+            <WhenAgo :at="data.lastSeen" absent="never checked in" />
+          </template>
+        </Column>
+        <Column header="Clock">
+          <template #body="{ data }">
+            <ClockDrift :seconds="data.clockSkewSeconds" />
           </template>
         </Column>
         <Column field="agentVersion" header="Version">

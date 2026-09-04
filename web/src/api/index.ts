@@ -51,6 +51,18 @@ export interface Agent {
   enrolled: boolean;
   credentialPublicKey: string | null;
   maxConcurrentTranscodes: number;
+  /** Epoch seconds of the agent's last report, or absent if it never has. */
+  lastSeen?: number | null;
+  /**
+   * How far this machine's clock is from the control plane's, in seconds,
+   * positive when the agent is behind. Measured server-side from the agent's
+   * own stamp on its last report.
+   *
+   * Null means it has never said — an older build, or one that has never
+   * reported. That is not the same as zero, and the console must not show it
+   * as though the clock were known to be right.
+   */
+  clockSkewSeconds?: number | null;
   health?: {
     at: number | null;
     healthy: boolean;
@@ -81,6 +93,9 @@ export interface Camera {
   cameraId: string;
   displayName: string;
   assignedTo: string;
+  /** Epoch seconds when this camera was put into service. */
+  approvedAt?: number | null;
+  approvedBy?: string | null;
   sourceCodec: string | null;
   publishing: boolean;
 }

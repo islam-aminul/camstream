@@ -514,6 +514,11 @@ async function listAgents(
         // honouring can be lower, and comes back on the health record — a
         // machine under pressure lowers its own cap.
         maxConcurrentTranscodes: Number(device.maxConcurrentTranscodes ?? DEFAULT_MAX_TRANSCODES),
+        // How far this machine's clock is from the control plane's, measured
+        // server-side on its last report. Null when it has never said, which
+        // must not read as zero: zero is the answer that means all is well.
+        clockSkewSeconds: typeof device.clockSkewSeconds === 'number'
+          ? device.clockSkewSeconds : null,
       })),
   });
 }
@@ -947,6 +952,10 @@ async function listCameras(caller: Caller, query: Record<string, string | undefi
       cameraId: c.cameraId,
       displayName: c.displayName,
       assignedTo: c.assignedTo,
+      // When it entered service, and who put it there. Until now the console
+      // could not answer "how long has this been here" about anything at all.
+      approvedAt: typeof c.approvedAt === 'number' ? c.approvedAt : null,
+      approvedBy: c.approvedBy ?? null,
       sourceCodec: c.sourceCodec ?? null,
       approvedAt: c.approvedAt,
       publishing: publishing.has(`${c.assignedTo}/${c.cameraId}`),

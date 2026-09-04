@@ -175,10 +175,21 @@ async function acceptReport(
       UpdateExpression:
         'SET thingName = :thing, premisesId = :premises, siteName = :site, agentVersion = :version, ' +
         'cameraCount = :count, taskHealth = :health, lastReportAt = :now, lastSeen = :now' +
+        ', clockSkewSeconds = :skew' +
         ', credentialPublicKey = if_not_exists(credentialPublicKey, :key)',
       ExpressionAttributeValues: {
         ':thing': thingName,
         ':premises': premisesId,
+        // How far the agent's clock is from ours, in seconds, positive when it
+        // is behind. Computed here rather than trusted from the agent: the
+        // server is the authority on the time, and a box with a wrong clock is
+        // precisely the one that cannot measure its own error.
+        //
+        // A machine with no clock battery boots months behind and every signed
+        // request is refused, so nothing arrives to record. What this catches
+        // is the approach to that: drift growing while the agent still works,
+        // which is the moment somebody could act on it.
+        ':skew': clockSkew(body.clockAt, now),
         ':site': label(body.siteName) ?? null,
         ':version': label(body.agentVersion, 32) ?? null,
         ':count': cameras.length,
@@ -418,6 +429,26 @@ export function learnedFrom(camera: {
   if (model) { sets.push('#model = :model'); names['#model'] = 'model'; values[':model'] = model; }
 
   return { clause: sets.length ? ', ' + sets.join(', ') : '', names, values };
+}
+
+/**
+ * How far an agent's clock is from this one, in seconds.
+ *
+ * Positive means the agent is behind. Null when it did not say — an older
+ * build, which should read as "unknown" rather than as zero, because zero is
+ * the answer that means everything is fine.
+ *
+ * Clamped to a day: past that the number is not a measurement of drift, it is
+ * a machine that has lost its clock entirely, and an unbounded value would
+ * only make the column unreadable.
+ */
+export function clockSkew(claimed: unknown, serverNow: number): number | null {
+  if (typeof claimed !== 'number' || !Number.isFinite(claimed) || claimed <= 0) {
+    return null;
+  }
+  const skew = serverNow - Math.floor(claimed);
+  const day = 86400;
+  return Math.max(-day, Math.min(day, skew));
 }
 
 /**

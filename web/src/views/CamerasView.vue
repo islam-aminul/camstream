@@ -8,6 +8,7 @@ import InputText from 'primevue/inputtext';
 import Select from 'primevue/select';
 import Message from 'primevue/message';
 import PagedTable from '@/components/PagedTable.vue';
+import WhenAgo from '@/components/WhenAgo.vue';
 import { useSelectionStore } from '@/stores/selection';
 import { api, type Camera } from '@/api';
 import { nameComplaint } from '@/naming';
@@ -221,6 +222,11 @@ const isUnnamed = (camera: Camera) => camera.displayName === camera.identity;
       <Column header="Agent">
         <template #body="{ data }">
           <span class="mono">{{ data.assignedTo }}</span>
+        </template>
+      </Column>
+      <Column header="In service">
+        <template #body="{ data }">
+          <WhenAgo :at="data.approvedAt" absent="unknown" />
         </template>
       </Column>
       <Column field="sourceCodec" header="Codec">

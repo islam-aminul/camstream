@@ -9,6 +9,7 @@ import InputText from 'primevue/inputtext';
 import Password from 'primevue/password';
 import Message from 'primevue/message';
 import Dialog from 'primevue/dialog';
+import WhenAgo from '@/components/WhenAgo.vue';
 import { useSelectionStore } from '@/stores/selection';
 import { api, type Discovered, type Platform, type StoredCredential } from '@/api';
 import { sealCredential, cryptoAvailable } from '@/crypto';
@@ -380,6 +381,11 @@ onMounted(() => {
         </Column>
         <Column header="Seen by">
           <template #body="{ data }"><span class="sub">{{ reachSummary(data) }}</span></template>
+        </Column>
+        <Column header="Found">
+          <template #body="{ data }">
+            <WhenAgo :at="data.lastSeen" absent="not yet seen" />
+          </template>
         </Column>
         <Column header="Access">
           <template #body="{ data }">

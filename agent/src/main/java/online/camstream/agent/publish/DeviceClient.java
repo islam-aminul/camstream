@@ -318,6 +318,15 @@ public final class DeviceClient {
         ObjectNode root = MAPPER.createObjectNode();
         root.put("siteName", config.siteName == null ? config.deviceId : config.siteName);
         root.put("agentVersion", agentVersion);
+        // This machine's own idea of the time, so the control plane can work
+        // out how far out it is. Measured there rather than here because the
+        // server is the authority, and because an agent whose clock is wrong
+        // is exactly the one that cannot be trusted to say so.
+        //
+        // Only ever recorded while the agent can still talk: past about five
+        // minutes of skew AWS refuses to sign the request at all, so this
+        // catches drift on the way to that failure rather than during it.
+        root.put("clockAt", System.currentTimeMillis() / 1000);
         // Published so the admin console can encrypt credentials only this
         // device can open.
         root.put("credentialPublicKey", publicKey.get());
