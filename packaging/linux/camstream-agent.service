@@ -44,7 +44,7 @@ WorkingDirectory=/var/lib/camstream
 # prefix the swap fails on permissions and the update is silently lost, which
 # is exactly what happened on the first real Linux install.
 ExecStartPre=+/bin/sh -c 'j=/opt/camstream/camstream-agent.jar; n=/var/lib/camstream/camstream-agent.jar.new; [ -f "$n" ] || n="$j.new"; [ -f "$n" ] || exit 0; cp -f "$j" "$j.previous"; mv -f "$n" "$j"; chown root:root "$j"; chmod 0644 "$j"'
-ExecStart=/usr/bin/java -XX:MaxRAMPercentage=50 -jar /opt/camstream/camstream-agent.jar /etc/camstream/agent.yaml
+ExecStart=/usr/bin/java -XX:MaxRAMPercentage=50 -Dstdout.encoding=UTF-8 -Dstderr.encoding=UTF-8 -jar /opt/camstream/camstream-agent.jar /etc/camstream/agent.yaml
 
 # A camera outage must not become an agent outage. The agent already retries
 # internally; this covers the process dying outright.
