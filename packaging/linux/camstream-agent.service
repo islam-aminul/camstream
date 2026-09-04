@@ -4,6 +4,25 @@ Documentation=https://github.com/islam-aminul/camstream
 # Discovery and RTSP both need the network genuinely up, not merely configured.
 After=network-online.target
 Wants=network-online.target
+# And the clock has to be right before anything is signed.
+#
+# A board with no clock battery boots at whatever was last written to disk, so
+# it comes up behind by the length of its own outage - unbounded, and nothing
+# on the box can shorten it. Past roughly five minutes AWS refuses to sign the
+# agent's requests, so it starts, connects, and is refused its own
+# configuration: no credentials, no cameras, while looking perfectly healthy.
+#
+# Measured on a Pi: a power cut left the clock six minutes behind even with
+# fake-hwclock saving every five, because the staleness is the save interval
+# *plus* the outage. Waiting for the clock removes the window rather than
+# narrowing it.
+#
+# Wants, not Requires: a site whose NTP is unreachable should still run its
+# agent and retry, rather than never starting at all. chrony-wait.service is
+# what makes this target meaningful - without it time-sync.target is passive
+# and this ordering costs nothing.
+After=time-sync.target
+Wants=time-sync.target
 # Belongs in [Unit], not [Service]: never give up restarting, since an
 # unattended box has nobody to run `systemctl reset-failed`.
 StartLimitIntervalSec=0

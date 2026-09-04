@@ -295,6 +295,15 @@ done
 sed "s#^ExecStart=/usr/bin/java #ExecStart=$JAVA_BIN #" \
   "$HERE/$SERVICE.service" > "/etc/systemd/system/$SERVICE.service"
 chmod 0644 "/etc/systemd/system/$SERVICE.service"
+# time-sync.target is passive unless something blocks it, so enable the waiter
+# chrony ships if chrony is what this box runs. Without it the unit's
+# After=time-sync.target orders against a target that is already reached, and a
+# board with no clock battery starts its agent with a clock behind by the
+# length of its own outage - far enough that AWS refuses to sign anything.
+if systemctl list-unit-files chrony-wait.service >/dev/null 2>&1; then
+  systemctl enable chrony-wait.service >/dev/null 2>&1     && echo "  clock: agent will wait for chrony before starting"     || echo "  clock: could not enable chrony-wait; agent may start before NTP settles"
+fi
+
 systemctl daemon-reload
 systemctl enable "$SERVICE" >/dev/null
 
