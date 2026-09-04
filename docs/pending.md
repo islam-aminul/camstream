@@ -79,10 +79,29 @@ updates. On Windows the service is LocalSystem and `C:\Program Files\CamStream`
 grants SYSTEM FullControl, so a compromised agent can rewrite its own jar, its
 launcher and its service definition.
 
-WinSW supports running under a dedicated `serviceaccount`. Worth doing, but as
-its own change: the account needs the state directory, outbound network and the
-right to spawn ffmpeg, and getting it wrong leaves an install that will not
-start.
+**Largely addressed on 2026-09-05.** New installs run under a virtual account
+(`NT SERVICE\camstream-agent`) rather than LocalSystem: the Service Control
+Manager creates it, it has its own SID, and there is no password to store or
+rotate. It is set with `sc.exe` after WinSW registers the service, because
+WinSW's own `serviceaccount` element is built around a username and password
+and a virtual account has neither.
+
+What remains, deliberately: the account keeps write access to the install
+directory. A staged update is applied by the launcher, running in the service's
+own identity, so removing that would break remote updates — and the privileged
+pre-start step that makes it safe on Linux has no cheap Windows equivalent
+(WinSW runs every hook as the service account, so a low-privilege service
+cannot perform its own swap). A compromised agent can therefore still replace
+its own jar. It can no longer touch the rest of the machine, which was the
+larger exposure.
+
+Closing the last gap needs a second privileged component — a SYSTEM-run step
+ordered before the service — which is a bigger change than this was, and worth
+weighing against package signing, since both bear on the same question of who
+gets to decide what the agent runs.
+
+**The two existing agents still run as LocalSystem**; the account is set at
+install time, so they need a reinstall to pick it up.
 
 ## Product
 
