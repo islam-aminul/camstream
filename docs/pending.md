@@ -204,20 +204,27 @@ baking into the installer if Pis become a supported target. Note that the packag
 SysV-compatible `fake-hwclock.service` is masked deliberately, so trying to
 enable that one fails and is meant to.
 
-What it does not close is a board powered off for months: the restored
+What that does not close is a board powered off for months: the restored
 timestamp is then months old too. Every source Ubuntu configures carries
-`nts`, so all five depend on TLS and none can be reached from a badly wrong
-clock. Adding one plain, non-NTS pool would remove that dependency, at the
-price of accepting unauthenticated time as a last resort — chrony would still
-prefer the NTS sources, which are marked `prefer`.
+`nts`, so all of them depend on TLS and none can be reached from a badly
+wrong clock. A plain, non-NTS pool removes that dependency, at the price of
+accepting unauthenticated time as a last resort — chrony still prefers the
+NTS sources, which are marked `prefer`. **Applied on rpi4b** (`pool
+ntp.ubuntu.com iburst maxsources 4`, uncommented in `sources.d`) and
+verified reaching stratum 2. Not in the installer, which is the pending part.
 
-The agent no longer *stays* broken because of it — a supervised task retries
-configuration until it succeeds, and a skewed clock is now named in the log
-rather than appearing as a bare 403. But the underlying box still needs
-fixing, and the standard answer is `fake-hwclock`, which saves the time on
-shutdown and restores it at boot so chrony always starts close enough to
-finish a handshake. Adding a plain, non-NTS pool as a fallback source would
-remove the dependency on TLS entirely.
+The ordering is deliberately soft — `Wants=`/`After=`, never `Requires=`.
+`chrony-wait` gives up after three minutes, and on a site whose firewall
+blocks NTP it always will. Under `Wants=` that is a three-minute delay;
+under `Requires=` the agent never starts, and the site goes from late to
+dark. A camera that starts with a wrong clock is worth more than one that
+does not start. `infra/test/clock-ordering.test.ts` pins all of it, because
+every line involved can be deleted without breaking a build, an install or
+a test — the cost only appears at the next power cut.
+
+The agent no longer *stays* broken either: a supervised task retries
+configuration until it succeeds, and a skewed clock is named in the log
+rather than appearing as a bare 403.
 
 Worth doing before any customer runs one of these, because the symptom reaches
 the console as "registered, but its agent has not reported it yet" — which
