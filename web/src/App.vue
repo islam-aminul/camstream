@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, watch } from 'vue';
+import { computed, onMounted, watch } from 'vue';
 import { useRoute } from 'vue-router';
 import Message from 'primevue/message';
 import ProgressSpinner from 'primevue/progressspinner';
@@ -34,7 +34,17 @@ const pages = [
     hint: 'Sites, and the agents that belong to them' },
   { name: 'users', label: 'Users', icon: 'pi-users',
     hint: 'Who may sign in, and what they may see' },
+  { name: 'alerts', label: 'Alerts', icon: 'pi-bell', superadminOnly: true,
+    hint: 'Who is emailed when this deployment starts failing' },
 ];
+
+/**
+ * Alarm recipients are platform-wide, not per customer, so the tab is only
+ * shown to the platform operator. The API refuses anybody else regardless -
+ * hiding a tab is tidiness, not a permission.
+ */
+const visiblePages = computed(() => pages.filter(
+  (page) => !page.superadminOnly || session.me?.role === 'superadmin'));
 
 async function begin() {
   if (!(await session.start())) return;
@@ -65,7 +75,7 @@ watch(() => session.me, (me) => { if (me) void selection.loadCustomers(); });
       </span>
       <nav>
         <RouterLink
-          v-for="page in pages" :key="page.name"
+          v-for="page in visiblePages" :key="page.name"
           v-tooltip.bottom="page.hint"
           :to="{ name: page.name, query: $route.query }"
           class="topbar__link"

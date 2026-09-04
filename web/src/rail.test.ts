@@ -26,10 +26,18 @@ describe('rail relevance', () => {
     expect(levelsFor('live')).toEqual(['customer', 'premises', 'agent', 'camera']);
   });
 
-  it('keeps customer everywhere, since it scopes every page', () => {
+  it('keeps customer everywhere it scopes the page', () => {
     for (const page of ['live', 'cameras', 'add', 'agents', 'premises', 'users']) {
       expect(showsLevel(page, 'customer')).toBe(true);
     }
+  });
+
+  it('offers nothing at all on a page about the deployment itself', () => {
+    // Alarm recipients are platform-wide. There is no customer, premises,
+    // agent or camera to narrow by, so a rail would be four dropdowns that
+    // change nothing on screen.
+    expect(levelsFor('alerts')).toEqual([]);
+    expect(searchKinds('alerts').any).toBe(false);
   });
 
   it('falls back to the whole rail for a page it has never heard of', () => {

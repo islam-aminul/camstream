@@ -17,5 +17,9 @@ export const router = createRouter({
     { path: '/agents', name: 'agents', component: () => import('./views/AgentsView.vue') },
     { path: '/premises', name: 'premises', component: () => import('./views/PremisesView.vue') },
     { path: '/users', name: 'users', component: () => import('./views/UsersView.vue') },
+    // Platform-wide alarm recipients. Only a superadmin sees the tab, and the
+    // API refuses anyone else, but the route exists for everyone so a shared
+    // link explains itself rather than 404ing.
+    { path: '/alerts', name: 'alerts', component: () => import('./views/AlertsView.vue') },
   ],
 });

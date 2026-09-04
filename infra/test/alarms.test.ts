@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { App } from 'aws-cdk-lib';
-import { Template, Match } from 'aws-cdk-lib/assertions';
+import { Template } from 'aws-cdk-lib/assertions';
 import { CamStreamZoneStack } from '../lib/zone-stack';
 import { CamStreamCertStack } from '../lib/cert-stack';
 import { CamStreamAppStack } from '../lib/app-stack';
@@ -45,25 +45,39 @@ function synth(extra: Record<string, unknown> = {}) {
 }
 
 describe('alarms', () => {
-  it('subscribes the address it is given', () => {
-    const template = synth({ alarmEmail: 'alerts@example.com' });
-    template.hasResourceProperties('AWS::SNS::Subscription', Match.objectLike({
-      Protocol: 'email',
-      Endpoint: 'alerts@example.com',
-    }));
+  it('subscribes nobody at deploy time', () => {
+    // Who is on call is runtime state. It used to be a CDK context value,
+    // which made changing the address a deploy — impossible for somebody
+    // holding a phone at midnight, and it put a shared mailbox in a public
+    // repository. The console manages the topic's subscriptions instead.
+    synth().resourceCountIs('AWS::SNS::Subscription', 0);
+    synth({ alarmEmail: 'alerts@example.com' })
+      .resourceCountIs('AWS::SNS::Subscription', 0);
   });
 
-  it('creates no subscription when none is configured, rather than a wrong one', () => {
-    // Guessing an address is worse than none: mail to somebody who did not ask
-    // for it, and a false sense that alerting is set up.
-    synth().resourceCountIs('AWS::SNS::Subscription', 0);
+  it('lets the admin function manage who is subscribed, and nothing else', () => {
+    // Publishing to the topic is CloudWatch's job. The API only reads and
+    // changes the list of recipients.
+    const template = synth();
+    const policies = Object.values(template.findResources('AWS::IAM::Policy'));
+    const statements = policies.flatMap((p) =>
+      ((p as never as { Properties: { PolicyDocument: { Statement: { Action: unknown }[] } } })
+        .Properties.PolicyDocument.Statement));
+    const actions = statements.flatMap((s) =>
+      (Array.isArray(s.Action) ? s.Action : [s.Action]) as string[]);
+
+    expect(actions).toContain('sns:Subscribe');
+    expect(actions).toContain('sns:Unsubscribe');
+    expect(actions).toContain('sns:ListSubscriptionsByTopic');
+    expect(actions, 'the API must not be able to raise alarms itself')
+      .not.toContain('sns:Publish');
   });
 
   it('alarms on throttling, which the error metrics do not cover', () => {
     // A throttled invocation never ran, so the function's own error metric
     // stays at zero while requests are shed. This account spent weeks capped
     // at ten concurrent executions with nothing saying so.
-    const alarms = synth({ alarmEmail: 'a@b.com' }).findResources('AWS::CloudWatch::Alarm');
+    const alarms = synth().findResources('AWS::CloudWatch::Alarm');
     const names = Object.values(alarms).map((a) => (a as never as { Properties: { MetricName?: string } }).Properties.MetricName);
     expect(names).toContain('Throttles');
   });
@@ -77,7 +91,7 @@ describe('alarms', () => {
     // fifteen minutes, so anything shorter alarms on a quiet estate behaving
     // exactly as designed. Missing data breaches, because no data points at
     // all is the condition being detected.
-    const alarms = synth({ alarmEmail: 'a@b.com' }).findResources('AWS::CloudWatch::Alarm');
+    const alarms = synth().findResources('AWS::CloudWatch::Alarm');
     const quiet = Object.values(alarms)
       .map((a) => (a as never as { Properties: Record<string, unknown> }).Properties)
       .find((p) => p.MetricName === 'TopicMatch');
@@ -92,7 +106,7 @@ describe('alarms', () => {
 
   it('every alarm actually notifies the topic', () => {
     // An alarm with no action is a dashboard nobody looks at.
-    const alarms = synth({ alarmEmail: 'a@b.com' }).findResources('AWS::CloudWatch::Alarm');
+    const alarms = synth().findResources('AWS::CloudWatch::Alarm');
     expect(Object.keys(alarms).length).toBeGreaterThan(7);
     for (const [name, alarm] of Object.entries(alarms)) {
       const props = (alarm as never as { Properties: { AlarmActions?: unknown[] } }).Properties;

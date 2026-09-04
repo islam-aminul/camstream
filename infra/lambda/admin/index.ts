@@ -2,6 +2,8 @@ import { randomBytes } from 'node:crypto';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, QueryCommand, PutCommand, DeleteCommand, UpdateCommand, GetCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
 import { IoTDataPlaneClient, PublishCommand } from '@aws-sdk/client-iot-data-plane';
+import { SNSClient, ListSubscriptionsByTopicCommand, SubscribeCommand, UnsubscribeCommand }
+  from '@aws-sdk/client-sns';
 import {
   IoTClient, ListThingPrincipalsCommand, DetachThingPrincipalCommand, ListAttachedPoliciesCommand,
   DetachPolicyCommand, UpdateCertificateCommand, DeleteCertificateCommand, DeleteThingCommand,
@@ -49,6 +51,7 @@ const ENROLLMENT_TTL_SECONDS = 14 * 24 * 60 * 60;
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const cognito = new CognitoIdentityProviderClient({});
 const iot = new IoTDataPlaneClient({ endpoint: `https://${IOT_ENDPOINT}` });
+const sns = new SNSClient({});
 /** Control plane rather than data plane: things and certificates, not messages. */
 const iotControl = new IoTClient({});
 const ssm = new SSMClient({});
@@ -98,6 +101,10 @@ export async function handler(
       case 'GET /api/admin/discovered':  return await listDiscovered(caller,
           event.queryStringParameters?.premisesId, event.queryStringParameters?.tenantId);
       case 'POST /api/admin/cameras':    return await approveCamera(caller, event.body);
+      case 'GET /api/admin/alerts':      return await listAlertRecipients(caller);
+      case 'POST /api/admin/alerts':     return await addAlertRecipient(caller, event.body);
+      case 'DELETE /api/admin/alerts':
+        return await removeAlertRecipient(caller, event.queryStringParameters?.arn);
       case 'POST /api/admin/cameras/move':
         return await moveCameras(caller, event.body);
       case 'PATCH /api/admin/cameras/{identity}':
@@ -1143,6 +1150,111 @@ async function approveCamera(caller: Caller, rawBody: string | undefined) {
     await pushConfig(previousOwner);
   }
   return json(200, { approved: camera.cameraId, assignedTo, reassignedFrom: previousOwner ?? null });
+}
+
+// ------------------------------------------------------------------- alerts
+
+/**
+ * Who is emailed when the control plane raises an alarm.
+ *
+ * Platform-wide, so superadmin only: these alarms are about this deployment
+ * failing - a wedged lambda, a throttled table, no agent heartbeats anywhere -
+ * and not about any one customer's cameras. A customer administrator has no
+ * business reading them and would only be confused by them.
+ *
+ * Managed here rather than in the stack because who is on call is runtime
+ * state. It used to be a CDK context value, which made changing the address a
+ * deploy - impossible for the person holding a phone at midnight, and it put a
+ * shared mailbox in a public repository.
+ */
+const ALARM_TOPIC_ARN = process.env.ALARM_TOPIC_ARN ?? '';
+
+function alertsUnavailable(): APIGatewayProxyStructuredResultV2 | null {
+  return ALARM_TOPIC_ARN ? null : fail(503, 'No alarm topic is configured for this deployment');
+}
+
+async function listAlertRecipients(caller: Caller) {
+  if (!can(caller, 'crossTenant')) return fail(403, 'Not permitted to manage alerts');
+  const unavailable = alertsUnavailable();
+  if (unavailable) return unavailable;
+
+  const recipients: { endpoint: string; protocol: string; confirmed: boolean; arn: string }[] = [];
+  let token: string | undefined;
+  do {
+    const page = await sns.send(new ListSubscriptionsByTopicCommand({
+      TopicArn: ALARM_TOPIC_ARN, NextToken: token,
+    }));
+    for (const subscription of page.Subscriptions ?? []) {
+      const arn = subscription.SubscriptionArn ?? '';
+      recipients.push({
+        endpoint: subscription.Endpoint ?? '',
+        protocol: subscription.Protocol ?? '',
+        // Until the recipient clicks the link AWS sends, the "ARN" is the
+        // literal string PendingConfirmation and nothing is delivered. Saying
+        // so is the whole point of showing this list: a subscription that
+        // exists is not the same as somebody being told.
+        confirmed: arn.startsWith('arn:'),
+        arn,
+      });
+    }
+    token = page.NextToken;
+  } while (token);
+
+  recipients.sort((a, b) => a.endpoint.localeCompare(b.endpoint));
+  return json(200, { topicArn: ALARM_TOPIC_ARN, recipients });
+}
+
+async function addAlertRecipient(caller: Caller, rawBody: string | undefined) {
+  if (!can(caller, 'crossTenant')) return fail(403, 'Not permitted to manage alerts');
+  const unavailable = alertsUnavailable();
+  if (unavailable) return unavailable;
+
+  let body: { email?: unknown };
+  try {
+    body = JSON.parse(rawBody ?? '{}');
+  } catch {
+    return fail(400, 'Body must be JSON');
+  }
+
+  const email = String(body.email ?? '').trim();
+  // Deliberately loose. The authority on whether an address exists is whether
+  // the confirmation mail arrives, and a stricter pattern here would refuse
+  // valid addresses while still not proving anything about invalid ones.
+  if (email.length < 6 || email.length > 254 || !/^[^\s@]+@[^\s@.]+\.[^\s@]+$/.test(email)) {
+    return fail(400, 'That does not look like an email address');
+  }
+
+  await sns.send(new SubscribeCommand({
+    TopicArn: ALARM_TOPIC_ARN,
+    Protocol: 'email',
+    Endpoint: email,
+    ReturnSubscriptionArn: true,
+  }));
+
+  // Not "subscribed": AWS has sent a confirmation link and will deliver
+  // nothing until it is clicked. Reporting success here would be a lie the
+  // operator only discovers during an incident.
+  return json(202, { pending: email });
+}
+
+async function removeAlertRecipient(caller: Caller, requested: string | undefined) {
+  if (!can(caller, 'crossTenant')) return fail(403, 'Not permitted to manage alerts');
+  const unavailable = alertsUnavailable();
+  if (unavailable) return unavailable;
+
+  // A query parameter rather than a body: DELETE with a body is awkward
+  // through API Gateway and adds nothing here, since the subscription ARN is
+  // the whole request.
+  const arn = String(requested ?? '');
+  // Must be a subscription of this topic and nothing else: the ARN arrives
+  // from the client, and sns:Unsubscribe cannot be scoped to one topic by IAM
+  // alone because a subscription ARN is not the topic ARN.
+  if (!arn.startsWith(`${ALARM_TOPIC_ARN}:`)) {
+    return fail(400, 'That subscription does not belong to this alarm topic');
+  }
+
+  await sns.send(new UnsubscribeCommand({ SubscriptionArn: arn }));
+  return json(200, { removed: arn });
 }
 
 /**

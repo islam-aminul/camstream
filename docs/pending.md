@@ -9,28 +9,6 @@ Ordered by what would hurt first, not by effort.
 
 ## Operational
 
-### Alarms reach nobody
-
-Seven CloudWatch alarms exist — API 5xx, and Lambda errors for admin, device,
-presence, session, streams and watch — and the SNS topic they publish to has
-no subscriptions. Every one of them is currently OK, so nothing has been lost
-yet, but a lambda failing at three in the morning would page nobody and the
-first report would come from a customer looking at a black wall.
-
-The subscription belongs in the CDK rather than clicked into the console, so
-it survives a redeploy. An email endpoint needs confirming from the inbox once.
-
-### No recording, and no playback
-
-Live only. Segments expire from the live bucket after a day by lifecycle rule,
-the console has no timeline, and there is no archive of any kind — the only
-"archive" in the codebase is the installer zip.
-
-"What happened at the gate at three in the morning last Tuesday" therefore has
-no answer. For some buyers of a CCTV product that is the entire product, so
-this is a scope decision that should be made deliberately rather than by
-default.
-
 ### Customers are never told anything
 
 Alerting today is one SNS topic for the platform operator: the control plane is

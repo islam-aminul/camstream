@@ -1,8 +1,7 @@
-import { Annotations, CfnOutput, Duration, RemovalPolicy, Stack, StackProps } from 'aws-cdk-lib';
+import { CfnOutput, Duration, Stack, StackProps } from 'aws-cdk-lib';
 import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as cloudwatchActions from 'aws-cdk-lib/aws-cloudwatch-actions';
 import * as sns from 'aws-cdk-lib/aws-sns';
-import * as subscriptions from 'aws-cdk-lib/aws-sns-subscriptions';
 import * as acm from 'aws-cdk-lib/aws-certificatemanager';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as route53 from 'aws-cdk-lib/aws-route53';
@@ -88,46 +87,40 @@ export class CamStreamAppStack extends Stack {
     const alarmTopic = new sns.Topic(this, 'AlarmTopic', {
       displayName: 'CamStream alarms',
     });
+    // The console manages who is subscribed, so the admin function needs to
+    // read and change that list - and nothing else on this topic. Publishing
+    // is CloudWatch's job, not the API's.
+    alarmTopic.grantSubscribe(api.adminFunction);
+    api.adminFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['sns:ListSubscriptionsByTopic', 'sns:GetTopicAttributes'],
+      resources: [alarmTopic.topicArn],
+    }));
+    api.adminFunction.addToRolePolicy(new iam.PolicyStatement({
+      // Unsubscribe takes a subscription ARN, which is the topic ARN with a
+      // uuid appended, so it cannot be granted on the topic resource itself.
+      actions: ['sns:Unsubscribe'],
+      resources: [`${alarmTopic.topicArn}:*`],
+    }));
+    api.adminFunction.addEnvironment('ALARM_TOPIC_ARN', alarmTopic.topicArn);
     new CfnOutput(this, 'AlarmTopicArn', {
       description: 'Subscribe an address to this to receive control-plane alarms',
       value: alarmTopic.topicArn,
     });
 
     /*
-     * Who gets told.
+     * Who gets told is runtime state, not deployment configuration.
      *
-     * Taken from context rather than written here, because an alarm address is
-     * deployment configuration and often a shared mailbox nobody wants in a
-     * public repository:
+     * It used to come from `-c alarmEmail=...`, which meant changing the
+     * on-call address was a CDK deploy — a thing an operator on a phone at
+     * midnight cannot do, and a thing that puts a shared mailbox in a public
+     * repository. Subscriptions are now managed in the console against this
+     * topic, so the stack owns the topic and the alarms and nothing about who
+     * reads them.
      *
-     *   npx cdk deploy CamStreamApp -c alarmEmail=alerts@example.com
-     *
-     * or set `alarmEmail` in cdk.json to make it stick. AWS sends a
-     * confirmation link once; until it is clicked nothing is delivered, and
-     * "the subscription exists" is not the same as "somebody is being told".
-     *
-     * Without it the alarms still exist and still fire - into a topic with no
-     * subscribers, which is exactly the state this is here to end - so synth
-     * says so out loud rather than deploying a quiet nothing.
+     * Nothing here asserts that somebody is subscribed, because synth cannot
+     * know: the answer lives in SNS. The console shows it instead, which is
+     * where the person who can act on it is looking.
      */
-    const alarmEmail = this.node.tryGetContext('alarmEmail');
-    if (typeof alarmEmail === 'string' && alarmEmail.includes('@')) {
-      alarmTopic.addSubscription(new subscriptions.EmailSubscription(alarmEmail));
-      // Retained, so that removing this block hands the subscription over
-      // rather than deleting it. A confirmed subscription cannot be moved:
-      // the confirmation belongs to that subscription ARN, so deleting one
-      // and creating another means asking a person to click a link again for
-      // a change that was purely internal. Detaching it first lets the console
-      // adopt it exactly as it stands.
-      const created = alarmTopic.node.tryFindChild(alarmEmail);
-      (created?.node.defaultChild as sns.CfnSubscription | undefined)
-        ?.applyRemovalPolicy(RemovalPolicy.RETAIN);
-    } else {
-      Annotations.of(this).addWarning(
-        'No alarmEmail in context: alarms will fire into a topic with no subscribers. '
-        + 'Deploy with -c alarmEmail=you@example.com, and confirm the email AWS sends.',
-      );
-    }
 
     for (const [name, fn] of Object.entries(api.functions)) {
       new cloudwatch.Alarm(this, `${name}Errors`, {

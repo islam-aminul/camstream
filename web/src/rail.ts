@@ -34,6 +34,9 @@ const BY_PAGE: Record<string, Level[]> = {
   // Both of these are tenant-wide.
   premises: ['customer'],
   users: ['customer'],
+  // Alarms are about this deployment, not about any customer's estate, so the
+  // rail has nothing to narrow.
+  alerts: [],
 };
 
 /** The levels worth showing on a page. Unknown pages get all of them. */

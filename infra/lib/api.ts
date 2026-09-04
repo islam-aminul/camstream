@@ -40,6 +40,14 @@ export class Api extends Construct {
   public readonly httpApi: apigwv2.HttpApi;
   /** Every function here, so the stack can alarm on each without repeating itself. */
   public readonly functions: Record<string, lambda.IFunction> = {};
+  /**
+   * The admin function, concretely rather than as an interface.
+   *
+   * The stack grants it the alarm topic and tells it where that topic is, and
+   * both need the real type - `IFunction` can be granted to but cannot be
+   * given an environment variable.
+   */
+  public readonly adminFunction!: NodejsFunction;
 
   constructor(scope: Construct, id: string, props: ApiProps) {
     super(scope, id);
@@ -443,6 +451,9 @@ export class Api extends Construct {
       [apigwv2.HttpMethod.POST, '/api/admin/agents/{thingName}/update'],
       [apigwv2.HttpMethod.GET, '/api/admin/discovered'],
       [apigwv2.HttpMethod.POST, '/api/admin/cameras'],
+      [apigwv2.HttpMethod.GET, '/api/admin/alerts'],
+      [apigwv2.HttpMethod.POST, '/api/admin/alerts'],
+      [apigwv2.HttpMethod.DELETE, '/api/admin/alerts'],
       [apigwv2.HttpMethod.POST, '/api/admin/cameras/move'],
       [apigwv2.HttpMethod.PATCH, '/api/admin/cameras/{identity}'],
       [apigwv2.HttpMethod.DELETE, '/api/admin/cameras/{identity}'],
@@ -485,6 +496,7 @@ export class Api extends Construct {
       integration: deviceIntegration,
     });
 
+    (this as { adminFunction: NodejsFunction }).adminFunction = adminFn;
     Object.assign(this.functions, {
       Session: sessionFn,
       Streams: streamsFn,

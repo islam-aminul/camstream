@@ -2,6 +2,19 @@ import { get, post, patch, del, download } from './client';
 
 export type Role = 'superadmin' | 'admin' | 'operator' | 'viewer';
 
+/** One address subscribed to the platform alarm topic. */
+export interface AlertRecipient {
+  endpoint: string;
+  protocol: string;
+  /**
+   * False until the address clicks the link AWS sends. An unconfirmed
+   * subscription exists and receives nothing, which is the distinction the
+   * page has to make loudly.
+   */
+  confirmed: boolean;
+  arn: string;
+}
+
 export interface Me {
   sub: string;
   email: string;
@@ -189,6 +202,21 @@ export const api = {
   }) =>
     get<{ total: number; cursor?: string; cameras: Camera[] }>('/api/admin/cameras', p)
       .then((r): Page<Camera> => ({ total: r.total, cursor: r.cursor, items: r.cameras })),
+
+  /** Who is emailed when the control plane raises an alarm. Superadmin only. */
+  alertRecipients: () =>
+    get<{ topicArn: string; recipients: AlertRecipient[] }>('/api/admin/alerts'),
+
+  /**
+   * Invites an address. AWS emails it a confirmation link and delivers nothing
+   * until that is clicked, which is why this reports "pending" rather than
+   * "subscribed".
+   */
+  addAlertRecipient: (email: string) =>
+    post<{ pending: string }>('/api/admin/alerts', { email }),
+
+  removeAlertRecipient: (arn: string) =>
+    del<{ removed: string }>('/api/admin/alerts', { arn }),
 
   /**
    * Moves cameras between the agents of one premises, all or nothing.
