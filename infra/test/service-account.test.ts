@@ -44,7 +44,11 @@ describe('the Windows service runs as its own account', () => {
     // The call, not the declaration. Searching for the bare name finds the
     // function definition, which sits above everything and made this pass
     // whatever the order really was.
-    const setAccount = source.indexOf('\n  Set-ServiceAccount\n');
+    //
+    // Matched as a line rather than with literal newlines: this file is stored
+    // with CRLF, so a "\n...\n" search succeeds on a working copy checked out
+    // with LF and fails on CI, which is exactly how it was found.
+    const setAccount = source.search(/^[ \t]+Set-ServiceAccount[ \t]*\r?$/m);
     const start = source.indexOf('& $exe start');
 
     expect(install, 'the installer should register the service').toBeGreaterThan(-1);
