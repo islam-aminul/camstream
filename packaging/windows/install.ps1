@@ -409,7 +409,7 @@ if exist "%JAR%.new" (
   if exist "%JAR%" copy /Y "%JAR%" "%JAR%.previous" >nul
   move /Y "%JAR%.new" "%JAR%" >nul
 )
-"$script:JavaBin" -XX:MaxRAMPercentage=50 -jar "%JAR%" "$DataDir\agent.yaml"
+"$script:JavaBin" -XX:MaxRAMPercentage=50 -Dstdout.encoding=UTF-8 -Dstderr.encoding=UTF-8 -jar "%JAR%" "$DataDir\agent.yaml"
 exit /b %ERRORLEVEL%
 "@
   Write-Utf8NoBom -Path $launcher -Content $body
@@ -474,7 +474,7 @@ function Install-WithWinSW {
 
 function Install-WithScheduledTask {
   $action = New-ScheduledTaskAction -Execute $script:JavaBin `
-    -Argument "-XX:MaxRAMPercentage=50 -jar `"$InstallDir\camstream-agent.jar`" `"$DataDir\agent.yaml`"" `
+    -Argument "-XX:MaxRAMPercentage=50 -Dstdout.encoding=UTF-8 -Dstderr.encoding=UTF-8 -jar `"$InstallDir\camstream-agent.jar`" `"$DataDir\agent.yaml`"" `
     -WorkingDirectory $DataDir
   $trigger = New-ScheduledTaskTrigger -AtStartup
   $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest

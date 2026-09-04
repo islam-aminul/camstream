@@ -12,7 +12,7 @@
   <description>Publishes on-premises CCTV cameras to CamStream.</description>
 
   <executable>java</executable>
-  <arguments>-XX:MaxRAMPercentage=50 -jar "%BASE%\camstream-agent.jar" "%ProgramData%\CamStream\agent.yaml"</arguments>
+  <arguments>-XX:MaxRAMPercentage=50 -Dstdout.encoding=UTF-8 -Dstderr.encoding=UTF-8 -jar "%BASE%\camstream-agent.jar" "%ProgramData%\CamStream\agent.yaml"</arguments>
 
   <workingdirectory>%ProgramData%\CamStream</workingdirectory>
 
