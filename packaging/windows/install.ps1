@@ -416,6 +416,56 @@ exit /b %ERRORLEVEL%
   return $launcher
 }
 
+function Set-ServiceAccount {
+  <#
+    Runs the agent as its own virtual account instead of LocalSystem.
+
+    LocalSystem is the most privileged principal on a Windows machine. An agent
+    that runs as it can read any file, alter any service, load drivers and touch
+    every other account on the box - none of which publishing a camera needs.
+    On Linux the agent is already unprivileged and cannot even write its own
+    program; this closes most of that gap on Windows.
+
+    A virtual account (NT SERVICE\<service>) is the right principal: the Service
+    Control Manager creates it, it has its own SID so permissions can name it,
+    and it has no password to store, rotate or leak.
+
+    It is set with sc.exe after WinSW has registered the service rather than
+    declared in the XML, because WinSW's serviceaccount element is built around
+    a username and password and a virtual account has neither. Setting it
+    afterwards is one documented call that either succeeds or does not.
+
+    The account keeps write access to the install directory. That is deliberate
+    and is the part this does not fix: a staged update is applied by the
+    launcher, in the service's own identity, so taking that away would break
+    remote updates - the privileged pre-start step that makes it safe on Linux
+    has no cheap equivalent here. What it does remove is everything else. A
+    compromised agent can still replace its own jar; it can no longer touch the
+    rest of the machine.
+  #>
+  $account = "NT SERVICE\$ServiceName"
+
+  & sc.exe config $ServiceName obj= $account | Out-Null
+  if ($LASTEXITCODE -ne 0) {
+    # Not fatal. An agent running as LocalSystem is how every install worked
+    # until now, and refusing to install would trade a working camera for a
+    # hardening improvement. Say so loudly instead.
+    Write-Host "  WARNING: could not run the service as $account (sc.exe exit $LASTEXITCODE);"
+    Write-Host "           it will run as LocalSystem, which is more privileged than it needs."
+    return
+  }
+
+  # The account exists only once the service is configured to use it, so the
+  # permissions have to be granted in this order.
+  foreach ($path in @($InstallDir, $DataDir)) {
+    & icacls.exe $path /grant "${account}:(OI)(CI)M" /T /C /Q | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+      throw "Could not grant $account access to $path. The service would start and then fail to read its own files."
+    }
+  }
+  Write-Host "  service account: $account (not LocalSystem)"
+}
+
 function Install-WithWinSW {
   $exe = "$InstallDir\$ServiceName.exe"
   if (-not (Test-Path $exe)) {
@@ -464,6 +514,8 @@ function Install-WithWinSW {
   # came to have no service and a successful install.
   & $exe install
   if ($LASTEXITCODE -ne 0) { throw "WinSW could not install the service (exit $LASTEXITCODE)." }
+
+  Set-ServiceAccount
   & $exe start
   if ($LASTEXITCODE -ne 0) { throw "WinSW installed the service but could not start it (exit $LASTEXITCODE)." }
 
