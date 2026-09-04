@@ -170,17 +170,31 @@ Still unexercised against real hardware:
 - anything near the 128-stream ceiling, or the hardware-pressure logic that is
   supposed to shed conversions before it is reached
 
-### A Pi cannot recover its own clock
+### A Pi's clock, and whether it can recover
 
-A Pi has no RTC battery, and Ubuntu's chrony is configured against NTS servers,
-whose key exchange runs over TLS. A box that sits powered off long enough boots
-with a clock far enough out that the TLS handshake fails on certificate
-validity — so it can never fetch the time that would fix the clock. On rpi4b it
-was four months behind and stuck.
+A Pi has no clock battery, so every reboot leaves it at whatever the filesystem
+last recorded — on rpi4b, thirty-nine days behind on 4 September and four and a
+half months behind on 30 August.
 
-Once nudged into range by hand it corrects itself and stays right, but a
-customer's Pi would land in that trap permanently after a long power-off, and
-the first symptom is a TLS failure against AWS IoT that says nothing about
-time. Worth either shipping a non-NTS fallback pool in the installer, writing a
-coarse timestamp at install and restoring it at boot, or at minimum detecting a
-wildly wrong clock at start-up and saying so plainly.
+Whether it recovers turns out to depend on how far back it lands. Ubuntu's
+chrony is configured against NTS servers, whose key exchange runs over TLS, so
+recovery needs a clock inside the server certificate's validity window. Thirty-
+nine days back was still inside one and chrony corrected itself within minutes.
+Four and a half months back was before the certificate was issued, the
+handshake failed on "not yet valid", and the box was stuck until somebody set
+the date by hand.
+
+So it is not reliably self-healing, and the failure is silent: the box looks
+up, answers ping, and serves SSH.
+
+The agent no longer *stays* broken because of it — a supervised task retries
+configuration until it succeeds, and a skewed clock is now named in the log
+rather than appearing as a bare 403. But the underlying box still needs
+fixing, and the standard answer is `fake-hwclock`, which saves the time on
+shutdown and restores it at boot so chrony always starts close enough to
+finish a handshake. Adding a plain, non-NTS pool as a fallback source would
+remove the dependency on TLS entirely.
+
+Worth doing before any customer runs one of these, because the symptom reaches
+the console as "registered, but its agent has not reported it yet" — which
+points at the camera and its credentials, and both are fine.
