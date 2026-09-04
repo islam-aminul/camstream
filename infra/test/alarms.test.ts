@@ -68,18 +68,26 @@ describe('alarms', () => {
     expect(names).toContain('Throttles');
   });
 
-  it('alarms when no agent has reported at all', () => {
-    // Every agent reports on a twenty-second heartbeat, so a fleet-wide zero
-    // is the control plane being unreachable, not a quiet period. Missing data
-    // has to breach here: no data points is the condition being detected.
+  it('alarms when no agent has heartbeated at all', () => {
+    // Measured on the IoT rule the heartbeats actually reach, not on a Lambda
+    // they never call — the first version of this counted device-Lambda
+    // invocations and sat at zero with two healthy agents streaming.
+    //
+    // The window has to clear the idle cadence: an idle agent heartbeats every
+    // fifteen minutes, so anything shorter alarms on a quiet estate behaving
+    // exactly as designed. Missing data breaches, because no data points at
+    // all is the condition being detected.
     const alarms = synth({ alarmEmail: 'a@b.com' }).findResources('AWS::CloudWatch::Alarm');
     const quiet = Object.values(alarms)
       .map((a) => (a as never as { Properties: Record<string, unknown> }).Properties)
-      .find((p) => p.MetricName === 'AgentReports');
+      .find((p) => p.MetricName === 'TopicMatch');
 
-    expect(quiet, 'an alarm on AgentReports should exist').toBeDefined();
+    expect(quiet, 'an alarm on the heartbeat rule should exist').toBeDefined();
     expect(quiet!.ComparisonOperator).toBe('LessThanThreshold');
     expect(quiet!.TreatMissingData).toBe('breaching');
+    expect(quiet!.Namespace).toBe('AWS/IoT');
+    expect(Number(quiet!.Period), 'must clear the 15-minute idle heartbeat')
+      .toBeGreaterThanOrEqual(45 * 60);
   });
 
   it('every alarm actually notifies the topic', () => {

@@ -45,17 +45,6 @@ export function emit(name: string, value: number, unit: Unit = 'Count'): void {
 
 export const METRICS = {
   /**
-   * One per agent report. Agents report on connect and on a 20-second
-   * heartbeat, so a fleet-wide sum of zero over fifteen minutes means nothing
-   * is talking to the control plane at all — an IoT endpoint problem, a broken
-   * credential path, or a policy change that locked every agent out.
-   *
-   * Individual agents going quiet is normal (a site loses power) and belongs
-   * in the console, not in an ops alarm.
-   */
-  AGENT_REPORTS: 'AgentReports',
-
-  /**
    * Renditions a site was asked for and refused, because converting them would
    * exceed what that agent may run at once. A viewer sees "the site is at
    * capacity" and nothing plays, so a sustained non-zero count is somebody

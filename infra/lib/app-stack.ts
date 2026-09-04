@@ -185,32 +185,67 @@ export class CamStreamAppStack extends Stack {
     /*
      * Nothing is talking to us.
      *
-     * Every agent reports on connect and on a twenty-second heartbeat, so a
-     * fleet-wide sum of zero over fifteen minutes is not a quiet period - it is
-     * the IoT endpoint, the credential path, or a policy change having locked
-     * every agent out at once. Cameras would go on looking registered in the
-     * console while nothing could publish.
+     * Agents heartbeat over MQTT to a topic rule that writes straight to the
+     * registry - they do not call a Lambda, which is the point of the rule - so
+     * the signal is the rule's own TopicMatch, published by IoT for free.
+     *
+     * An earlier version of this counted calls to the device Lambda, on the
+     * assumption that agents reported on their heartbeat. They do not: that
+     * endpoint is called only when something changes, so the metric sat at
+     * zero with two healthy agents streaming, and the alarm was firing within
+     * minutes of being deployed. Measure the path the traffic actually takes.
+     *
+     * Forty-five minutes because an idle agent heartbeats every fifteen
+     * (`heartbeatIdleMinutes`), so a shorter window would alarm on the normal
+     * cadence of a quiet estate. Three intervals is enough to be sure and
+     * still catches a real outage within the hour.
      *
      * Deliberately fleet-wide. One agent going quiet is a site losing power,
-     * which belongs in the console rather than in an ops alarm at three in the
+     * which belongs in the console rather than in a page at three in the
      * morning.
      *
-     * Missing data breaches here, unlike everywhere else above: no data points
-     * at all is precisely the condition being alarmed on.
+     * Missing data breaches here, unlike everywhere else: no data points at
+     * all is precisely the condition being detected.
      */
-    new cloudwatch.Alarm(this, 'NoAgentReports', {
-      alarmDescription: 'No agent has reported for fifteen minutes',
+    new cloudwatch.Alarm(this, 'NoAgentHeartbeats', {
+      alarmDescription: 'No agent has sent a heartbeat for forty-five minutes',
       metric: new cloudwatch.Metric({
-        namespace: 'CamStream',
-        metricName: 'AgentReports',
+        namespace: 'AWS/IoT',
+        metricName: 'TopicMatch',
+        dimensionsMap: { RuleName: 'camstream_agent_heartbeat' },
         statistic: 'Sum',
-        period: Duration.minutes(15),
+        period: Duration.minutes(45),
       }),
       threshold: 1,
       comparisonOperator: cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD,
       evaluationPeriods: 1,
       treatMissingData: cloudwatch.TreatMissingData.BREACHING,
     }).addAlarmAction(new cloudwatchActions.SnsAction(alarmTopic));
+
+    /*
+     * Heartbeats arriving and not being recorded.
+     *
+     * The quietest failure in the system: IoT accepts the message, the rule
+     * matches, and the action writing it to the registry fails. Every agent
+     * looks connected from its own side while the console shows an estate
+     * that stopped reporting, and nothing else here would notice - the rule
+     * runs no Lambda, so no error metric covers it.
+     */
+    for (const rule of ['camstream_agent_heartbeat', 'camstream_agent_presence']) {
+      new cloudwatch.Alarm(this, `${rule === 'camstream_agent_heartbeat' ? 'Heartbeat' : 'Presence'}RuleFailures`, {
+        alarmDescription: `The ${rule} topic rule is failing to act on messages`,
+        metric: new cloudwatch.Metric({
+          namespace: 'AWS/IoT',
+          metricName: 'Failure',
+          dimensionsMap: { RuleName: rule },
+          statistic: 'Sum',
+          period: Duration.minutes(15),
+        }),
+        threshold: 1,
+        evaluationPeriods: 1,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      }).addAlarmAction(new cloudwatchActions.SnsAction(alarmTopic));
+    }
 
     /*
      * Viewers being refused.
