@@ -43,6 +43,16 @@ describe('the agent waits for a real clock', () => {
     expect(unit()).toMatch(/^Wants=time-sync\.target$/m);
   });
 
+  it('waits for the clock but does not depend on it', () => {
+    // Wants= not Requires=, deliberately. chrony-wait gives up after three
+    // minutes, and on a box with no reachable time source it always will.
+    // Under Wants= that is a three-minute delay; under Requires= the agent
+    // never starts at all, and a site with a firewalled NTP port goes from
+    // "late" to "dark". A camera that starts with a wrong clock is still
+    // worth more than one that does not start.
+    expect(unit()).not.toMatch(/^(Requires|Requisite|BindsTo)=.*time-sync\.target/m);
+  });
+
   it('installs something that actually reaches that target', () => {
     // On Debian and Raspberry Pi OS the unit that reaches time-sync.target is
     // chrony-wait.service, and it is not enabled by default. Unenabled, the
