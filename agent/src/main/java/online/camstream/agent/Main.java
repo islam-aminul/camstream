@@ -22,6 +22,10 @@ import software.amazon.awssdk.http.urlconnection.UrlConnectionHttpClient;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.s3.S3Client;
 
+import java.io.FileDescriptor;
+import java.io.FileOutputStream;
+import java.io.PrintStream;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import online.camstream.agent.health.ResourceMonitor;
@@ -44,6 +48,31 @@ import java.util.concurrent.CountDownLatch;
  * arrive as pushes, so an idle site issues no requests at all.
  */
 public final class Main {
+
+    /*
+     * Write the log in UTF-8 whatever the host thinks its encoding is.
+     *
+     * Java 21 defaults file.encoding to UTF-8 but leaves the console streams on
+     * the platform's native encoding, and slf4j-simple logs to System.err. On
+     * Windows that made the log cp1252: an em-dash was written as the single
+     * byte 0x97, so the file was not valid UTF-8 and anything reading it as
+     * UTF-8 - grep, a log shipper, an engineer with an editor - saw a
+     * replacement character, on exactly the lines explaining a fault.
+     *
+     * This has to run before the logger below is created, so it is a static
+     * block placed above it rather than the first line of main(): static
+     * initialisers run in textual order at class initialisation, which is
+     * already too late by the time main() is entered.
+     *
+     * The launcher passes -Dstderr.encoding=UTF-8 as well, which fixes the same
+     * thing one layer out. This one is here because it travels in the jar: the
+     * update mechanism ships the jar and nothing else, so a fix that lives only
+     * on the command line cannot reach a site that is already installed.
+     */
+    static {
+        System.setOut(new PrintStream(new FileOutputStream(FileDescriptor.out), true, StandardCharsets.UTF_8));
+        System.setErr(new PrintStream(new FileOutputStream(FileDescriptor.err), true, StandardCharsets.UTF_8));
+    }
 
     private static final Logger log = LoggerFactory.getLogger(Main.class);
 

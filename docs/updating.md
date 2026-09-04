@@ -67,6 +67,34 @@ rewrite its own program or swap the ffmpeg underneath itself. It does **not**
 hold on Windows today, where the service runs as SYSTEM with full control of
 its own directory — see `pending.md`.
 
+### Which means the launcher itself cannot be updated remotely
+
+An update package carries the jar. Nothing else. The unit, `run-agent.cmd`,
+and every flag on the java command line belong to the *installation*, and the
+only thing that rewrites them is the installer — so a change to any of them
+reaches a deployed site by reinstalling it, or not at all.
+
+This is a real limit, not a gap to close casually: the reason a compromised
+agent cannot rewrite its own program is precisely that it does not get to
+choose how it is launched. Handing the update package the launcher would undo
+that on Linux and would need signing first.
+
+So when a fix lives on the command line rather than in the jar, it is a
+reinstall, and the estate stays mixed until every site has had one. Where
+there is a choice, fix it inside the jar.
+
+There usually is. On 2026-09-04 the agent was found writing its Windows log in
+the console codepage, making the file invalid UTF-8. The obvious fix was two
+`-D` flags on the java command line — correct in the repository, correct for
+every future install, and unreachable for the two machines already running.
+The same fix inside the jar is a static block in `Main` that installs UTF-8
+streams before the first logger exists, and that one ships as an ordinary
+update. Both are in place: the flags for new installs, the static block for
+everyone else.
+
+Ask the question early, because it decides whether a fix is deployable or
+merely correct.
+
 ## Failure should be boring
 
 A failed update leaves the old build running. The download is verified by being
