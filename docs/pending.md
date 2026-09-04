@@ -1,7 +1,7 @@
 # Pending
 
 What is known to be missing, unfinished, or deliberately deferred, as of
-2026-08-30. Written down because none of it was recorded anywhere — no TODOs
+2026-09-03. Written down because none of it was recorded anywhere — no TODOs
 in the source, no open issues — which meant it lived only in whoever last
 worked on it.
 
@@ -38,6 +38,40 @@ user who forgets theirs needs an administrator to reset it in Cognito by hand.
 Tolerable at five users, not at five hundred, which is the number the console
 was built for.
 
+## Security
+
+### The update package is not signed
+
+An update instruction carries a presigned URL, and the agent's only check on it
+is `isTrustedSource`: HTTPS, host ending `.amazonaws.com`, containing `s3`.
+That is the shape of a URL, not proof it is ours. The real protection is that
+the instruction arrives over MQTT authenticated by the device certificate,
+which is adequate for "replace this jar" and thin for anything wider.
+
+It matters more since the update endpoint gained a `format` parameter, and it
+is a precondition for the manifest design below — that one lets a package
+describe privileged steps, and without signing, "who can produce a package"
+is answered by "anyone who can produce a plausible URL".
+
+Needs a decision before it is code: where the private key lives (a KMS
+asymmetric key signed at publish time, with the public key baked into the
+agent, is the obvious answer), and it needs its own two-phase rollout per
+`updating.md` — agents must be able to verify before anything is published
+signed-only, or updates stop working with no way to fix them remotely.
+
+### The Windows agent runs as SYSTEM
+
+On Linux the agent is an unprivileged user under `ProtectSystem=strict` and
+cannot write its own program; a root-run `ExecStartPre` installs staged
+updates. On Windows the service is LocalSystem and `C:\Program Files\CamStream`
+grants SYSTEM FullControl, so a compromised agent can rewrite its own jar, its
+launcher and its service definition.
+
+WinSW supports running under a dedicated `serviceaccount`. Worth doing, but as
+its own change: the account needs the state directory, outbound network and the
+right to spawn ffmpeg, and getting it wrong leaves an install that will not
+start.
+
 ## Product
 
 ### First view of an idle camera takes 30–60 seconds
@@ -65,14 +99,35 @@ instead, on the grounds that a disabled dropdown still invites a click and
 then refuses. Nothing is cleared and the value still applies on pages that
 read it. Flagged in case the other behaviour is preferred.
 
+## Deferred by decision
+
+### Update steps still live in the agent, not in the package
+
+The agent decides how an update is applied, so a change to that logic only
+takes effect on the *next* update and a bug in it cannot be fixed remotely at
+all. Two bugs of exactly that shape were found on the first Linux install.
+
+The proposal is a declarative manifest in the package interpreted by the
+already-existing privileged pre-start step, with a fixed vocabulary rather than
+an arbitrary script — a script would hand a compromised agent root on Linux and
+undo the privilege separation deliberately built there.
+
+Deliberately not built yet. It is an evolvability improvement, not a security
+one, and it should come after signing: the vocabulary bounds what a package can
+express, but only a signature bounds who can produce one. The cheaper half of
+the same problem — two container formats, which is what actually caused the
+bug — has been done, and `updating.md` records the migration rule that makes a
+future format change survivable.
+
 ## Housekeeping
 
-- **`rpi4b` is a real agent now holding the only camera.** The Windows
-  `gate-house` agent has zero cameras since the reassignment; move it back if
-  the Pi is switched off.
+- **`rpi4b` holds the only camera.** The Windows `gate-house` agent has zero
+  cameras; both run the same build. Move the camera back if the Pi is switched
+  off — the console's Cameras page does it in one dialog.
 - **`gate-house-new` is a phantom agent.** Created during installer testing on
   2026-08-29, connected once, never ran a build. It appears in the Agents list
-  as an agent that has never checked in.
+  as an agent that has never checked in, and it is offered as a destination in
+  the move dialog where it can only ever be refused.
 - **Three seeded agents at North West Depot** — `edge-001`, `edge-002`,
   `loading-dock` — are fixtures, not real machines. Their hundred seeded
   cameras were removed on 2026-08-30; the agents were left because only the
@@ -87,12 +142,12 @@ read it. Flagged in case the other behaviour is preferred.
 
 ## Unproven rather than unbuilt
 
-A Raspberry Pi 4B (`rpi4b`, Ubuntu 26.04, aarch64) now runs a second agent
-against the same camera, which settled several open questions: the AWS CRT
-native loads on aarch64, fleet provisioning works, discovery and streaming work,
-and the installer's dependency extraction, architecture detection and sudo
-re-exec all behave. It also found three bugs that Windows could not have shown
-— see the git history for 2026-09-03.
+A Raspberry Pi 4B (`rpi4b`, Ubuntu 26.04, aarch64) runs a second agent against
+the same camera, which settled several open questions: the AWS CRT native loads
+on aarch64, fleet provisioning works, discovery and streaming work, the
+installer's dependency extraction, architecture detection and sudo re-exec all
+behave, and remote update now works on both Windows and Linux — including a
+format migration performed without touching either machine.
 
 Still unexercised against real hardware:
 
@@ -104,12 +159,12 @@ Still unexercised against real hardware:
 - anything near the 128-stream ceiling, or the hardware-pressure logic that is
   supposed to shed conversions before it is reached
 
-### macOS remote update is probably still broken
+### macOS is entirely untested
 
-The updater's zip-only assumption was fixed by sniffing the gzip magic, which
-covers macOS too since it ships a .tar.gz. But no Mac has ever run this agent,
-and the launchd equivalent of the systemd staging fix has not been looked at at
-all — the same three-way permission problem may or may not exist there.
+The bundle is built and published, and it is now the same tar.gz every other
+platform gets, so the updater reads it. But no Mac has ever run this agent, and
+the launchd equivalent of the systemd staging fix has not been looked at — the
+same three-way permission problem may or may not exist there.
 
 ### A Pi cannot recover its own clock
 
