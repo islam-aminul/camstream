@@ -85,6 +85,29 @@ public final class DeviceClient {
      */
     private volatile boolean configurationOwed = true;
 
+    /**
+     * The credentials last applied, so a change can be noticed.
+     *
+     * A camera is only resolved from the newest discovery sweep, and a sweep
+     * can only authenticate with the credentials the agent held while it ran.
+     * Credentials arriving afterwards therefore change nothing until the next
+     * scheduled sweep, which is half an hour away.
+     *
+     * That is the difference between an agent that recovers from a power cut
+     * in two minutes and one that recovers in thirty-two: after a restart with
+     * a bad clock the configuration fetch fails, the sweep runs uncredentialed
+     * and finds nothing usable, and by the time the retry succeeds the sweep
+     * that needed the credentials is already over.
+     */
+    private volatile Map<String, String> appliedCredentials = Map.of();
+
+    /** Run when the credential set changes, so discovery can be repeated. */
+    private volatile Runnable onCredentialsChanged = () -> { };
+
+    public void whenCredentialsChange(Runnable action) {
+        this.onCredentialsChanged = action;
+    }
+
     public DeviceClient(
             AgentConfig config,
             AwsCredentialsProvider credentials,
@@ -207,6 +230,11 @@ public final class DeviceClient {
             // case where revocation most obviously had to work.
             credentialStore.apply(envelope, envelopes);
 
+            // Only when they actually differ: this fires a network sweep, and
+            // configuration is re-read on every reconnect and every push.
+            boolean credentialsChanged = !envelopes.equals(appliedCredentials);
+            appliedCredentials = Map.copyOf(envelopes);
+
             List<CameraRegistry.Approved> approved = new java.util.ArrayList<>();
             for (JsonNode node : root.path("approvedCameras")) {
                 String identity = node.path("identity").asText(null);
@@ -220,6 +248,15 @@ public final class DeviceClient {
                         node.path("mainProfileToken").asText(null)));
             }
             registry.setApproved(approved);
+
+            if (credentialsChanged && !envelopes.isEmpty()) {
+                // A sweep that ran without these could not authenticate
+                // anything, and its result is what every camera is resolved
+                // from. Waiting for the next scheduled one would leave the
+                // wall dark for up to the discovery interval.
+                log.info("credentials changed; sweeping again so cameras can be authenticated");
+                onCredentialsChanged.run();
+            }
 
             // Set from the console, because how much CPU this box can spare is
             // something the operator knows and the agent cannot measure.

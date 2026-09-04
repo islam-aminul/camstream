@@ -262,6 +262,17 @@ public final class Main {
                             }
                         }));
 
+                // Credentials that arrive after a sweep are useless until the
+                // next one, because a camera is resolved from the newest scan
+                // and that scan authenticated with what the agent held at the
+                // time. Repeating it here is what turns a two-minute recovery
+                // into a complete one.
+                device.whenCredentialsChange(() -> {
+                    discovery.scan();
+                    registry.refresh();
+                    device.report(true);
+                });
+
                 /*
                  * Keep asking for configuration until we have it.
                  *
