@@ -1,4 +1,4 @@
-import { Annotations, CfnOutput, Duration, Stack, StackProps } from 'aws-cdk-lib';
+import { Annotations, CfnOutput, Duration, RemovalPolicy, Stack, StackProps } from 'aws-cdk-lib';
 import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as cloudwatchActions from 'aws-cdk-lib/aws-cloudwatch-actions';
 import * as sns from 'aws-cdk-lib/aws-sns';
@@ -113,6 +113,15 @@ export class CamStreamAppStack extends Stack {
     const alarmEmail = this.node.tryGetContext('alarmEmail');
     if (typeof alarmEmail === 'string' && alarmEmail.includes('@')) {
       alarmTopic.addSubscription(new subscriptions.EmailSubscription(alarmEmail));
+      // Retained, so that removing this block hands the subscription over
+      // rather than deleting it. A confirmed subscription cannot be moved:
+      // the confirmation belongs to that subscription ARN, so deleting one
+      // and creating another means asking a person to click a link again for
+      // a change that was purely internal. Detaching it first lets the console
+      // adopt it exactly as it stands.
+      const created = alarmTopic.node.tryFindChild(alarmEmail);
+      (created?.node.defaultChild as sns.CfnSubscription | undefined)
+        ?.applyRemovalPolicy(RemovalPolicy.RETAIN);
     } else {
       Annotations.of(this).addWarning(
         'No alarmEmail in context: alarms will fire into a topic with no subscribers. '
