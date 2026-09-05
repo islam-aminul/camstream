@@ -103,6 +103,12 @@ public final class FfmpegHls implements AutoCloseable {
         command.addAll(List.of(
                 "-f", "hls",
                 "-hls_time", String.valueOf(segmentSeconds),
+                // Short first segments, so a tile has something to play sooner.
+                // ffmpeg grows them to hls_time on its own after this much
+                // media, and cuts at the first keyframe past the target - so a
+                // value under the camera's keyframe interval produces exactly
+                // one group of pictures rather than two.
+                "-hls_init_time", String.valueOf(config.initialSegmentDurationMs / 1000.0),
                 "-hls_list_size", String.valueOf(config.playlistWindow),
                 // delete_segments keeps the working directory bounded; temp_file
                 // stops the uploader seeing half-written segments.
