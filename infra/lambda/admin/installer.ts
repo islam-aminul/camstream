@@ -458,6 +458,41 @@ ${identity}
  * the answer to "is this the same bundle I am running", which is the question
  * actually being asked.
  */
+/**
+ * The build id and the signature, from one HeadObject.
+ *
+ * Both are properties of the published object, so asking twice would be two
+ * round trips for one answer. The signature is written as object metadata at
+ * publish time rather than kept beside the bundle, which means it cannot go
+ * missing separately from the thing it describes.
+ *
+ * Absent on a bundle published before signing existed. The agent treats a
+ * missing signature as unsigned, which it still accepts while the fleet
+ * migrates - see docs/signing.md.
+ */
+export async function bundleFacts(
+  bucket: string,
+  platform: Platform,
+  version: string,
+  format: BundleFormat = BUNDLE_EXTENSION,
+): Promise<{ build?: string; signature?: string; keyId?: string }> {
+  try {
+    const head = await s3.send(new HeadObjectCommand({
+      Bucket: bucket,
+      Key: bundleKey(version, platform, format),
+    }));
+    return {
+      build: head.ETag?.replaceAll('"', ''),
+      signature: head.Metadata?.signature,
+      keyId: head.Metadata?.['signing-key-id'],
+    };
+  } catch {
+    // Same reasoning as below: failing the whole instruction because the head
+    // request failed would be worse than sending it without these.
+    return {};
+  }
+}
+
 export async function bundleBuildId(
   bucket: string,
   platform: Platform,
