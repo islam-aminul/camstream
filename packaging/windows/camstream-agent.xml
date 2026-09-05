@@ -16,6 +16,24 @@
 
   <workingdirectory>%ProgramData%\CamStream</workingdirectory>
 
+  <!--
+    Kill the whole tree, children first.
+
+    The service runs cmd.exe, which runs java. WinSW's default is to stop the
+    process it started and leave the rest, so stopping the service killed the
+    launcher and orphaned the JVM - which kept running, kept its MQTT
+    connection, and kept its client id.
+
+    AWS IoT allows one connection per client id and evicts the older when a
+    second arrives. Two agents from the same machine therefore evict each other
+    forever: measured at 242 disconnections in eight hours, each connection
+    living about a second, with every reconnect losing its subscriptions. A
+    watch instruction arriving in one of those gaps is simply dropped.
+
+    It happens on any restart, which means on every remote update.
+  -->
+  <stopparentprocessfirst>false</stopparentprocessfirst>
+
   <!-- A camera outage must not become an agent outage. -->
   <onfailure action="restart" delay="10 sec"/>
   <resetfailure>1 hour</resetfailure>
