@@ -114,6 +114,19 @@ npx cdk deploy CamStreamApp                  # 3. everything else
 cd .. && ./scripts/deploy-web.sh             # 4. the player
 ```
 
+After that, deploy both together:
+
+```bash
+./scripts/deploy.sh
+```
+
+The control plane and the console are separate deploys, and skipping the
+second one is silent: `cdk deploy` reports success, the API gains its new
+endpoints, and the site keeps serving the last bundle that was synced. That
+has happened, twice, with merged work that existed nowhere a user could see.
+Running them from one place is the cheap half of the fix; nothing stops
+`cdk deploy` being run alone, so prefer this.
+
 ## Roles
 
 | | superadmin | admin | operator | viewer |
