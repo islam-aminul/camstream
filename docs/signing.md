@@ -102,17 +102,46 @@ shape as everything else here.
 An agent applies an update using the code it is already running, so any change
 to how updates work only takes effect on the *next* update.
 
-1. **Ship a build that verifies a signature when one is present, and accepts
-   packages without one.** Every agent takes this using its current, unsigned
-   updater. Start signing published bundles at the same time — a phase-1 agent
-   verifies them, and a phase-0 agent ignores the field it does not know about.
-2. **Once every agent reports the phase-1 version, ship a build that refuses
-   an unsigned package.**
+1. ~~**Ship a build that verifies a signature when one is present, and accepts
+   packages without one.**~~ Shipped in 0.1.1. Every agent took it using its
+   current, unsigned updater, and publishing started signing at the same time —
+   a phase-1 agent verifies them, and a phase-0 agent ignores the field it does
+   not know about.
+2. ~~**Once every agent reports the phase-1 version, ship a build that refuses
+   an unsigned package.**~~ Shipped in 0.1.7, once both agents reported 0.1.6.
 
 Both steps live in the agent. That is deliberate: if the publisher stopped
 signing, nothing would break, whereas an agent that requires a signature it
 cannot verify is stranded with no remote way to fix it. The dangerous half is
 the one that must never be first.
+
+### What was checked before phase two
+
+Not the code — the *published bundles*, because the enforcing build is only safe
+if the signatures already in the bucket are ones it will actually accept. The
+publisher signs a SHA-256 digest through KMS and the agent verifies the raw
+bytes with `SHA256withECDSA`; those are the same operation from opposite sides,
+but "should be equivalent" is a bad thing to learn was wrong from a fleet that
+has stopped taking updates.
+
+So every bundle from 0.1.4 to 0.1.6, both platforms, was fetched from the
+downloads prefix and verified against the committed public key with `openssl
+dgst -sha256 -verify` — the same check the agent makes, from outside the agent.
+All six verified. 0.1.1 through 0.1.3 carry signatures too; 0.1.0 does not, and
+is the one bundle this change makes unreachable.
+
+### Where the escape hatch is
+
+There is no configuration flag to accept unsigned packages, deliberately. Such a
+flag is set once during an incident and never unset, and it would restore
+exactly the hole this closes.
+
+If the signing key were ever lost, the recovery is a manual install — which is
+how an agent is installed in the first place, and is a path that does not go
+through the updater at all. The fleet is small enough that this is a drive, not
+a catastrophe. Rotation is the cheaper answer and is already supported: the
+agent trusts a *set* of keys, so a new one can be added to the fleet before
+anything is signed with it.
 
 ## What this does and does not buy
 

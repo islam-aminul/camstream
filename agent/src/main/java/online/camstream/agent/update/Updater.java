@@ -11,8 +11,10 @@ import java.net.http.HttpResponse;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.security.PublicKey;
 import java.time.Duration;
 import java.util.Enumeration;
+import java.util.List;
 import java.io.BufferedInputStream;
 import java.io.EOFException;
 import java.io.IOException;
@@ -120,16 +122,10 @@ public final class Updater {
      * @param wantedBuild    the identity of that bundle, which is what actually
      *                       distinguishes two builds of the same version
      * @param url            a presigned link to the bundle
-     */
-    public void apply(String runningVersion, String wantedVersion, String wantedBuild, String url) {
-        apply(runningVersion, wantedVersion, wantedBuild, url, null);
-    }
-
-    /**
-     * @param signature base64 of the bundle's signature, or null when the
-     *   control plane did not send one. While the fleet is being migrated an
-     *   unsigned package is still accepted; a signature that is present and
-     *   wrong never is. See {@code docs/signing.md}.
+     * @param signature      base64 of the bundle's signature. A package without
+     *   one is refused: see {@code docs/signing.md}. There is deliberately no
+     *   overload that omits it, because such a method could now only ever
+     *   refuse, and one existed for the length of the migration.
      */
     public void apply(String runningVersion, String wantedVersion, String wantedBuild,
                       String url, String signature) {
@@ -154,47 +150,72 @@ public final class Updater {
             Path bundle = work.resolve("bundle.zip");
 
             download(url, bundle);
-
-            // Before the archive is opened, not after. The tar reader below is
-            // hand-rolled, and bytes this build has not decided to trust should
-            // not be parsed by it.
-            PackageSignature.Verdict verdict = PackageSignature.verify(bundle, signature);
-            switch (verdict) {
-                case REJECTED, UNVERIFIABLE -> {
-                    log.error("refusing update to {}: signature {}", wantedVersion, verdict);
-                    return;
-                }
-                case UNSIGNED -> log.warn(
-                        "update to {} is not signed; accepted while the fleet is migrating", wantedVersion);
-                case TRUSTED -> log.info("update to {} carries a trusted signature", wantedVersion);
-            }
-
-            Path staged = extractJar(bundle, work);
-
-            // Never over the installed jar. The launcher or the unit moves it
-            // into place before the next JVM starts; nothing here touches a
-            // file that something is currently running from.
-            Path pending = stagingPath();
-            Files.createDirectories(pending.getParent());
-            Files.move(staged, pending, StandardCopyOption.REPLACE_EXISTING);
-
-            // Recorded before the exit. If the agent restarted into the new
-            // build and had not recorded it, it would reinstall the same build
-            // on every instruction for ever; the other way round it merely
-            // declines one update it had already taken.
-            if (wantedBuild != null && !wantedBuild.isBlank()) {
-                Files.createDirectories(buildMarker.getParent());
-                Files.writeString(buildMarker, wantedBuild);
-            }
-
-            log.info("staged {} as {}; exiting for the service manager to start it",
-                    wantedVersion, pending.getFileName());
-            exit.run();
+            install(bundle, work, wantedVersion, wantedBuild, signature);
         } catch (Exception e) {
             log.error("update to {} failed, staying on {}: {}", wantedVersion, runningVersion, e.toString());
         } finally {
             deleteQuietly(work);
         }
+    }
+
+    /**
+     * Everything after the bytes are on disk: check them, stage them, exit.
+     *
+     * Separate from {@link #apply} only so that the check can be tested against
+     * a real bundle. The download cannot be reached from a test — a bundle URL
+     * must be HTTPS at an S3 host, which is not something a loopback server can
+     * pretend to be — and a refusal that is only asserted by reading the source
+     * is not much of an assertion about a security control.
+     */
+    void install(Path bundle, Path work, String wantedVersion, String wantedBuild, String signature)
+            throws Exception {
+        install(bundle, work, wantedVersion, wantedBuild, signature, PackageSignature.trustedKeys());
+    }
+
+    /**
+     * The same, against an explicit key set.
+     *
+     * The private half of the release key lives in KMS and cannot be borrowed,
+     * so a test that could only supply the shipped key could only ever watch
+     * this refuse things. It would then pass just as happily against an
+     * {@code install} that refused everything, including real updates — which
+     * is the more expensive failure of the two, and the one that would only be
+     * discovered at the next release.
+     */
+    void install(Path bundle, Path work, String wantedVersion, String wantedBuild, String signature,
+                 List<PublicKey> trusted) throws Exception {
+        // Before the archive is opened, not after. The tar reader below is
+        // hand-rolled, and bytes this build has not decided to trust should
+        // not be parsed by it.
+        PackageSignature.Verdict verdict = PackageSignature.verify(bundle, signature, trusted);
+        if (!verdict.isTrusted()) {
+            log.error("refusing update to {}: {} ({})",
+                    wantedVersion, verdict.reason(), verdict);
+            return;
+        }
+        log.info("update to {} carries a trusted signature", wantedVersion);
+
+        Path staged = extractJar(bundle, work);
+
+        // Never over the installed jar. The launcher or the unit moves it
+        // into place before the next JVM starts; nothing here touches a
+        // file that something is currently running from.
+        Path pending = stagingPath();
+        Files.createDirectories(pending.getParent());
+        Files.move(staged, pending, StandardCopyOption.REPLACE_EXISTING);
+
+        // Recorded before the exit. If the agent restarted into the new
+        // build and had not recorded it, it would reinstall the same build
+        // on every instruction for ever; the other way round it merely
+        // declines one update it had already taken.
+        if (wantedBuild != null && !wantedBuild.isBlank()) {
+            Files.createDirectories(buildMarker.getParent());
+            Files.writeString(buildMarker, wantedBuild);
+        }
+
+        log.info("staged {} as {}; exiting for the service manager to start it",
+                wantedVersion, pending.getFileName());
+        exit.run();
     }
 
     private void download(String url, Path into) throws Exception {

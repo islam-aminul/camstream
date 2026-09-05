@@ -53,17 +53,45 @@ public final class PackageSignature {
     /** What a verification attempt concluded, so callers can say why. */
     public enum Verdict {
         /** The bundle carries a signature made by a key this build trusts. */
-        TRUSTED,
-        /** No signature was offered. Accepted while the fleet is being migrated. */
-        UNSIGNED,
+        TRUSTED("signed by a key this build trusts"),
+        /** No signature was offered at all. */
+        UNSIGNED("no signature was published with it"),
         /** A signature was offered and no trusted key accepts it. */
-        REJECTED,
+        REJECTED("the signature matches none of the keys this build trusts"),
         /** A signature was offered and this build carries no keys to check it. */
-        UNVERIFIABLE,
+        UNVERIFIABLE("it is signed, but this build carries no keys to check it against");
+
+        private final String reason;
+
+        Verdict(String reason) {
+            this.reason = reason;
+        }
+
+        /**
+         * Whether this verdict permits the bundle to be opened.
+         *
+         * One value, deliberately, rather than a list of the acceptable ones.
+         * Every widening of this mechanism would take the shape of adding a
+         * second member to that list — {@code UNSIGNED} was on it for the whole
+         * of the migration — and a list invites the addition in a way a single
+         * comparison does not.
+         */
+        public boolean isTrusted() {
+            return this == TRUSTED;
+        }
+
+        /** Why, in words an operator reading the log can act on. */
+        public String reason() {
+            return reason;
+        }
     }
 
     /**
      * Checks a bundle against the keys this build trusts.
+     *
+     * <p>This classifies; it does not decide. The decision is one line in
+     * {@link Updater}, which installs only what {@link Verdict#isTrusted} says
+     * it may.
      *
      * <p>A signature that is present and wrong is {@link Verdict#REJECTED}: the
      * only reasons for it are a corrupted download, a bundle from somewhere
@@ -73,6 +101,11 @@ public final class PackageSignature {
      * {@link Verdict#UNVERIFIABLE} rather than accepted. A build that carries
      * no keys cannot tell a good signature from a bad one, and treating that as
      * "fine" would make the whole mechanism opt-out by accident.
+     *
+     * <p>{@link Verdict#UNSIGNED} is kept distinct from {@code REJECTED} even
+     * though both now refuse, because they mean different things to whoever
+     * reads the log: one says somebody published a bundle without going through
+     * the release script, the other says the bytes are not ours.
      */
     public static Verdict verify(Path bundle, String base64Signature) {
         return verify(bundle, base64Signature, trustedKeys());

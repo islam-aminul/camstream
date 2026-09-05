@@ -56,33 +56,32 @@ was built for.
 
 ## Security
 
-### The update package is not signed
+### ~~The update package is not signed~~ — done
 
-An update instruction carries a presigned URL, and the agent's only check on it
-is `isTrustedSource`: HTTPS, host ending `.amazonaws.com`, containing `s3`.
-That is the shape of a URL, not proof it is ours. The real protection is that
-the instruction arrives over MQTT authenticated by the device certificate,
-which is adequate for "replace this jar" and thin for anything wider.
+**Closed on 2026-09-05.** Bundles are signed at publish time with a KMS
+asymmetric key (`ECC_NIST_P256` / `ECDSA_SHA_256`), the signature travels in the
+existing update instruction as S3 object metadata, and the agent verifies it
+against a public key baked into the jar *before* the archive is opened. Since
+0.1.7 an unsigned package is refused rather than accepted.
 
-It matters more since the update endpoint gained a `format` parameter, and it
-is a precondition for the manifest design below — that one lets a package
-describe privileged steps, and without signing, "who can produce a package"
-is answered by "anyone who can produce a plausible URL".
+Both halves of the rollout `updating.md` demands are now shipped: 0.1.1 could
+verify but did not insist, 0.1.7 insists. The order mattered — the updater that
+applies an update is always the old one, so the demanding half could not go
+first without stranding the fleet.
 
-**Designed in `signing.md`** on 2026-09-05, with a recommendation rather than
-options: a KMS asymmetric key (`ECC_NIST_P256`), signing the bundle bytes at
-publish time, the signature carried in the existing update instruction, and the
-public keys baked into the agent as a set so rotation is possible.
+What this bought: an attacker who can cause an update instruction to be issued
+still cannot make an agent run their code, because they cannot produce a
+signature. Before it, they could.
 
-One decision remains, and it is the only one: whether the private key lives in
-KMS. Everything else in that document follows from it, and the alternative — a
-key file anybody can copy — is not seriously arguable.
+What it did not: `kms:Sign` on the release key is now the whole trust boundary
+for what the fleet will run. It should be held by the release path and nothing
+else, and it is worth an alarm on its use. The design is in `signing.md`.
 
-It needs the two-phase rollout `updating.md` requires: a build that verifies a
-signature when present and accepts packages without one, then, once the fleet
-is on it, a build that refuses unsigned packages. Both halves live in the
-agent, because an agent requiring a signature it cannot verify is stranded with
-no remote way to fix it.
+One operational consequence, recorded because it will look like a bug the first
+time somebody hits it: **0.1.0 can no longer be installed remotely.** It is the
+one bundle in the downloads prefix published before signing existed, and every
+agent will now refuse it. Rolling back that far needs a manual install, which is
+the correct outcome and not worth fixing.
 
 ### The Windows agent can still replace its own jar
 

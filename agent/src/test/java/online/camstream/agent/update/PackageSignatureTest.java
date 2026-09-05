@@ -29,7 +29,7 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
  * wrong in an obvious direction:
  *
  *   - accepting a bad signature is the whole failure
- *   - refusing an unsigned package too early strands the fleet mid-rollout
+ *   - refusing an unsigned package before the fleet can verify one strands it
  *   - accepting a signature a build cannot check makes signing opt-out by
  *     accident, which is the failure that would never be noticed
  *
@@ -58,15 +58,31 @@ class PackageSignatureTest {
     }
 
     @Test
-    @DisplayName("no signature is accepted while the fleet is migrating")
-    void unsignedIsAccepted(@TempDir Path dir) throws Exception {
-        // The first half of the rollout ships a build that can verify but does
-        // not insist. Refusing here would strand every agent still running the
-        // build before this one - and the update that would fix them is the
-        // one they would refuse.
+    @DisplayName("no signature is its own verdict, and not a trusted one")
+    void unsignedIsItsOwnVerdict(@TempDir Path dir) throws Exception {
+        // Distinct from REJECTED although both now refuse. They mean different
+        // things to whoever reads the log: this one says a bundle reached the
+        // downloads prefix without going through the release script, which is
+        // an accident in our own process rather than an attack.
         Path file = bundle(dir, "a bundle");
         assertEquals(PackageSignature.Verdict.UNSIGNED, PackageSignature.verify(file, null));
         assertEquals(PackageSignature.Verdict.UNSIGNED, PackageSignature.verify(file, "   "));
+    }
+
+    @Test
+    @DisplayName("only a trusted signature permits an install")
+    void trustIsExactlyOneVerdict() {
+        // The whole of the security policy, in one assertion. UNSIGNED was
+        // acceptable for the length of the migration and stopped being so once
+        // the fleet was uniform; this is what stops it, or anything else,
+        // drifting back onto the acceptable side.
+        for (PackageSignature.Verdict verdict : PackageSignature.Verdict.values()) {
+            assertEquals(verdict == PackageSignature.Verdict.TRUSTED, verdict.isTrusted(),
+                    verdict + " must " + (verdict == PackageSignature.Verdict.TRUSTED ? "" : "not ")
+                            + "permit an install");
+            org.junit.jupiter.api.Assertions.assertFalse(verdict.reason().isBlank(),
+                    "a refusal nobody can read is a refusal nobody can fix");
+        }
     }
 
     @Test
