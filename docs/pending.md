@@ -1,9 +1,13 @@
 # Pending
 
 What is known to be missing, unfinished, or deliberately deferred, as of
-2026-09-03. Written down because none of it was recorded anywhere — no TODOs
+2026-09-05. Written down because none of it was recorded anywhere — no TODOs
 in the source, no open issues — which meant it lived only in whoever last
 worked on it.
+
+Kept honest by deleting from it. An entry that has been fixed is removed rather
+than annotated, unless what remains is genuinely different from what was
+described; a backlog that only grows stops being read.
 
 Ordered by what would hurt first, not by effort.
 
@@ -71,37 +75,30 @@ agent, is the obvious answer), and it needs its own two-phase rollout per
 `updating.md` — agents must be able to verify before anything is published
 signed-only, or updates stop working with no way to fix them remotely.
 
-### The Windows agent runs as SYSTEM
+### The Windows agent can still replace its own jar
 
 On Linux the agent is an unprivileged user under `ProtectSystem=strict` and
 cannot write its own program; a root-run `ExecStartPre` installs staged
-updates. On Windows the service is LocalSystem and `C:\Program Files\CamStream`
-grants SYSTEM FullControl, so a compromised agent can rewrite its own jar, its
-launcher and its service definition.
+updates. Windows had no equivalent — the service was LocalSystem, with
+FullControl over its own directory.
 
-**Largely addressed on 2026-09-05.** New installs run under a virtual account
-(`NT SERVICE\camstream-agent`) rather than LocalSystem: the Service Control
-Manager creates it, it has its own SID, and there is no password to store or
-rotate. It is set with `sc.exe` after WinSW registers the service, because
-WinSW's own `serviceaccount` element is built around a username and password
-and a virtual account has neither.
+Since 2026-09-05 it runs under a virtual account (`NT SERVICE\camstream-agent`)
+instead: the Service Control Manager creates it, it has its own SID, and there
+is no password to store or rotate. Both live agents are on it, and remote
+update has been exercised under it.
 
-What remains, deliberately: the account keeps write access to the install
-directory. A staged update is applied by the launcher, running in the service's
-own identity, so removing that would break remote updates — and the privileged
-pre-start step that makes it safe on Linux has no cheap Windows equivalent
-(WinSW runs every hook as the service account, so a low-privilege service
-cannot perform its own swap). A compromised agent can therefore still replace
-its own jar. It can no longer touch the rest of the machine, which was the
-larger exposure.
+What remains is deliberate. The account keeps write access to the install
+directory, because a staged update is applied by the launcher in the service's
+own identity, and WinSW runs every hook as the service account — so a
+low-privilege service cannot perform its own swap. A compromised agent can
+therefore still replace its own jar. It can no longer touch the rest of the
+machine, which was the larger exposure.
 
-Closing the last gap needs a second privileged component — a SYSTEM-run step
-ordered before the service — which is a bigger change than this was, and worth
-weighing against package signing, since both bear on the same question of who
-gets to decide what the agent runs.
-
-**The two existing agents still run as LocalSystem**; the account is set at
-install time, so they need a reinstall to pick it up.
+Closing it needs a second privileged component: a SYSTEM-run step ordered
+before the service, which is the Windows analogue of `ExecStartPre=+`. That is
+a bigger change than the account swap was, and worth weighing against package
+signing — both answer the same question of who decides what the agent runs, and
+signing is the one that also covers where the jar came from.
 
 ## Product
 
@@ -109,11 +106,18 @@ install time, so they need a reinstall to pick it up.
 
 Demand has to reach the watch lambda, the lambda publishes desired state, the
 agent starts ffmpeg, and enough four-second segments have to land before a
-playlist means anything. The tile does say it is starting, and the delay is
-inherent to starting streams on demand rather than running them constantly —
-which is what makes an idle estate nearly free. But it is the first impression
-every time, and worth a decision: accept it, warm a camera on hover, or keep
-recently-watched cameras alive for a few minutes.
+playlist means anything. The tile does say it is starting, and some of the
+delay is inherent to starting streams on demand rather than running them
+constantly — which is what makes an idle estate nearly free.
+
+**This needs re-measuring before it is treated as inherent.** The figure was
+taken while the Windows agent was reconnecting to MQTT every 129 seconds,
+losing its subscriptions each time — an instruction arriving in one of those
+gaps was dropped, and the viewer waited for the next resend. That fault is
+fixed, and nobody has timed a first view since.
+
+Once there is a real number, the decision is: accept it, warm a camera on
+hover, or keep recently-watched cameras alive for a few minutes.
 
 ### Expanding a tile does not reduce the bill
 
@@ -150,31 +154,11 @@ the same problem — two container formats, which is what actually caused the
 bug — has been done, and `updating.md` records the migration rule that makes a
 future format change survivable.
 
-### Deploying is two steps and the second one is silent
-
-`npx cdk deploy CamStreamApp` ships the lambdas. It does **not** ship the
-console — that is `./scripts/deploy-web.sh`, step 4 in the README, which
-builds the player and syncs it to the bucket.
-
-Nothing connects them. Run only the first and the deploy reports success, the
-API gains its new endpoints, and the site keeps serving whatever build was
-last synced. Found on 2026-09-04: `camstream.online` was serving a bundle from
-28 August, so the clock-drift tag, the "last report" and "in service" columns
-and the rename action had been merged for days and existed nowhere a user
-could see. The API had been redeployed repeatedly in that time, which is what
-makes it convincing — everything that reports success was succeeding.
-
-The failure is silent in both directions: there is no version stamp in the
-console and no check that the bundle behind CloudFront matches the commit, so
-the only way to notice is to fetch the deployed JavaScript and grep it, which
-is how it was found. Worth either folding the web sync into the app stack, or
-printing the deployed bundle's commit somewhere the console shows it.
-
 ## Housekeeping
 
-- **`rpi4b` holds the only camera.** The Windows `gate-house` agent has zero
-  cameras; both run the same build. Move the camera back if the Pi is switched
-  off — the console's Cameras page does it in one dialog.
+- **`gate-house` holds the only camera.** `rpi4b` has zero; both run 0.1.1.
+  Move it if the Windows machine is switched off — the console's Cameras page
+  does it in one dialog.
 - **`gate-house-new` is a phantom agent.** Created during installer testing on
   2026-08-29, connected once, never ran a build. It appears in the Agents list
   as an agent that has never checked in, and it is offered as a destination in
@@ -198,12 +182,17 @@ the same camera, which settled several open questions: the AWS CRT native loads
 on aarch64, fleet provisioning works, discovery and streaming work, the
 installer's dependency extraction, architecture detection and sudo re-exec all
 behave, and remote update now works on both Windows and Linux — including a
-format migration performed without touching either machine.
+format migration performed without touching either machine, and, on
+2026-09-05, an update applied under the reduced-privilege Windows service
+account.
 
 Still unexercised against real hardware:
 
 - more than one agent *publishing* at once (the two exist, but ownership of the
   single camera moves between them rather than being held by both)
+- a Windows restart or update while a stream is running: every restart so far
+  has been to an idle agent, and the launcher swaps the jar at exactly the
+  moment nothing holds it open
 - more than one viewer on the same site
 - a second premises with real cameras
 - anything near the 128-stream ceiling, or the hardware-pressure logic that is
