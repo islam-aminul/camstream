@@ -180,8 +180,57 @@ public final class DiscoveryService implements CameraSource {
         }
     }
 
+    /**
+     * Whether a sweep is already running.
+     *
+     * Three things ask for one: the supervised timer, an operator's "scan now",
+     * and the rescan that follows new credentials arriving. Nothing stopped
+     * them overlapping, and on a real site they did - a restart runs the timer's
+     * sweep and then, seconds later, the credential rescan, because
+     * configuration arrives just after start-up.
+     *
+     * Two sweeps are worse than one in every respect. They are minutes of work
+     * duplicated; they probe every device on the LAN twice at once, which is
+     * enough to make a recorder that is slow to open a stream look broken; and
+     * whichever finishes last overwrites the other, so the poorer result wins
+     * at random. Measured on 2026-09-05: two sweeps three seconds apart, one
+     * finding eleven candidates and one finding three, and the three won.
+     */
+    private final java.util.concurrent.atomic.AtomicBoolean sweeping =
+            new java.util.concurrent.atomic.AtomicBoolean();
+
     /** One full sweep. Safe to run on a timer; takes tens of seconds on a busy LAN. */
     public List<DiscoveredCamera> scan() {
+        if (!sweeping.compareAndSet(false, true)) {
+            // Declining rather than queueing: a sweep is already looking at the
+            // same network, and its answer will be at least as good as a second
+            // one started now. The caller gets what is currently known.
+            log.info("a sweep is already running; using its results rather than starting another");
+            return redactedResults();
+        }
+        try {
+            return sweepOnce();
+        } finally {
+            sweeping.set(false);
+        }
+    }
+
+    /**
+     * How many sweeps have actually run.
+     *
+     * Exists for the test that two concurrent callers cause one sweep. Counting
+     * returns instead would prove nothing - both callers return either way, and
+     * the whole failure is that both were also *working*.
+     */
+    private final java.util.concurrent.atomic.AtomicInteger sweepsRun =
+            new java.util.concurrent.atomic.AtomicInteger();
+
+    int sweepsRun() {
+        return sweepsRun.get();
+    }
+
+    private List<DiscoveredCamera> sweepOnce() {
+        sweepsRun.incrementAndGet();
         Map<String, DiscoveredCamera> found = new LinkedHashMap<>();
 
         // Multicast first: it is fast, needs no credentials, and yields the
