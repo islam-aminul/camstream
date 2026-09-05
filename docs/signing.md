@@ -45,6 +45,25 @@ it opens the archive, so a malformed or hostile archive is never parsed by a
 build that has not already decided to trust it. This matters — the tar reader
 is hand-rolled.
 
+## Signing is over the digest, not the bundle
+
+KMS refuses a raw message over 4096 bytes, and a bundle is thirty megabytes. So
+the publisher hashes locally and signs the digest:
+
+```bash
+sha256sum bundle.tar.gz            # locally
+aws kms sign --message-type DIGEST --signing-algorithm ECDSA_SHA_256
+```
+
+The agent is unaffected — `SHA256withECDSA` hashes the bytes and verifies, which
+is the same operation from the other side. Confirmed end to end on 2026-09-05: a
+KMS signature over a three-megabyte file verified in Java against the committed
+public key, and changing one byte broke it.
+
+Worth stating because `--message-type RAW` works perfectly on a small test file
+and fails only at real bundle size, which is exactly the kind of thing that gets
+discovered during a release rather than before one.
+
 ## How the signature travels
 
 In the update instruction, beside `version`, `build` and `url`:

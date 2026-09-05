@@ -78,7 +78,8 @@ class PackageSignatureTest {
         // exactly the failure nobody would notice.
         Path file = bundle(dir, "a bundle");
         String signature = sign(file, p256());
-        assertEquals(PackageSignature.Verdict.UNVERIFIABLE, PackageSignature.verify(file, signature));
+        assertEquals(PackageSignature.Verdict.UNVERIFIABLE,
+                PackageSignature.verify(file, signature, java.util.List.of()));
     }
 
     @Test
@@ -164,11 +165,15 @@ class PackageSignatureTest {
     }
 
     @Test
-    @DisplayName("a build with no keys compiled in trusts nothing")
-    void noKeysMeansNoTrust() {
-        // Not an error state during the rollout - it is what every agent looks
-        // like before the first signed build reaches it - but it must read as
-        // "trusts nothing", never as "trusts anything".
-        assertEquals(0, PackageSignature.trustedKeys().size());
+    @DisplayName("the key shipped in this build is readable")
+    void shippedKeyParses() {
+        // Guards the committed PEM. A corrupted or truncated key does not fail
+        // loudly: trustedKeys() would return nothing, and the agent would then
+        // refuse every signed package it was offered - which looks like a
+        // signing problem rather than a packaging one, in a place nobody would
+        // think to check.
+        var keys = PackageSignature.trustedKeys();
+        assertEquals(1, keys.size(), "expected exactly the release key to be compiled in");
+        assertEquals("EC", keys.get(0).getAlgorithm());
     }
 }
