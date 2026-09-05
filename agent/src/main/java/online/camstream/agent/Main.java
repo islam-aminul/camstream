@@ -254,7 +254,12 @@ public final class Main {
                                     .apply(DeviceClient.version(),
                                             command.path("version").asText(null),
                                             command.path("build").asText(null),
-                                            command.path("url").asText(null));
+                                            command.path("url").asText(null),
+                                            // Absent from a control plane that
+                                            // does not sign yet, which the
+                                            // updater treats as unsigned rather
+                                            // than as a failed check.
+                                            command.path("signature").asText(null));
                         }
                         default -> log.warn("ignoring unknown command \"{}\"", action);
                     }

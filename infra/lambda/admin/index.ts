@@ -29,7 +29,7 @@ class Refused extends Error {
   }
 }
 import { key, slugFor, DEFAULT_MAX_TRANSCODES, MAX_CONCURRENT_TRANSCODES, queryAllPages, encodeCursor, decodeCursor, REGISTRY_PK, type CameraRecord, type CustomerRecord, type DiscoveredRecord, type PremisesRecord } from '../shared/registry';
-import { buildInstaller, buildInstallerArchive, bundleUrl, bundleBuildId, isPlatform, PLATFORMS,
+import { buildInstaller, buildInstallerArchive, bundleUrl, bundleFacts, isPlatform, PLATFORMS,
   BUNDLE_EXTENSION, BUNDLE_FORMATS, isBundleFormat } from './installer';
 
 const TABLE = process.env.REGISTRY_TABLE!;
@@ -1648,15 +1648,19 @@ async function upgradeAgent(caller: Caller, thing: string | undefined, rawBody: 
     return fail(400, `format must be one of ${BUNDLE_FORMATS.join(', ')}`);
   }
 
-  const [url, build] = await Promise.all([
+  const [url, facts] = await Promise.all([
     bundleUrl(LIVE_BUCKET, platform, version, format),
-    bundleBuildId(LIVE_BUCKET, platform, version, format),
+    bundleFacts(LIVE_BUCKET, platform, version, format),
   ]);
+  const build = facts.build;
 
   await iot.send(new PublishCommand({
     topic: `camstream/${thing}/command`, qos: 1,
     payload: Buffer.from(JSON.stringify({
       action: 'update', version, build, url, issuedAt: Math.floor(Date.now() / 1000),
+      // Absent until the bundle was published by a signing release, which
+      // the agent reads as unsigned rather than as a failed check.
+      signature: facts.signature, keyId: facts.keyId,
     })),
   }));
   return json(200, { requested: 'update', thingName: thing, version, build, format });

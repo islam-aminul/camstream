@@ -36,7 +36,12 @@ P-256 rather than RSA because the signature is ~70 bytes rather than ~256, it
 travels inside the existing MQTT instruction with room to spare, and
 `java.security.Signature` verifies it with no new dependency in the agent.
 
-Cost is $1 a month for the key plus $0.03 per ten thousand signatures.
+Cost is $1 a month for the key, prorated hourly, plus $0.15 per ten thousand
+signatures — the ECC rate, not the $0.03 symmetric one. A release signs two
+bundles, so the requests will never be noticed. Verification costs nothing:
+the agent checks locally against the compiled-in key and `kms:Verify` is never
+called. Rotation adds another $1 a month for as long as both keys are trusted,
+since the charge is per key.
 
 ## What gets signed
 
