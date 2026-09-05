@@ -14,6 +14,13 @@ agent/target/
 # Secrets & keys — never commit
 *.pem
 !infra/keys/*public*.pem
+
+# The public halves of the release signing keys, which the agent must carry to
+# verify an update package at all. Safe by construction - the private halves
+# exist only inside KMS and cannot be exported - and the blanket *.pem rule
+# above silently swallowed this once already, producing a build that trusted
+# nothing and would have refused every signed update it was offered.
+!agent/src/main/resources/signing-keys.pem
 certs/
 .env
 .env.*
