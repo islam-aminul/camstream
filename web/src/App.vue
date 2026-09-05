@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, watch } from 'vue';
+import { computed, onMounted, ref, watch } from 'vue';
 import { useRoute } from 'vue-router';
 import Message from 'primevue/message';
 import ProgressSpinner from 'primevue/progressspinner';
@@ -8,10 +8,48 @@ import BrandMark from './components/BrandMark.vue';
 import LoginView from './views/LoginView.vue';
 import { useSessionStore } from './stores/session';
 import { useSelectionStore } from './stores/selection';
+import { loadConfig } from './api/auth';
 
 const session = useSessionStore();
 const selection = useSelectionStore();
 const route = useRoute();
+
+/**
+ * Which deploy of the console this is.
+ *
+ * Shown because the failure it guards against is invisible: the control plane
+ * and the console deploy separately, and skipping the second reports nothing.
+ * The site then serves an older console indefinitely, with merged work that
+ * exists nowhere anybody can reach, and the only way to find out is to download
+ * the JavaScript and grep it.
+ *
+ * Read from config.json, which is fetched no-store and rewritten on every
+ * deploy, so unlike everything else behind CloudFront it cannot be stale.
+ * Deliberately quiet in the corner rather than a banner - it is a fact worth
+ * having to hand, not a problem, and it is the same string `curl`ing
+ * /config.json returns.
+ */
+const build = ref<string | null>(null);
+const builtAt = ref<string | null>(null);
+
+const buildTooltip = computed(() => {
+  const when = builtAt.value
+    ? new Date(builtAt.value).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })
+    : 'an unrecorded time';
+  return `Console deployed from ${build.value} at ${when}. `
+    + 'The control plane deploys separately, so this can lag behind it.';
+});
+
+onMounted(() => {
+  loadConfig()
+    .then((config) => {
+      build.value = config.buildCommit ?? null;
+      builtAt.value = config.builtAt ?? null;
+    })
+    // A console that cannot say which build it is still works; the stamp is
+    // diagnostic, and failing to show it must never block the page.
+    .catch(() => { build.value = null; });
+});
 
 /**
  * The pages, each with the sentence that explains it on hover.
@@ -85,6 +123,11 @@ watch(() => session.me, (me) => { if (me) void selection.loadCustomers(); });
         </RouterLink>
       </nav>
       <div class="topbar__who">
+        <span
+          v-if="build"
+          v-tooltip.bottom="buildTooltip"
+          class="topbar__build"
+        >{{ build }}</span>
         <span>{{ session.me.email }}</span>
         <span class="topbar__role">{{ session.me.role }}</span>
         <button
@@ -178,6 +221,13 @@ watch(() => session.me, (me) => { if (me) void selection.loadCustomers(); });
   gap: 0.6rem;
   font-size: 0.8rem;
   color: var(--p-text-muted-color);
+}
+
+.topbar__build {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.75rem;
+  color: var(--p-text-muted-color);
+  cursor: help;
 }
 
 .topbar__role {
