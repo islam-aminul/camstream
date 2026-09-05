@@ -122,6 +122,17 @@ public final class Updater {
      * @param url            a presigned link to the bundle
      */
     public void apply(String runningVersion, String wantedVersion, String wantedBuild, String url) {
+        apply(runningVersion, wantedVersion, wantedBuild, url, null);
+    }
+
+    /**
+     * @param signature base64 of the bundle's signature, or null when the
+     *   control plane did not send one. While the fleet is being migrated an
+     *   unsigned package is still accepted; a signature that is present and
+     *   wrong never is. See {@code docs/signing.md}.
+     */
+    public void apply(String runningVersion, String wantedVersion, String wantedBuild,
+                      String url, String signature) {
         SelfUpdate.Decision decision =
                 SelfUpdate.decide(runningVersion, installedBuild(), wantedVersion, wantedBuild, url);
         switch (decision) {
@@ -143,6 +154,21 @@ public final class Updater {
             Path bundle = work.resolve("bundle.zip");
 
             download(url, bundle);
+
+            // Before the archive is opened, not after. The tar reader below is
+            // hand-rolled, and bytes this build has not decided to trust should
+            // not be parsed by it.
+            PackageSignature.Verdict verdict = PackageSignature.verify(bundle, signature);
+            switch (verdict) {
+                case REJECTED, UNVERIFIABLE -> {
+                    log.error("refusing update to {}: signature {}", wantedVersion, verdict);
+                    return;
+                }
+                case UNSIGNED -> log.warn(
+                        "update to {} is not signed; accepted while the fleet is migrating", wantedVersion);
+                case TRUSTED -> log.info("update to {} carries a trusted signature", wantedVersion);
+            }
+
             Path staged = extractJar(bundle, work);
 
             // Never over the installed jar. The launcher or the unit moves it

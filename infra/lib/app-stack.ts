@@ -16,6 +16,7 @@ import { Api } from './api';
 import { Edge } from './edge';
 import { Signing, PRIVATE_KEY_PARAMETER } from './signing';
 import { Provisioning, CLAIM_CERT_PARAMETER } from './provisioning';
+import { PackageSigning } from './package-signing';
 
 export interface AppStackProps extends StackProps {
   readonly config: CamStreamConfig;
@@ -32,6 +33,11 @@ export class CamStreamAppStack extends Stack {
     const registry = new Registry(this, 'Registry');
     const identity = new Identity(this, 'Identity');
     const signing = new Signing(this, 'Signing');
+    // Nothing in this stack signs. The key is created here so it is managed
+    // and retained with everything else, but kms:Sign belongs to whoever cuts
+    // a release, and the signature reaches the fleet as S3 object metadata on
+    // the bundle - which the admin lambda already reads for the build id.
+    new PackageSigning(this, 'PackageSigning');
 
     const ingest = new Ingest(this, 'Ingest', { liveBucket: storage.liveBucket });
 
