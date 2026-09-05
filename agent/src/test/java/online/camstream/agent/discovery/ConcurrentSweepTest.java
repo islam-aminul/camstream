@@ -38,7 +38,12 @@ class ConcurrentSweepTest {
         // Nothing to scan and no credentials: the guard is the subject, not the
         // sweep. It still costs a multicast listen, which is what makes this
         // the slowest test in the suite.
-        return new DiscoveryService("ffprobe-not-used", "tcp", List.of(), 0, List.of(), id -> List.of());
+        //
+        // Confining it to a single loopback address was tried and is worse -
+        // ninety seconds and a timeout, against thirty for this. Probing
+        // 127.0.0.1 on camera ports is evidently not the cheap thing it looks.
+        return new DiscoveryService("ffprobe-not-used", "tcp", List.of(), 0,
+                List.of(), false, id -> List.of());
     }
 
     @Test
