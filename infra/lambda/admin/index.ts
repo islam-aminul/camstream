@@ -1658,8 +1658,8 @@ async function upgradeAgent(caller: Caller, thing: string | undefined, rawBody: 
     topic: `camstream/${thing}/command`, qos: 1,
     payload: Buffer.from(JSON.stringify({
       action: 'update', version, build, url, issuedAt: Math.floor(Date.now() / 1000),
-      // Absent until the bundle was published by a signing release, which
-      // the agent reads as unsigned rather than as a failed check.
+      // Absent on a bundle that did not go through publish-agent.sh, which
+      // an agent from 0.1.7 on refuses outright rather than installing.
       signature: facts.signature, keyId: facts.keyId,
     })),
   }));

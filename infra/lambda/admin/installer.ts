@@ -466,9 +466,14 @@ ${identity}
  * publish time rather than kept beside the bundle, which means it cannot go
  * missing separately from the thing it describes.
  *
- * Absent on a bundle published before signing existed. The agent treats a
- * missing signature as unsigned, which it still accepts while the fleet
- * migrates - see docs/signing.md.
+ * Absent on a bundle published before signing existed, and on anything that
+ * reached the downloads prefix without going through scripts/publish-agent.sh.
+ * Since agent 0.1.7 that means the agent refuses it: a bundle published without
+ * a signature cannot be installed remotely at all. See docs/signing.md.
+ *
+ * The catch below therefore fails closed, which is the right way round - a
+ * HeadObject that fails leaves the signature absent, and an update nobody can
+ * verify is one nobody should install.
  */
 export async function bundleFacts(
   bucket: string,
