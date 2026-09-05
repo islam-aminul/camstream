@@ -48,6 +48,37 @@ final class RtspPathGuesser {
             // Bare root: some cheap modules serve the only stream there
             "/");
 
+    /**
+     * The smallest frame that could be a real rendition.
+     *
+     * A recorder here reported its main stream as 44x32. Nothing refused it, so
+     * it became a profile - and because main and sub are chosen by picking the
+     * largest and smallest, a nonsense 44x32 won "smallest" and took the sub
+     * role. The sub is what the wall pulls, so every tile on that recorder was
+     * served the full-resolution stream instead: measured at 1.8 MB per segment
+     * against 52 KB from a camera whose sub was real, on the same wall.
+     *
+     * Nothing looked broken. The video played, the console showed six cameras
+     * publishing, and the only visible symptom was the bill.
+     *
+     * 160x120 is below any rendition a camera is configured to serve and well
+     * above a misparse, so it separates the two without needing to know what
+     * the device meant.
+     */
+    static final int SMALLEST_REAL_WIDTH = 160;
+    static final int SMALLEST_REAL_HEIGHT = 120;
+
+    /** Whether a probe result describes a rendition worth offering. */
+    static boolean isPlausibleRendition(Integer width, Integer height) {
+        // Unknown dimensions are not a reason to refuse: some firmware reports
+        // nothing useful and still streams perfectly. Only a stated, and
+        // impossibly small, size is refused.
+        if (width == null || height == null) {
+            return true;
+        }
+        return width >= SMALLEST_REAL_WIDTH && height >= SMALLEST_REAL_HEIGHT;
+    }
+
     private final RtspProbe probe;
     private final List<String> paths;
     private final String transport;
@@ -142,6 +173,11 @@ final class RtspPathGuesser {
             if (result == null || result.codec() == null) {
                 continue;
             }
+            if (!isPlausibleRendition(result.width(), result.height())) {
+                log.info("ignoring {} on {}: {}x{} is not a real rendition",
+                        path, host, result.width(), result.height());
+                continue;
+            }
             DiscoveredCamera.DiscoveredProfile profile = new DiscoveredCamera.DiscoveredProfile();
             profile.token = "guessed" + (found.size() + 1);
             profile.name = path;
@@ -232,6 +268,11 @@ final class RtspPathGuesser {
         String url = buildUrl(host, port, path, credential);
         RtspProbe.Result result = probe.attempt(url, transport).stream();
         if (result == null || result.codec() == null) {
+            return;
+        }
+        if (!isPlausibleRendition(result.width(), result.height())) {
+            log.info("ignoring channel path {} on {}: {}x{} is not a real rendition",
+                    path, host, result.width(), result.height());
             return;
         }
         DiscoveredCamera.DiscoveredProfile profile = new DiscoveredCamera.DiscoveredProfile();
