@@ -109,6 +109,30 @@ public final class AgentConfig {
      */
     public int segmentDurationMs = 4000;
 
+    /**
+     * How long the *first* segments are, before settling to the length above.
+     *
+     * A viewer waits for a whole segment before there is anything to play, so
+     * the first one decides how long a tile shows "starting". ffmpeg cuts at
+     * the first keyframe *after* this target, so a value below the camera's
+     * keyframe interval yields exactly one group of pictures - the shortest
+     * segment the stream can produce - and the length then grows to
+     * segmentDurationMs on its own.
+     *
+     * One second rather than something matched per camera: any value under the
+     * shortest keyframe interval gives the same one-GOP result, so measuring
+     * each camera would add moving parts and change nothing.
+     *
+     * Measured against a camera with a two-second GOP: 6.4 seconds to the first
+     * segment at the old setting, 3.0 with this one, three runs each. Two
+     * seconds here gave 5.0, because it then waits for the keyframe after two
+     * seconds and produces two GOPs rather than one.
+     *
+     * The cost is a handful of extra requests at the start of a view, against a
+     * segment count that is otherwise unchanged. Set to 0 to switch it off.
+     */
+    public int initialSegmentDurationMs = 1000;
+
     /** Segments kept in the live playlist window. */
     public int playlistWindow = 4;
 
