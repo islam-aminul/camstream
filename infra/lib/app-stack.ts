@@ -59,7 +59,7 @@ export class CamStreamAppStack extends Stack {
       privateKeyParameterName: PRIVATE_KEY_PARAMETER,
       liveBucketName: storage.liveBucket.bucketName,
       liveBucket: storage.liveBucket,
-      agentVersion: this.node.tryGetContext('camstream:agentVersion') ?? '0.1.1',
+      agentVersion: this.node.tryGetContext('camstream:agentVersion') ?? '0.1.2',
       claimCertParameterName: CLAIM_CERT_PARAMETER,
       provisioningTemplateName: provisioning.templateName,
     });
