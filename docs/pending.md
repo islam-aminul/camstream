@@ -69,11 +69,20 @@ is a precondition for the manifest design below — that one lets a package
 describe privileged steps, and without signing, "who can produce a package"
 is answered by "anyone who can produce a plausible URL".
 
-Needs a decision before it is code: where the private key lives (a KMS
-asymmetric key signed at publish time, with the public key baked into the
-agent, is the obvious answer), and it needs its own two-phase rollout per
-`updating.md` — agents must be able to verify before anything is published
-signed-only, or updates stop working with no way to fix them remotely.
+**Designed in `signing.md`** on 2026-09-05, with a recommendation rather than
+options: a KMS asymmetric key (`ECC_NIST_P256`), signing the bundle bytes at
+publish time, the signature carried in the existing update instruction, and the
+public keys baked into the agent as a set so rotation is possible.
+
+One decision remains, and it is the only one: whether the private key lives in
+KMS. Everything else in that document follows from it, and the alternative — a
+key file anybody can copy — is not seriously arguable.
+
+It needs the two-phase rollout `updating.md` requires: a build that verifies a
+signature when present and accepts packages without one, then, once the fleet
+is on it, a build that refuses unsigned packages. Both halves live in the
+agent, because an agent requiring a signature it cannot verify is stranded with
+no remote way to fix it.
 
 ### The Windows agent can still replace its own jar
 
