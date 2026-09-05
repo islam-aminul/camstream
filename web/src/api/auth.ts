@@ -14,6 +14,16 @@ export interface RuntimeConfig {
   userPoolId: string;
   userPoolClientId: string;
   region: string;
+  /**
+   * The commit this console was deployed from, and when.
+   *
+   * Written by deploy-web.sh into the one file that is never cached, so it
+   * always describes what is actually published. Optional because a console
+   * deployed before this existed will not have it, and an absent stamp must
+   * read as "unknown" rather than as a version.
+   */
+  buildCommit?: string;
+  builtAt?: string;
 }
 
 let configPromise: Promise<RuntimeConfig> | undefined;

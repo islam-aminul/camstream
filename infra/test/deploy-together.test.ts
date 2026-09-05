@@ -55,6 +55,29 @@ describe('deploying', () => {
     expect(mode, 'scripts/deploy.sh should be committed executable').toBe('100755');
   });
 
+  it('stamps the console with the commit it was built from', () => {
+    // Into config.json specifically. Everything else behind CloudFront is
+    // content-hashed and cached forever, so an old bundle is indistinguishable
+    // from a current one from outside; config.json is fetched no-store and
+    // rewritten on every deploy, so it is the only file that cannot lie.
+    const web = read('scripts', 'deploy-web.sh');
+    expect(web).toMatch(/rev-parse --short HEAD/);
+    expect(web).toMatch(/"buildCommit":/);
+    expect(web).toMatch(/"builtAt":/);
+  });
+
+  it('writes the stamp into the file that is never cached', () => {
+    // Ordering, not presence: the commit has to be computed before the heredoc
+    // that writes config.json, or the field is written empty and the whole
+    // point is lost while still looking correct.
+    const web = read('scripts', 'deploy-web.sh');
+    expect(web.indexOf('rev-parse --short HEAD'))
+      .toBeLessThan(web.indexOf('cat > dist/config.json'));
+    // And config.json must stay out of the immutable sync, or the stamp is
+    // cached as hard as the bundle it describes.
+    expect(web).toMatch(/--exclude "config\.json"/);
+  });
+
   it('is what the README tells people to use', () => {
     // The trap is only closed if this is the documented path. Leaving the
     // README pointing at the two separate commands would keep the habit that
