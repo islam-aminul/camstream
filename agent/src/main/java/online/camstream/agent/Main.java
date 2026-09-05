@@ -139,6 +139,7 @@ public final class Main {
                 config.rtspPaths,
                 config.discoveryMaxHosts,
                 config.discoveryNetworks,
+                config.discoveryNetworksOnly,
                 credentialStore::candidates);
         CameraRegistry registry = new CameraRegistry(config, discovery);
 

@@ -33,6 +33,7 @@ public final class DiscoveryService implements CameraSource {
     private final String rtspTransport;
     private final int maxHosts;
     private final List<String> extraNetworks;
+    private final boolean onlyGivenNetworks;
 
     /** Last full result, including credential-bearing URLs. Never leaves the agent. */
     private volatile Map<String, DiscoveredCamera> lastScan = Map.of();
@@ -43,11 +44,13 @@ public final class DiscoveryService implements CameraSource {
             List<String> rtspPaths,
             int maxHosts,
             List<String> extraNetworks,
+            boolean onlyGivenNetworks,
             java.util.function.Function<String, List<Credential>> credentials) {
         this.rtspProbe = new RtspProbe(ffprobePath);
         this.rtspTransport = rtspTransport;
         this.maxHosts = maxHosts;
         this.extraNetworks = extraNetworks == null ? List.of() : List.copyOf(extraNetworks);
+        this.onlyGivenNetworks = onlyGivenNetworks;
         this.credentials = credentials;
         this.pathGuesser = new RtspPathGuesser(rtspProbe, rtspPaths, rtspTransport);
     }
@@ -255,7 +258,7 @@ public final class DiscoveryService implements CameraSource {
         }
 
         // Then sweep for anything that ignored it.
-        for (Map.Entry<String, PortScanner.OpenPorts> entry : PortScanner.scan(maxHosts, extraNetworks).entrySet()) {
+        for (Map.Entry<String, PortScanner.OpenPorts> entry : PortScanner.scan(maxHosts, extraNetworks, onlyGivenNetworks).entrySet()) {
             PortScanner.OpenPorts open = entry.getValue();
             DiscoveredCamera camera = found.computeIfAbsent(entry.getKey(), host -> {
                 DiscoveredCamera fresh = new DiscoveredCamera();

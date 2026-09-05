@@ -65,7 +65,25 @@ final class PortScanner {
      *                      which case the interface netmask finds nothing.
      */
     static Map<String, OpenPorts> scan(int maxHosts, List<String> extraNetworks) {
-        List<String> hosts = new ArrayList<>(localHosts(maxHosts));
+        return scan(maxHosts, extraNetworks, false);
+    }
+
+    /**
+     * @param onlyGivenNetworks treat {@code extraNetworks} as the whole list
+     *        rather than an addition. For a machine with a second connection,
+     *        where the other network cannot hold a camera and sweeping it only
+     *        delays the moment the agent can serve one.
+     */
+    static Map<String, OpenPorts> scan(int maxHosts, List<String> extraNetworks, boolean onlyGivenNetworks) {
+        List<String> hosts = new ArrayList<>();
+        if (onlyGivenNetworks && !extraNetworks.isEmpty()) {
+            log.info("sweeping only the {} configured network(s)", extraNetworks.size());
+        } else {
+            // Asked for confinement but given nothing to confine to: sweeping
+            // nothing would leave an agent that never finds a camera and says
+            // only that it scanned zero addresses.
+            hosts.addAll(localHosts(maxHosts));
+        }
         for (String cidr : extraNetworks) {
             try {
                 hosts.addAll(expandCidr(cidr));

@@ -247,6 +247,26 @@ public final class AgentConfig {
     public java.util.List<String> discoveryNetworks = new java.util.ArrayList<>();
 
     /**
+     * Whether {@link #discoveryNetworks} is the whole list rather than an
+     * addition to what the interfaces suggest.
+     *
+     * The default sweeps every network this machine is attached to, which is
+     * right on an ordinary site and wrong on a box with a second connection.
+     * Measured on a dual-homed agent: a camera /24 and an office /22 together
+     * came to 5,367 addresses and a sweep of about five minutes, of which the
+     * office network could contribute nothing.
+     *
+     * That sweep is not merely slow. An agent refuses every camera until the
+     * first one finishes - "ignoring request for unknown camera" - so on that
+     * machine an update meant five minutes of a dark wall.
+     *
+     * Left false by default because narrowing discovery is the kind of setting
+     * that silently stops finding a camera somebody moved, and an operator who
+     * has not asked for it should not get it.
+     */
+    public boolean discoveryNetworksOnly = false;
+
+    /**
      * RTSP paths tried on cameras with no usable ONVIF media service. Empty
      * uses the built-in vendor list.
      */
