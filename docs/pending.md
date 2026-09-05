@@ -102,22 +102,37 @@ signing is the one that also covers where the jar came from.
 
 ## Product
 
-### First view of an idle camera takes 30–60 seconds
+### First view of an idle camera takes about twelve seconds
 
-Demand has to reach the watch lambda, the lambda publishes desired state, the
-agent starts ffmpeg, and enough four-second segments have to land before a
-playlist means anything. The tile does say it is starting, and some of the
-delay is inherent to starting streams on demand rather than running them
-constantly — which is what makes an idle estate nearly free.
+Measured on 2026-09-05, three cold starts against the Windows agent and a real
+CP Plus camera, from the watch instruction reaching MQTT:
 
-**This needs re-measuring before it is treated as inherent.** The figure was
-taken while the Windows agent was reconnecting to MQTT every 129 seconds,
-losing its subscriptions each time — an instruction arriving in one of those
-gaps was dropped, and the viewer waited for the next resend. That fault is
-fixed, and nobody has timed a first view since.
+| | run 1 | run 2 | run 3 |
+|---|---|---|---|
+| ffmpeg starting | 2.4s | — | — |
+| first segment and playlist in S3 | 11.7s | 11.6s | 11.9s |
+| three segments available | 19.6s | 17.0s | 17.1s |
 
-Once there is a real number, the decision is: accept it, warm a camera on
-hover, or keep recently-watched cameras alive for a few minutes.
+The previously recorded figure was 30–60 seconds. That was taken while the
+Windows agent was losing its MQTT subscriptions every 129 seconds, so an
+instruction arriving in one of those gaps was dropped and the viewer waited for
+a resend. Most of the complaint was that fault, not the design.
+
+What remains divides cleanly. About 2.4 seconds is MQTT delivery and the agent
+deciding what to do, which is not worth attacking. The other nine are ffmpeg
+connecting over RTSP, waiting for a keyframe, and producing a segment — and a
+four-second segment cannot exist before four seconds of video do.
+
+So the lever is `segmentDurationMs`, already configurable per agent between 500
+and 10000 and currently 4000. Halving it should take roughly two seconds off
+the first frame and rather more off "three segments ready", at the cost of
+twice the requests and twice the per-segment overhead. Nobody has measured the
+trade, and the numbers above are the baseline to measure against.
+
+These exclude the browser: a click has to reach the watch lambda before any of
+this starts, and the player then fetches the playlist and buffers. Both are
+small next to nine seconds, but it means a person sees something closer to
+thirteen than to twelve.
 
 ### Expanding a tile does not reduce the bill
 
