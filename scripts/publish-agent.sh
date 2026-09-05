@@ -76,5 +76,7 @@ PY
 done
 
 echo
-echo "Published $VERSION. Agents will verify against the key compiled into them;"
-echo "a build older than signing ignores the field and installs as before."
+echo "Published $VERSION. Agents verify against the key compiled into them."
+echo "From 0.1.7 on, a bundle published without a signature is refused - so if"
+echo "anything ever puts an object in downloads/ without going through this"
+echo "script, no agent will install it."
