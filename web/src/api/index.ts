@@ -205,9 +205,18 @@ export const api = {
   premises: (tenantId?: string) =>
     get<{ premises: Premises[] }>('/api/admin/premises', { tenantId }).then((r) => r.premises),
 
+  /**
+   * Carries `currentVersion` alongside the page: the build an Update would
+   * install. It belongs to the control plane rather than to any agent, so it
+   * arrives once per response, and it is what lets the console say whether an
+   * agent is already up to date instead of offering an Update that does nothing.
+   */
   agents: (p: { tenantId?: string; premisesId: string; q?: string; cursor?: string; limit?: number }) =>
-    get<{ total: number; cursor?: string; agents: Agent[] }>('/api/admin/agents', p)
-      .then((r): Page<Agent> => ({ total: r.total, cursor: r.cursor, items: r.agents })),
+    get<{ total: number; cursor?: string; agents: Agent[]; currentVersion?: string }>(
+      '/api/admin/agents', p,
+    ).then((r): Page<Agent> & { currentVersion?: string } => ({
+      total: r.total, cursor: r.cursor, items: r.agents, currentVersion: r.currentVersion,
+    })),
 
   cameras: (p: {
     tenantId?: string; premisesId: string; agentId?: string;

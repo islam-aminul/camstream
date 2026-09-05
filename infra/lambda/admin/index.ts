@@ -488,6 +488,16 @@ async function listAgents(
   return json(200, {
     total: page.total,
     cursor: page.cursor,
+    /**
+     * The build an Update would install.
+     *
+     * Sent once for the page rather than per agent, because it is a property
+     * of the control plane and not of any agent. Without it the console can
+     * show what each agent is running but cannot say whether that is current,
+     * so the only way to find out was to press Update and see whether
+     * anything changed.
+     */
+    currentVersion: AGENT_VERSION,
     agents: page.items
       .map((device) => ({
         thingName: device.thingName,

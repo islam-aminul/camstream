@@ -8,6 +8,7 @@ import Select from 'primevue/select';
 import InputNumber from 'primevue/inputnumber';
 import Message from 'primevue/message';
 import PagedTable from '@/components/PagedTable.vue';
+import { updateRefusal as refusalFor } from '@/agent-update';
 import WhenAgo from '@/components/WhenAgo.vue';
 import ClockDrift from '@/components/ClockDrift.vue';
 import { useSelectionStore } from '@/stores/selection';
@@ -102,12 +103,25 @@ const platform = ref<Platform>('windows');
 const creating = ref(false);
 const createError = ref<string | null>(null);
 
+/**
+ * The build an Update would install, as the control plane last reported it.
+ *
+ * Null until a page has loaded, and treated as "unknown" rather than "not
+ * current" - offering an Update that may be needed is better than hiding one
+ * that is.
+ */
+const currentVersion = ref<string | null>(null);
+
 const load = (params: { q?: string; cursor?: string; limit: number }) =>
   api.agents({
     tenantId: selection.tenantParam,
     premisesId: selection.premisesId!,
     ...params,
+  }).then((page) => {
+    currentVersion.value = page.currentVersion ?? null;
+    return page;
   });
+
 
 const resetOn = computed(() => [selection.customerId, selection.premisesId]);
 
@@ -316,12 +330,12 @@ async function create() {
         <Column header="" style="width: 8rem">
           <template #body="{ data }">
             <Button
-              v-tooltip.top="'Tell this agent to fetch the current build and restart into it'"
+              v-tooltip.top="refusalFor(data, currentVersion)
+                ?? 'Tell this agent to fetch the current build and restart into it'"
               size="small" text severity="secondary" label="Update"
               :loading="upgrading === data.thingName"
-              :disabled="!data.online"
-              :title="data.online ? 'Install the current build and restart'
-                : 'The agent must be connected to be told'"
+              :disabled="refusalFor(data, currentVersion) !== null"
+              :title="refusalFor(data, currentVersion) ?? 'Install the current build and restart'"
               @click="upgrade(data, platform)"
             />
           </template>
