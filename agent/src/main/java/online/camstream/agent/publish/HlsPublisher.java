@@ -78,6 +78,10 @@ public final class HlsPublisher {
     private final Path directory;
     private final String label;
 
+    /** The failure currently being lived through, if any. See {@link #failed}. */
+    private String failureReported;
+    private int failuresSinceReported;
+
     private byte[] lastPlaylist;
     /** Said once, not once a sweep, when falling back to our own segment list. */
     private boolean synthesised;
@@ -130,13 +134,48 @@ public final class HlsPublisher {
         try {
             uploadMediaFirst();
             uploadPlaylistIfChanged();
+            recovered();
         } catch (IOException e) {
-            log.warn("[{}] could not read ffmpeg output: {}", label, e.toString());
+            failed("could not read ffmpeg output", e);
         } catch (RuntimeException e) {
             // A failed upload is recoverable — the next tick retries, and the
             // player tolerates a brief gap better than the agent dying.
-            log.warn("[{}] upload failed: {}", label, e.toString());
+            failed("upload failed", e);
         }
+    }
+
+    /**
+     * Reports a failure once, then counts the rest.
+     *
+     * sync() runs four times a second, so anything that lasts more than a
+     * moment is written hundreds of times. A fifty-eight second DNS outage on a
+     * real agent produced 145 identical lines - all of them true, none of them
+     * adding anything after the first, and together enough to hide everything
+     * else that happened during the incident.
+     *
+     * The count is the part worth keeping: "recovered after 145 failures" says
+     * both that it broke and how hard, in one line at the moment somebody can
+     * do something about it.
+     */
+    private void failed(String what, Exception cause) {
+        String reason = what + ": " + cause;
+        if (!reason.equals(failureReported)) {
+            // A different fault is a different event, even mid-outage.
+            log.warn("[{}] {}", label, reason);
+            failureReported = reason;
+            failuresSinceReported = 0;
+        }
+        failuresSinceReported++;
+    }
+
+    /** Says so, once, when uploads start working again. */
+    private void recovered() {
+        if (failureReported == null) {
+            return;
+        }
+        log.info("[{}] uploads recovered after {} failure(s)", label, failuresSinceReported);
+        failureReported = null;
+        failuresSinceReported = 0;
     }
 
     /**
