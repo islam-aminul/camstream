@@ -13,6 +13,7 @@ import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -42,6 +43,18 @@ public final class CameraRegistry {
 
     /** cameraId -> camera, for whatever is currently publishable. */
     private final Map<String, CameraConfig> cameras = new ConcurrentHashMap<>();
+
+    /**
+     * Approvals whose profile has already been reported as gone.
+     *
+     * The fallback below runs on every sweep, so without this the same two
+     * lines were written every half hour for the life of a camera that had
+     * renumbered once - twice over, because the sweep runs from both the
+     * supervisor and the MQTT worker. A condition that is permanent until
+     * somebody re-approves the camera is worth saying once; repeating it
+     * buries the lines that are not permanent.
+     */
+    private final Set<String> missingProfileReported = ConcurrentHashMap.newKeySet();
     private volatile List<Approved> approved = List.of();
 
     public CameraRegistry(AgentConfig config, CameraSource discovery) {
@@ -214,11 +227,15 @@ public final class CameraRegistry {
      * renumbers its profiles on reboot must not take its own stream offline
      * until somebody notices and re-approves it.
      */
-    private static String resolveToken(DiscoveredCamera camera, String approved, boolean largest) {
+    private String resolveToken(DiscoveredCamera camera, String approved, boolean largest) {
         if (approved != null && camera.profiles.containsKey(approved)) {
+            // Forgotten deliberately: if the token comes back and goes again,
+            // that is a new event and worth saying a second time.
+            missingProfileReported.remove(camera.id + "/" + approved);
             return approved;
         }
-        if (approved != null && !camera.profiles.isEmpty()) {
+        if (approved != null && !camera.profiles.isEmpty()
+                && missingProfileReported.add(camera.id + "/" + approved)) {
             log.info("camera {} no longer has profile {} — selecting the {} rendition instead",
                     camera.id, approved, largest ? "largest" : "smallest");
         }
