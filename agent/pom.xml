@@ -6,7 +6,7 @@
 
   <groupId>online.camstream</groupId>
   <artifactId>camstream-agent</artifactId>
-  <version>0.1.1</version>
+  <version>0.1.2</version>
   <packaging>jar</packaging>
   <name>CamStreamAgent</name>
   <description>On-premises CCTV ingestion daemon: RTSP to LL-HLS to S3</description>
