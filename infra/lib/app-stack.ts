@@ -37,7 +37,7 @@ export class CamStreamAppStack extends Stack {
     // and retained with everything else, but kms:Sign belongs to whoever cuts
     // a release, and the signature reaches the fleet as S3 object metadata on
     // the bundle - which the admin lambda already reads for the build id.
-    new PackageSigning(this, 'PackageSigning');
+    const packageSigning = new PackageSigning(this, 'PackageSigning');
 
     const ingest = new Ingest(this, 'Ingest', { liveBucket: storage.liveBucket });
 
@@ -96,6 +96,11 @@ export class CamStreamAppStack extends Stack {
     // The console manages who is subscribed, so the admin function needs to
     // read and change that list - and nothing else on this topic. Publishing
     // is CloudWatch's job, not the API's.
+    // Every use of the release signing key, to the same place the alarms go.
+    // Since 0.1.7 an agent refuses an unsigned package, so kms:Sign on that
+    // key is the whole trust boundary for what the fleet will run.
+    packageSigning.notifyOnUse(alarmTopic);
+
     alarmTopic.grantSubscribe(api.adminFunction);
     api.adminFunction.addToRolePolicy(new iam.PolicyStatement({
       actions: ['sns:ListSubscriptionsByTopic', 'sns:GetTopicAttributes'],
