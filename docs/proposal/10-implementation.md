@@ -129,8 +129,20 @@ object-storage line too small to appear on a bill.
 
 | | This project | Your platform | Proposal |
 |---|---|---|---|
-| Steady state | 4 s | 10 s | **10 s** — yours |
+| Steady state | 4 s | 10 s | **10 s or longer** — yours, see below |
 | First segment | 1 s (`hls_init_time`) | 10 s | **1 s** — ours |
+
+**Do not ramp between them.** A growing segment leaves no gap — segments are
+contiguous and `#EXTINF` declares each real duration — but a ramp only helps
+when a viewer may arrive at any moment. You pre-roll while nobody watches and
+then observers watch continuously, so the right answer is a constant.
+
+**Which constant is a latency decision worth ~$10,000 per five seconds.** A
+viewer sits about three segments behind live, so 10 s is ~30 s behind and 20 s
+is ~60 s. The floor is that a player needs three segments in the playlist to
+start. Your 2-minute retention window is an EFS artefact rather than a
+requirement — on S3 it is free to widen — so latency is the only real limit.
+`20-cost.md` §3.3.
 
 Both projects chose correctly for their own model, and the proposal takes one
 setting from each. The agent already supports both: `segmentDurationMs` is

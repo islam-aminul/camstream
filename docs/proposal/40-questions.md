@@ -144,12 +144,38 @@ length sits directly in the wait when a viewer opens a camera. You pre-roll with
 a margin, so that wait does not exist. Carrying the default across would cost
 **$89,424 a year** for nothing. (`20-cost.md` §3.1.)
 
+**"Could we grow the segment gradually — would that leave gaps in the video?"**
+No gaps. Segments are contiguous whatever their length, `#EXTINF` declares each
+one's real duration, and players handle a playlist of mixed durations — this
+project ramps 1 s to 4 s in production and the playlist reads `#EXTINF:3.274`
+then `6.547` on a live camera. But ramping is the wrong shape for your model:
+you pre-roll while nobody watches, then observers watch continuously, so there
+is no moment when a growing segment is the right answer. Pick a constant
+instead. (`20-cost.md` §3.2.)
+
+**"Then how long should the segments be?"**
+It is a latency question, not a technical one, and it is worth ~$10,000 per five
+seconds. A viewer sits about three segments behind live: 10 s is ~30 s behind
+and costs $65,016; 15 s is ~45 s behind and costs $44,893; 20 s is ~60 s behind
+and costs $34,832. Sixty-second segments break playback outright, because a
+player needs three segments in the playlist and your 2-minute window would hold
+two. **Ask the invigilation team how far behind live an observer may be** — that
+single answer is worth more than anything decided in the design review.
+
+**"Doesn't the 2-minute retention window limit how long segments can be?"**
+Only because it is an EFS artefact. It was chosen because the delete sweep could
+not keep up with more; on S3 the window costs 33 GB and deleting is free, so
+widening it to four minutes to hold twelve 20-second segments costs about 66 GB.
+Do not carry the 2-minute figure across as if it were a requirement.
+
 **"Is there anything in their settings worth taking?"**
 One thing: `-hls_init_time 1`, which cuts the *first* segment at the first
 keyframe instead of at the full target duration. Measured on a 2-second-GOP
 camera it took time-to-first-frame from 6.4 s to 3.0 s, and the effect is larger
-at a 10-second target. That is the lever on your **margin hours**, which are
-billable time. One ffmpeg flag.
+at a 10-second target. Its value is that a stream becomes watchable sooner after
+*any* restart — every agent update, every network recovery — not only at shift
+start. As a margin saving it is small: ten minutes off each shift-day is about
+$1,128 a year.
 
 **"What is the cheapest thing we can do to reduce it?"**
 Synthesise the HLS playlist at read time with a CloudFront Function instead of

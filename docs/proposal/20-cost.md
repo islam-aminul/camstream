@@ -97,9 +97,10 @@ that default were carried across unexamined it would cost $89,424 a year.
 | 8 s | 900 | $74,520 | **$80,109** | $42,849 |
 | **10 s** *(yours — recommended)* | **720** | **$59,616** | **$65,016** | **$35,208** |
 
-**Keep 10 seconds.** Not as a compromise — it is the right choice for your
-model, and it is worth more than every other optimisation in this document
-combined.
+**Keep 10 seconds at least**, and consider going longer — §3.3 shows that each
+five seconds is worth about $10,000 a year, bounded only by how far behind live
+an observer may be. This is worth more than every other optimisation in this
+document combined.
 
 The reason the two projects differ is worth stating, because somebody will
 otherwise assume the reference implementation's default is the considered one:
@@ -117,7 +118,78 @@ The cost of 10 s is a few extra seconds of live delay — the viewer is further
 behind real time. For invigilation that is immaterial; for anything requiring
 interaction it would not be.
 
-### 3.2 The one thing worth taking from this project's settings
+### 3.2 Does a growing segment leave gaps? No — but do not ramp anyway
+
+**Gaps: no.** Changing segment duration does not leave a hole in the video.
+Segments are contiguous by construction — each one continues exactly where the
+last ended — and `#EXTINF` declares each segment's real duration, so a playlist
+may legitimately hold segments of different lengths. This project already does
+it in production: the ramp from 1 s to 4 s produced a playlist reading
+`#EXTINF:3.274` early and `#EXTINF:6.547` in steady state on a live camera, and
+it played without complaint.
+
+Two mechanical caveats if you ever do ramp:
+
+- `EXT-X-TARGETDURATION` must be at least the longest segment, and RFC 8216 says
+  a server must not change it within a playlist. ffmpeg updates it as segments
+  roll and players tolerate that, but Apple's `mediastreamvalidator` flags it.
+- Players use `TARGETDURATION` as their minimum playlist reload interval, so
+  declaring a large target slows polling — which partly undoes the benefit of a
+  short first segment.
+
+**But ramping is the wrong shape for your model.** A ramp helps when someone may
+start watching at any moment and you want them playing quickly. You pre-roll
+through a margin during which nobody is watching at all, and then observers
+watch continuously for the whole shift. There is no moment where a gradually
+growing segment is the right answer: during the margin nothing is being watched,
+and during the shift what matters is a constant, and its value is your latency.
+
+So the question is not *ramp or not*. It is **which constant**, and that is a
+product decision worth about $10,000 per five seconds.
+
+### 3.3 Choosing the constant: latency is the only real limit
+
+A viewer sits roughly three segments behind live, because that is what players
+buffer before starting.
+
+| Segment | PUT/camera-hour | **Total/year** | With dynamic playlists | Behind live | Segments in a 2-min window |
+|---|---|---|---|---|---|
+| 10 s *(today)* | 720 | $65,016 | $35,208 | ~30 s | 12 |
+| 12 s | 600 | $54,955 | $30,115 | ~36 s | 10 |
+| 15 s | 480 | $44,893 | $25,021 | ~45 s | 8 |
+| 20 s | 360 | $34,832 | $19,928 | ~60 s | 6 |
+| 30 s | 240 | $24,770 | $14,834 | ~90 s | 4 |
+| 60 s | 120 | $14,709 | $9,741 | ~180 s | **2 — breaks** |
+
+Each step up from 10 s:
+
+| | Saving | Cost |
+|---|---|---|
+| 10 → 12 s | $9,936/yr | +6 s behind live |
+| 10 → 15 s | $19,872/yr | +15 s behind live |
+| 10 → 20 s | $29,808/yr | +30 s behind live |
+
+**Sixty seconds breaks playback**, not because of cost but because a player
+needs at least three segments in the playlist to start, and a 2-minute window
+holds only two. That is the floor.
+
+**Your 2-minute window is not actually a constraint here, though — it is an
+artefact of EFS.** It was presumably chosen because the delete sweep could not
+keep up with anything longer. On S3 the window costs 33 GB at 10 s and deleting
+is free, so widening it to four minutes to keep twelve segments at 20 s costs
+about 66 GB — still nothing. **Do not carry the 2-minute window across as if it
+were a requirement.** Decouple it, and latency becomes the only limit.
+
+**So the real question for the invigilation team is: how far behind live may an
+observer be?** Not a technical question, and nobody in an architecture review
+can answer it. If 45 seconds is acceptable for spotting an incident, 15-second
+segments save $19,872 a year and cost nothing else. If observers must be within
+half a minute, stay at 10 s and take the dynamic-playlist saving instead.
+
+Ask that question before the design review, because it is worth more than
+anything that will be decided in the room.
+
+### 3.4 The one thing worth taking from this project's settings
 
 The **first** segment, not the steady-state one.
 
@@ -134,14 +206,21 @@ against a 2-second-GOP camera, three runs each:
 At a 10-second target the effect is larger still, because the first segment
 would otherwise be a full ten seconds.
 
-**This is what could shorten your margin hours.** The margin exists to absorb
-the initial feed delay; more than half of that delay is the first segment. One
-ffmpeg flag, no architectural change, and it costs one extra short object per
-stream start — a rounding error against 720 per camera-hour.
+This could shorten your margin hours, though **I over-stated that when I first
+raised it** and the arithmetic deserves correcting. Margin is a small fraction
+of an 8–10 hour shift, so cutting it saves less than it sounds:
 
-Worth measuring on your own cameras before assuming the saving, because the
-gain depends on GOP length. But it is a five-minute experiment on one centre and
-the margin is billable time.
+| Margin cut per shift-day | Saving |
+|---|---|
+| 5 minutes | $564/yr |
+| 10 minutes | $1,128/yr |
+| 30 minutes | $3,384/yr |
+
+Real, but an order of magnitude below the segment-length decision in §3.3. Take
+`hls_init_time` because it makes a stream usable sooner after any restart —
+which matters on every agent restart, every update and every network recovery,
+not only at shift start — and treat the margin saving as a small bonus rather
+than the reason.
 
 ### The delete problem disappears, and it disappears for free
 
