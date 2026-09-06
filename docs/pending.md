@@ -193,6 +193,87 @@ a bigger change than the account swap was, and worth weighing against package
 signing — both answer the same question of who decides what the agent runs, and
 signing is the one that also covers where the jar came from.
 
+## Known gaps with a settled design
+
+### Agent Health shows no CPU on Windows and no network on Linux
+
+Both are real and they are different faults. Confirmed on 2026-09-06 from the
+`HEALTH#` records of the two live agents:
+
+- `gate-house` (Windows): `cpuLoad` **absent**, upload figures present.
+- `rpi4b` (Linux): `cpuLoad` present (0.0009), upload figures **absent**.
+
+**The Windows half is a probable regression from the service-account
+hardening.** `ResourceMonitor.cpuLoad()` calls
+`com.sun.management.OperatingSystemMXBean.getCpuLoad()`, which is the correct
+API and works fine on that very machine — run as `aminu` against the bundled
+JRE 21 it returned 0.18, 0.12, 0.17. The agent runs under the virtual service
+account (`NT SERVICE\camstream-agent`) introduced on 2026-09-05, and whole
+machine CPU on Windows is read through performance counters that a restricted
+account may not be able to open. `memoryUsedFraction` works, so the bean itself
+is fine; only CPU is missing.
+
+Not proven, because proving it means running code as that account and there is
+no cheap way to do that — `runas` cannot be used with a virtual account, and a
+throwaway service is a lot of machinery for one reading. **Instrument first:**
+`cpuLoad()` currently catches `RuntimeException` and returns -1 with no log at
+all, so a permanently unavailable reading is indistinguishable from a
+momentarily unavailable one. One line saying *why*, once, turns the next
+heartbeat into the answer. If it is the account, the fix belongs in
+`install.ps1` — adding the service account to `Performance Monitor Users` — and
+that is a security-settings change on the operator's machine, so it needs
+saying out loud in the installer rather than doing quietly.
+
+**The Linux half is not a bug at all**, which is the more useful finding.
+`rpi4b` has no cameras assigned and has therefore never uploaded a segment;
+`ResourceMonitor.sample()` returns -1 for both upload figures when nothing was
+uploaded in the interval, and `putIfKnown` omits them. The number is honestly
+absent. What is wrong is that the console renders "absent because nothing was
+measured" and "absent because the platform would not say" identically, so an
+idle agent looks broken. That is a display fix, not an agent fix: say *no
+uploads in this interval* rather than showing a dash.
+
+### The restart gap, and why the obvious fix is wrong
+
+An agent answers "ignoring request for unknown camera" for the first 15-30
+seconds after it starts, so a click on a tile in that window does nothing.
+Measured on 2026-09-06: `gate-house` restarted at 09:36:18 and discovery
+completed at 09:36:32 — fourteen seconds; an earlier restart took twenty-nine.
+
+The cause is in `CameraRegistry.apply()`. It already keeps a previously
+resolved camera when a later configuration cannot resolve it, precisely so a
+camera is not taken off the air between sweeps — but `cameras` is an in-memory
+map, so a restart begins with it empty, `previous` is null, and nothing can
+resolve until the first sweep finishes.
+
+**The obvious fix is to persist that map, and it must not be done.**
+`CameraConfig` carries `subStreamUrl` and `mainStreamUrl`, and those embed
+camera credentials. `CredentialStore` is explicit about this: *"held in memory
+only ... Nothing here is ever written to disk or sent upward — losing power
+means the operator re-supplies them, which is the deliberate cost of the cloud
+never holding a decryptable copy."* Persisting resolved cameras would write to
+disk exactly what that invariant exists to keep off it, and it would do so
+silently.
+
+**The design that respects it:** cache the discovery *sighting* rather than the
+resolved camera — identity, IP, MAC, profile tokens, dimensions, and no
+credentials — and rebuild the URLs from the in-memory credential store once
+configuration arrives. Configuration lands about five seconds after start
+(observed: agent up 09:36:18, `configuration v15 applied` 09:36:08 on the
+previous restart), comfortably inside the 15-30 second sweep, so the gap closes
+without the sweep being on the critical path.
+
+That cache discloses nothing new: the control plane already stores the same IP
+and MAC in its `DISCOVERED#` records, and the console displays them. It is
+still worth writing where an operator can find it, and worth an explicit note
+in `signing.md`-style prose that credentials are deliberately *not* in it.
+
+Two cheaper measurements worth taking before building even that: what the
+channel walk costs on a single-channel camera (`STOP_AFTER_EMPTY = 3` walks
+three dead channels on every one of them), and whether the ONVIF fast path can
+be given a non-ONVIF equivalent. Either might shrink the sweep enough that the
+cache is unnecessary.
+
 ## Product
 
 ### First view of an idle camera takes about twelve seconds
@@ -305,6 +386,32 @@ Still unexercised against real hardware:
 - a second premises with real cameras
 - anything near the 128-stream ceiling, or the hardware-pressure logic that is
   supposed to shed conversions before it is reached
+
+### Shipped on 2026-09-06 and not yet exercised in anger
+
+Two things went in that, by design, do nothing until something else goes wrong.
+Neither has fired on a real fault yet, and both should be checked the first
+time one does.
+
+**The stuck-task watchdog** (agent 0.1.9 onward). It logs a thread dump when a
+supervised task has been running longer than three of its own intervals, floor
+five minutes. Tested hard — including a case that starves the pool completely
+and requires the watchdog to speak from its own thread — but it has never met
+the fault it was written for. When it does, the thing to look for is several
+`camstream-supervisor` threads BLOCKED on one monitor with its owner inside
+`IotCredentialsProvider.fetch`. That would confirm the standing hypothesis
+about the resume failure. Anything else is more interesting.
+
+**The heartbeat failure warning** (agent 0.1.8 onward). Previously `log.debug`,
+so a fleet-wide alarm about heartbeats stopping had nothing behind it in the
+agent's own log. Not yet seen in production because heartbeats have not failed
+since.
+
+**The release-key alarm was verified**, unlike the two above. Signed with the
+real key on 2026-09-06 and watched it travel: CloudTrail to the log group, the
+metric filter to the metric, and the alarm to ALARM at 12:09 IST on a single
+datapoint. Worth recording because the first version of it — an EventBridge
+rule — was deployed, looked correct, and could never have fired.
 
 ### A Pi's clock, and whether it can recover
 
