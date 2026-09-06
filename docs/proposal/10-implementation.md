@@ -69,20 +69,20 @@ You sync exam shift hours to agents and publish continuously through shift plus
 margin, because the margin is what stops an observer waiting when they open a
 camera. That requirement is respected here rather than assumed away.
 
-The consequence is that publishing cost is fixed — ~$39,800/year across your
-exam calendar, which is **89% of the entire bill** (`20-cost.md` §5). It does
-not vary with viewers at all; all viewing together is 8%. Two things make that
+The consequence is that publishing cost is fixed — ~$59,600/year across your
+exam calendar, which is **92% of the entire bill** (`20-cost.md` §5). It does
+not vary with viewers at all; all viewing together is 6%. Two things make that
 affordable:
 
 - **10-second segments.** Your existing choice, and a good one — it halves the
   request cost against a 4-second design, at the price of a few seconds of
   additional live delay that a monitoring workload can absorb.
 - **Shift-bounded publishing.** Already how you operate. It is the difference
-  between ~134 active days a year and 365.
+  between 120–240 active days a year and 365.
 
 Because publishing dominates so completely, the highest-value optimisation is on
 the write path and nowhere else: synthesising the playlist at read time removes
-half of all PUTs — **~$19,900, about 45% of the total** — and changes nothing an
+half of all PUTs — **~$29,800, about 46% of the total** — and changes nothing an
 observer can perceive.
 
 **Enforce shift windows server-side as well as in the agent.** The agent

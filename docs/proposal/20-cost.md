@@ -23,7 +23,7 @@ Not the one I assumed first. This is what you actually do:
 | Observers assigned to a few centres, overlapping on incidents | Viewer concurrency is the largest variable — §4 |
 
 The continuous-publishing requirement is a genuine constraint and I am not going
-to cost a design that ignores it. It is ~89% of the bill, and it is the price of
+to cost a design that ignores it. It is ~92% of the bill, and it is the price of
 an observer being able to flip between cameras with no wait. Whether that is
 worth it is a product decision; §6 puts numbers on both sides so it can be made
 deliberately rather than by default.
@@ -102,13 +102,13 @@ Half of all PUTs are playlist rewrites of about a kilobyte. A CloudFront
 Function can synthesise the playlist at read time from the segment naming
 convention, removing 360 PUT per camera-hour:
 
-Across the full calendar in §5 that is 11.06 million camera-hours, so:
+Across the full calendar in §5 that is 16.56 million camera-hours, so:
 
 ```
-  playlist PUTs removed   11,060,000 × 360 / 1,000 × $0.005 = $19,908 / year
+  playlist PUTs removed   16,560,000 × 360 / 1,000 × $0.005 = $29,808 / year
 ```
 
-**~$19,900 — about 45% of the entire bill — for one CloudFront Function** at
+**~$29,800 — about 46% of the entire bill — for one CloudFront Function** at
 $0.10 per million invocations. At the assumed calendar this is by some distance
 the highest-value optimisation available, and unlike §6 it changes nothing an
 observer can perceive.
@@ -145,7 +145,7 @@ CloudFront reading S3 once per segment, and it is why the origin-GET column in
 
 Note the asymmetry that falls out of §5: a viewer-hour costs $0.0059 and a
 camera-hour of publishing costs $0.0036, but you publish 13–50 cameras for every
-one watched. **Viewing is 8% of the bill; publishing is 89%.**
+one watched. **Viewing is 6% of the bill; publishing is 92%.**
 
 ## 5. The annual calendar, costed
 
@@ -155,59 +155,70 @@ me if wrong, it is one line to change:**
 | | Cameras | Hours/day | Days/year | Concurrent viewers |
 |---|---|---|---|---|
 | **A** Monthly exams | 10,000 | 8 | 120 (10/month) | 500 |
-| **B** Multi-shift | 5,000 | 10 | 10 | 100 |
+| **B** Multi-shift | 5,000 | 10 | 120 (10/month) | 100 |
 | **C** Two national exams | 20,000 | 12 | 2 + 2 mock days | 1,500 / 750 on mock |
 
 **Estate size and concurrent load are different numbers.** The registered estate
-is 25,000+ cameras; the figures below are how many are *publishing at once* in
+is 25,000+ cameras; the figures above are how many are *publishing at once* in
 each exam pattern. Nothing is billed for a registered camera that is not
-publishing, which is why the annual total is far below what a 25,000-camera
-steady state would suggest.
+publishing.
 
 Applying the per-unit rates from §3 and §4:
 
-| | Camera-hours | PUT requests | PUT cost | Egress | CF req | Origin GET | **Subtotal** |
-|---|---|---|---|---|---|---|---|
-| **A** | 9,600,000 | 6.91 bn | $34,560 | $2,529 | $415 | $138 | **$37,642** |
-| **B** | 500,000 | 0.36 bn | $1,800 | $53 | $9 | $3 | **$1,864** |
-| **C** | 960,000 | 0.69 bn | $3,456 | $285 | $47 | $16 | **$3,803** |
-| | | | **$39,816** | **$2,866** | **$470** | **$157** | **$43,309** |
+| | Camera-hours | PUT cost | Egress | CF req | Origin GET | **Subtotal** |
+|---|---|---|---|---|---|---|
+| **A** | 9,600,000 | $34,560 | $2,529 | $415 | $138 | **$37,642** |
+| **B** | 6,000,000 | $21,600 | $632 | $104 | $35 | **$22,371** |
+| **C** | 960,000 | $3,456 | $285 | $47 | $16 | **$3,803** |
+| | **16,560,000** | **$59,616** | **$3,446** | **$565** | **$188** | **$63,815** |
 
 Plus ~$1,200 for the control plane (IoT, DynamoDB, Lambda, API Gateway, KMS)
 and ~$1 for storage — the 2-minute window peaks at about 33 GB across the
 estate.
 
-> ### **Total: ~$44,500 per year**
-> With dynamic playlists (§3): **~$24,600**
+> ### **Total: ~$65,000 per year**
+> With dynamic playlists (§3): **~$35,200**
 
-### 5.1 Two numbers that should change your mind
+### 5.1 Three numbers that should change your mind
 
-**PUT requests are 89% of the bill.** Not bandwidth, not storage, not compute.
-Everything else combined is under $5,000. Any effort spent optimising this
-platform should go at the write path and nowhere else — and the two levers
-that matter are both in §3 and §6.
+**PUT requests are 92% of the bill.** Not bandwidth, not storage, not compute.
+All viewing together is 6% — under $4,200. Any effort spent optimising this
+platform belongs on the write path and nowhere else.
 
 **You publish between 13 and 50 cameras for every one being watched.**
 
-| | Published : watched |
-|---|---|
-| A | 20 : 1 |
-| B | 50 : 1 |
-| C | 13 : 1 |
+| | Cameras | Viewers | Published : watched | Publishing cost | Per viewer |
+|---|---|---|---|---|---|
+| A | 10,000 | 500 | 20 : 1 | $34,560 | $69/yr |
+| B | 5,000 | 100 | **50 : 1** | $21,600 | **$216/yr** |
+| C | 20,000 | 1,500 | 13 : 1 | $3,456 | $2/yr |
 
-In scenario A, $32,800 of the $34,560 publishing cost produces video that
-nobody looks at. That is not an argument that the money is wasted — it is
-availability, and availability is the product. But it is the number that
-decides how much §6 is worth, and at 20:1 it is worth a great deal more than
-it would be at 2:1.
+**B is where the money is going and it is the least watched.** A third of the
+annual bill publishes 5,000 cameras so that 100 people can look at them — $216
+per observer per year, against $2 for the national exams. That is not an
+argument that B is wrong; multi-shift exams may need every camera available on
+demand. But it is the first place to point a cost review, and §6 puts a number
+on the alternative.
+
+**Scenario C is 6% of the bill.** The two national exams — the days everyone
+worries about, the days the current fleet is sized for — cost $3,803 a year.
+Under provisioned capacity those two days set the bill for all 365. Here they
+cost what two days cost.
 
 ### 5.2 Peak rates, for the load test
 
-| | Peak PUT/s | Peak DELETE/s | Aggregate ingest |
-|---|---|---|---|
-| A | 2,000 | 1,000 | 1.1 Gbps |
-| B | 1,000 | 500 | 0.55 Gbps |
-| C | **4,000** | 2,000 | 2.2 Gbps |
+| | Cameras live | Peak PUT/s | Peak DELETE/s | Aggregate ingest |
+|---|---|---|---|---|
+| A | 10,000 | 2,000 | 1,000 | 1.1 Gbps |
+| B | 5,000 | 1,000 | 500 | 0.55 Gbps |
+| A + B same days | 15,000 | 3,000 | 1,500 | 1.65 Gbps |
+| C | 20,000 | **4,000** | 2,000 | 2.2 Gbps |
+
+A and B both run ten days a month. **Whether they fall on the same days matters
+for the load test, not for the bill** — camera-hours are camera-hours either
+way, but concurrent load is 3,000 PUT/s if they coincide and 2,000 if they do
+not. Worth knowing which, because it also decides whether your active calendar
+is 120 days a year or 240.
 
 **Scenario C exceeds the 3,500 PUT/s that S3 sustains per prefix**, so the key
 distribution stops being academic. Keys are spread by thing name, which spreads
@@ -224,30 +235,46 @@ You publish continuously because margin hours stop an observer waiting when
 they open a camera. That is a real requirement and I am not going to cost a
 design that ignores it.
 
-But §5.1 changes the arithmetic. At 20:1, publishing on demand would remove
-most of 89% of the bill, and it is worth putting a number on what is being
-bought:
+But §5.1 changes the arithmetic, and scenario B changes it most. Publishing is
+92% of the bill, and B alone spends $21,600 a year so that 100 people can watch
+5,000 cameras — $216 per observer per year.
 
-| Approach | Scenario A publish cost | Note |
-|---|---|---|
-| Continuous (today) | $34,560 | Any camera instantly available |
-| Centre-level warm-up | $34,560 × (centres with an observer ÷ all centres) | Instant within a watched centre |
-| Camera-level on demand | ~$1,700 | 3–9 s wait on first open |
+| Approach | A publish cost | B publish cost | Observer experience |
+|---|---|---|---|
+| Continuous (today) | $34,560 | $21,600 | Any camera instantly |
+| Centre-level warm-up | × fraction of centres watched | × fraction of centres watched | Instant *within a watched centre* |
+| Camera-level on demand | ~$1,700 | ~$430 | 3–9 s wait on first open |
 
-**Centre-level warm-up is the one to look at.** Publish every camera at a centre
-while any observer is logged in to that centre, and nothing at centres with
-nobody on them. Within a watched centre the experience is *identical* to today —
-an observer switching between cameras at their own centre waits for nothing,
-because every camera there is already live.
+**Centre-level warm-up is the one to look at**, and B is where to look first.
+Publish every camera at a centre while any observer is logged in to that centre,
+and nothing at centres with nobody on them. Within a watched centre the
+experience is *identical* to today — an observer switching between cameras at
+their own centre waits for nothing, because every camera there is already live.
 
 The saving is exactly the fraction of centres with nobody watching, and that is
-a number you can measure from existing access logs this week. At 10,000 cameras
-(~320 centres) with 500 observers, the question is simply how many distinct
-centres those 500 are spread across:
+a number you can measure from existing access logs this week.
 
-- spread over 250 centres → ~22% saving → **$7,600/year**
-- spread over 150 centres → ~53% saving → **$18,300/year**
-- spread over 80 centres → ~75% saving → **$25,900/year**
+**Scenario B, 5,000 cameras ≈ 160 centres, 100 observers.** Those 100 observers
+cannot be spread across more than 100 centres, so *at least* 37% of centres are
+unwatched at any moment even in the worst case:
+
+| Observers spread across | Saving | Per year |
+|---|---|---|
+| 100 centres (worst case) | 37% | **$8,000** |
+| 60 centres | 62% | **$13,500** |
+| 40 centres | 75% | **$16,200** |
+
+**Scenario A, 10,000 cameras ≈ 320 centres, 500 observers:**
+
+| Observers spread across | Saving | Per year |
+|---|---|---|
+| 250 centres | 22% | **$7,600** |
+| 150 centres | 53% | **$18,300** |
+| 80 centres | 75% | **$25,900** |
+
+Taken together, centre-level warm-up is plausibly worth **$15,000–42,000 a
+year** — a quarter to two thirds of the entire bill — with no change whatsoever
+to what an observer experiences inside a centre they are watching.
 
 Two supporting points:
 
@@ -258,9 +285,13 @@ giving ~3 s to first segment. If your margin is currently measured in minutes,
 most of it may be recoverable by one FFmpeg flag — worth measuring before it is
 costed.
 
-**Dynamic playlists are independent of all this** and save ~$19,900 on their
-own, with no change to observer experience whatsoever. If only one optimisation
-is done, do that one.
+**Dynamic playlists are independent of all this** and save ~$29,800 on their
+own — 46% of the bill — with no change to observer experience at all. They
+compose with centre-level warm-up rather than competing with it: together the
+two would take a $65,000 platform to somewhere near $20,000.
+
+If only one optimisation is done, do the playlists. It is one CloudFront
+Function, it needs no product decision, and nobody has to agree to anything.
 
 ## 7. Comparison with the current platform
 
@@ -282,21 +313,21 @@ and would pay it from CloudFront; the rates are close enough that including it
 adds a large number to both columns and changes nothing. Do not let anyone
 present a comparison that includes it on one side only.
 
-Against **~$44,500/year** proposed, or **~$24,600** with dynamic playlists.
-A ratio of roughly **7×**, or **13×** optimised.
+Against **~$65,000/year** proposed, or **~$35,200** with dynamic playlists.
+A ratio of roughly **5×**, or **9×** optimised.
 
 **The fleet is sized for scenario C and idle for the rest of the year.** Your
 national exams need capacity for 20,000 cameras on two days; scenario B needs a
 quarter of that. Provisioned capacity has to be bought for the peak, so those
 two days set the bill for all 365. In the proposed design scenario C costs
-**$3,803** — under 9% of the annual total — because two days is what you pay
-for.
+**$3,803** — 6% of the annual total — because two days is what you pay for.
 
 **The ratio is not the interesting part.** The current bill is identical in June
 and on exam morning, because it is provisioned capacity. The proposed bill is
 near zero between exams and rises only with shift hours actually run. Your
-calendar is roughly 134 active days a year (120 + 10 + 4); paying for 365 is the
-structural problem, and right-sizing instances does not fix it.
+calendar is 120–240 active days a year depending on whether A and B share days;
+paying for 365, at a capacity set by two of them, is the structural problem, and
+right-sizing instances does not fix it.
 
 Three lines vanish rather than shrink: no ingest fleet, no NFS, no load balancer
 in the video path. And one operational problem vanishes with them — the delete
@@ -304,25 +335,26 @@ sweep that cannot keep up.
 
 ## 8. What would make this wrong
 
-**My reading of your exam calendar.** §5 assumes A runs 10 days every month
-(120 days/year) while B and C are 10 and 2 days respectively *per year*. If B is
-also monthly, add ~$20,000. This is the single largest uncertainty in the
-document and it is one sentence for you to correct.
+**My reading of your exam calendar.** §5 has A and B both running 10 days every
+month (120 days/year each) and C twice a year with a mock day each. Publishing
+is 92% of the bill and scales linearly with cameras × hours × days, so a wrong
+day count moves the total more than anything else here. Confirm it before
+quoting.
 
 **Bitrate.** Every byte line assumes ~110 kbps, but that only moves egress —
-$2,866 of a $44,500 bill. Even at 512 kbps the total rises to about $56,000.
+$3,446 of a $65,000 bill. Even at 512 kbps the total rises to about $77,000.
 Publishing cost does not move at all, because it is request-driven. This is a
 much smaller risk here than it would be in a bandwidth-dominated design.
 
-**Camera counts per scenario.** Publishing is 89% of the bill and scales
-linearly with cameras × hours × days. A is 78% of the total on its own, so if
-scenario A is really 12,000 cameras rather than 10,000, add ~$7,000.
+**Camera counts per scenario.** Publishing is 92% of the bill and scales
+linearly with cameras × hours × days. A and B are 58% and 34% of the total, so
+if A is really 12,000 cameras rather than 10,000, add ~$7,000.
 
 **Viewer concurrency barely matters.** At these ratios the entire viewing side
-is $3,500. Tripling every viewer count adds ~$7,000 to a $44,500 bill. This is
-the opposite of what I assumed before seeing your numbers, and it is worth
-saying plainly in the room: **do not spend the meeting arguing about viewer
-counts.**
+is $4,200 — 6%. Tripling every viewer count adds ~$8,000 to a $65,000 bill.
+This is the opposite of what I assumed before seeing your numbers, and it is
+worth saying plainly in the room: **do not spend the meeting arguing about
+viewer counts.**
 
 **My assumptions about your current platform.** Instance types, counts and EFS
 sizing in §7 are guesses. If EFS holds 10 TB rather than 50, that comparison
@@ -337,7 +369,7 @@ instances are on 3-year commitments, the current number is perhaps 40% lower
 than §7 shows — and the sunk commitment is an argument for migrating at renewal
 rather than immediately.
 
-**S3 request pricing is the whole bill, so check it.** At 89% concentration, a
+**S3 request pricing is the whole bill, so check it.** At 92% concentration, a
 change in S3 request pricing moves this proposal more than anything else in it.
 It has been stable for years, but it is the one line worth re-checking against
 the calculator on the day you present.

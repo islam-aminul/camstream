@@ -9,7 +9,7 @@ the room, with a pointer to where the detail lives.
 
 **"We already have a working platform. Why rebuild?"**
 It works; the objection is what it costs and where the risk sits. Three fixed
-tiers — WildFly, EFS, Nginx — are paid for 365 days to serve about 134, and are
+tiers — WildFly, EFS, Nginx — are paid for 365 days to serve 120–240, and are
 sized for the two national exam days among them. And the delete
 sweep already cannot keep up at peak, which is not a tuning problem but a sign
 the storage layer is the wrong shape for a high-churn ring buffer.
@@ -52,8 +52,8 @@ are perhaps 300 lines. Weigh that against the operational lock-in of 50 hand-
 sharded file systems.
 
 **"Why not Kubernetes / ECS instead of Lambda?"**
-Because the workload is ~134 active days a year, and the peak that sizes it is
-two of them. A container platform is provisioned capacity with a different name;
+Because the workload is 120–240 active days a year, and the peak that sizes it
+is two of them. A container platform is provisioned capacity with a different name;
 it would solve the sharding problem but not the paying-for-idle one. Lambda here
 handles control plane only — no video passes through it.
 
@@ -105,7 +105,7 @@ built and verified end to end in the reference implementation.
 ## From finance
 
 **"What does it cost?"**
-~$44,500/year across your whole exam calendar, or ~$24,600 with one read-path
+~$65,000/year across your whole exam calendar, or ~$35,200 with one read-path
 optimisation, against an estimated ~$314k for the current fleet. But the ratio
 is not the point — the current bill is identical in June and on exam morning,
 because it is sized for two national exam days. (`20-cost.md` §5.)
@@ -116,20 +116,20 @@ instances are on 3-year Savings Plans the current figure may be ~40% lower — i
 which case the honest recommendation is to migrate at renewal rather than now.
 
 **"What's the biggest cost risk?"**
-My reading of your exam calendar. Publishing is 89% of the bill and scales with
-cameras × hours × days, and the monthly-exam pattern alone is 78% of the total.
-If those 10 days a month are really 15, add ~$17,000. Everything else is noise
-by comparison.
+My reading of your exam calendar. Publishing is 92% of the bill and scales with
+cameras × hours × days, and the two monthly patterns are 92% of the total
+between them. If those 10 days a month are really 15, add ~$28,000. Everything
+else is noise by comparison.
 
 **"Surely bandwidth is the big number?"**
-No, and this is the most useful thing in the costing. S3 **PUT requests are 89%**
-of the bill; all viewing together is 8%. You publish 13–50 cameras for every one
+No, and this is the most useful thing in the costing. S3 **PUT requests are 92%**
+of the bill; all viewing together is 6%. You publish 13–50 cameras for every one
 being watched, so the write path dominates completely. Every instinct says
 bandwidth; the arithmetic says requests.
 
 **"So should we argue about viewer counts?"**
 No — and it is worth saying so early to save the meeting. Tripling every viewer
-number adds about $7,000 to a $44,500 bill.
+number adds about $8,000 to a $65,000 bill.
 
 **"Any way this costs more than expected?"**
 Three: my calendar assumptions being wrong (above); anyone putting 1080p in a
@@ -140,7 +140,7 @@ genuinely load-bearing, and it is one guard in the control plane.
 **"What is the cheapest thing we can do to reduce it?"**
 Synthesise the HLS playlist at read time with a CloudFront Function instead of
 rewriting it on every segment. Half of all PUTs are 1 KB playlist rewrites, so
-this removes **~$19,900 — about 45% of the entire bill** — and changes nothing
+this removes **~$29,800 — about 46% of the entire bill** — and changes nothing
 an observer can perceive. One function, on the read path, at $0.10 per million
 invocations.
 

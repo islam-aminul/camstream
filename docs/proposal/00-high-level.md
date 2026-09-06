@@ -77,8 +77,8 @@ at the edge, close to the viewer. Authorisation is a signed cookie, checked at
 the edge, so an unauthorised request is refused before it reaches anything you
 pay for per request.
 
-**Cost becomes proportional to use rather than to peak.** Roughly $44,500 a
-year against an estimated $314,000, and $24,600 with one optimisation. Between
+**Cost becomes proportional to use rather than to peak.** Roughly $65,000 a
+year against an estimated $314,000, and $35,200 with one optimisation. Between
 exams the platform costs approximately nothing. During a shift it costs the segments
 actually written and the bytes actually watched. This is structural, not a
 saving found by tuning.
@@ -166,8 +166,8 @@ instantly. That requirement survives this change unaltered, and the costing
 respects it rather than assuming it away.
 
 **The request cost is the whole bill, and it is worth knowing that up front.**
-S3 `PUT` requests are **89%** of the projected cost — more than bandwidth,
-storage and compute combined, and by a wide margin. Viewing is 8%. That is
+S3 `PUT` requests are **92%** of the projected cost — more than bandwidth,
+storage and compute combined, and by a wide margin. Viewing is 6%. That is
 counter-intuitive enough that it is the first thing to say in a design review,
 because every instinct about video platforms says bandwidth dominates, and here
 it does not.

@@ -31,13 +31,13 @@ keep up at peak has no equivalent here. The agent removes its own objects as the
 2-minute window rolls, S3 charges nothing for DELETE, and there is no queue to
 fall behind on. Fifty file systems become about 33 GB resident.
 
-**Cost changes shape, not just size.** ~$44,500/year against an estimated
-~$314k, or ~$24,600 with one read-path optimisation. The important part is that
+**Cost changes shape, not just size.** ~$65,000/year against an estimated
+~$314k, or ~$35,200 with one read-path optimisation. The important part is that
 the current bill is identical in June and on exam morning, because it is
 provisioned capacity sized for two national exam days.
 
-**S3 PUT requests are 89% of the bill.** Not bandwidth, not storage. Viewing is
-8%. Every instinct about video platforms says bandwidth dominates; here it does
+**S3 PUT requests are 92% of the bill.** Not bandwidth, not storage. Viewing is
+6%. Every instinct about video platforms says bandwidth dominates; here it does
 not, and that redirects the entire optimisation conversation to the write path.
 
 **The security boundary is the thing name.** Every agent's credentials, topics
