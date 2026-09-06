@@ -3,7 +3,7 @@ import { ref, computed, watch, onBeforeUnmount } from 'vue';
 import Button from 'primevue/button';
 import { attach, type Attachment } from '@/player/attach';
 import { tileView } from '@/player/tile-state';
-import type { Camera, Stream } from '@/api';
+import type { Camera, Stream, StreamAgent } from '@/api';
 
 /**
  * One camera in the grid.
@@ -21,6 +21,14 @@ const props = defineProps<{
    * Absent is an ordinary state, not an error, and the tile says so.
    */
   stream?: Stream;
+  /**
+   * The agent that owns this camera, whether or not it has reported it.
+   *
+   * The tile's most important distinction depends on this existing separately
+   * from `stream`: an unreported camera has no stream, and reading the agent's
+   * state out of the missing record is what made every tile blame the camera.
+   */
+  agent?: StreamAgent;
   viewerCodecs: string[];
   demanded: boolean;
   declined: boolean;
@@ -58,7 +66,10 @@ const key = computed(() => `${props.camera.assignedTo}/${props.camera.cameraId}`
 
 const view = computed(() => tileView({
   reported: props.stream !== undefined,
-  agentOnline: props.stream?.online ?? false,
+  // From the agent when it is known, and only from the stream as a fallback
+  // for a console talking to a lambda that does not send agents yet.
+  agentOnline: props.agent?.online ?? props.stream?.online ?? false,
+  agentHasReported: props.agent ? props.agent.lastReportAt !== null : undefined,
   sourceCodec: props.stream?.sourceCodec ?? 'h264',
   sourceCodecProfile: props.stream?.sourceCodecProfile ?? null,
   viewerCodecs: props.viewerCodecs,

@@ -40,8 +40,30 @@ export interface TileInput {
    * will never arrive has nothing on screen to explain the absence.
    */
   reported: boolean;
-  /** Whether the agent publishing this camera is connected. */
+  /**
+   * Whether the agent publishing this camera is connected.
+   *
+   * Read from the agent, not from this camera's stream record. It used to come
+   * from the record, which meant an unreported camera reported its agent as
+   * offline for the sole reason that the record was missing - so the two
+   * conditions were the same condition, and the tile could never tell an
+   * offline agent from an unreachable camera.
+   */
   agentOnline: boolean;
+  /**
+   * Whether the agent has reported anything at all since it last connected.
+   *
+   * The difference between "wait" and "fault". An agent that has connected but
+   * not yet finished its first discovery sweep has reported nothing, and every
+   * camera on it is momentarily unreported through no fault of its own - about
+   * thirty seconds after each restart, which every update causes. An agent
+   * that has reported, and did not mention this camera, has looked and not
+   * found it, and that is when a camera is worth checking.
+   *
+   * Undefined when unknown, which is treated as the cautious case: it does not
+   * assert a fault it cannot see.
+   */
+  agentHasReported?: boolean;
   sourceCodec: string;
   sourceCodecProfile: string | null;
   /** Codecs this browser reported. */
@@ -82,19 +104,35 @@ export const AGENT_STREAM_CEILING = 128;
 export const MAX_TRANSCODE_CAP = 32;
 
 export function tileView(input: TileInput): TileView {
-  if (!input.reported) {
-    return {
-      status: 'unreported',
-      message: 'Registered, but its agent has not reported it yet. '
-        + 'Check the camera is reachable and its credentials are right.',
-      offerTranscode: false,
-    };
-  }
-
+  // The agent first, and before anything about the camera.
+  //
+  // This order used to be the other way round, and it sent people to the wrong
+  // place. On 2026-09-06 an agent came back from a laptop suspend unable to
+  // obtain AWS credentials; it reported nothing for twenty-six minutes, and
+  // every camera on the site - including one that had streamed all night -
+  // told the operator to check its cabling and its password. Nothing was wrong
+  // with any camera.
+  //
+  // An agent that is not connected explains every tile beneath it, so it is
+  // the first thing to say and the only thing worth saying.
   if (!input.agentOnline) {
     return {
       status: 'offline',
       message: 'Its agent is not connected. Nothing can be streamed from this site until it is.',
+      offerTranscode: false,
+    };
+  }
+
+  if (!input.reported) {
+    // Connected, but has it looked yet? Only if it has reported something can
+    // this camera's absence from that report be read as a fault.
+    return {
+      status: 'unreported',
+      message: input.agentHasReported === false
+        ? 'Its agent is connected but has not reported yet — it is probably still '
+          + 'starting up. This clears on its own within a minute.'
+        : 'Its agent is connected but has not reported this camera. '
+          + 'Check the camera is reachable and its credentials are right.',
       offerTranscode: false,
     };
   }

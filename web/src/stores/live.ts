@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia';
 import { ref, computed, watch } from 'vue';
-import { api, type Camera, type Stream, type DesiredState } from '@/api';
+import { api, type Camera, type Stream, type StreamAgent, type DesiredState } from '@/api';
 import { useSelectionStore } from './selection';
 import { useSessionStore } from './session';
 import { createLatest } from './cascade';
@@ -36,6 +36,14 @@ export const useLiveStore = defineStore('live', () => {
   const tiles = ref<number>(readTiles());
   const cameras = ref<Camera[]>([]);
   const streams = ref<Stream[]>([]);
+  /**
+   * The agents behind those cameras, whether or not they have reported any.
+   *
+   * Kept separately from `streams` because the useful case is precisely the
+   * one where a camera has no stream record: without this, a tile had nothing
+   * to read its agent's state from and blamed the camera by default.
+   */
+  const agents = ref<StreamAgent[]>([]);
   const total = ref(0);
   const loading = ref(false);
   const error = ref<string | null>(null);
@@ -77,9 +85,13 @@ export const useLiveStore = defineStore('live', () => {
    */
   const entries = computed(() => {
     const byId = new Map(streams.value.map((s) => [s.cameraId, s]));
+    const byThing = new Map(agents.value.map((a) => [a.thingName, a]));
     return cameras.value.map((camera) => ({
       camera,
       stream: byId.get(camera.cameraId),
+      // Undefined when the lambda did not send agents, which the tile reads as
+      // "unknown" rather than as bad news.
+      agent: byThing.get(camera.assignedTo),
       key: `${camera.assignedTo}/${camera.cameraId}`,
     }));
   });
@@ -137,7 +149,7 @@ export const useLiveStore = defineStore('live', () => {
    * worth of them is what once outgrew a Lambda response.
    */
   async function loadPage() {
-    if (!selection.premisesId) { cameras.value = []; streams.value = []; return; }
+    if (!selection.premisesId) { cameras.value = []; streams.value = []; agents.value = []; return; }
     const ticket = latest.begin('page');
     loading.value = true;
     // Cleared here rather than on success: a problem found part way through —
@@ -183,15 +195,16 @@ export const useLiveStore = defineStore('live', () => {
       // rather than a re-scan from the beginning.
       if (result.cursor) cursors.value[page.value + 1] = result.cursor;
 
-      const manifests = result.items.length
+      const live = result.items.length
         ? await api.streams({
           tenantId: selection.tenantParam,
           premisesId: selection.premisesId,
           cameraIds: result.items.map((c) => c.cameraId),
         })
-        : [];
+        : { cameras: [], agents: [] };
       if (!latest.current('page', ticket)) return;
-      streams.value = manifests;
+      streams.value = live.cameras;
+      agents.value = live.agents;
       await declare();
     } catch (err) {
       if (latest.current('page', ticket)) error.value = (err as Error).message;
@@ -297,7 +310,7 @@ export const useLiveStore = defineStore('live', () => {
   );
 
   return {
-    tiles, cameras, streams, entries, total, loading, error,
+    tiles, cameras, streams, agents, entries, total, loading, error,
     page, hasPrevious, hasNext, from, to, pinnedToOne,
     desired, demandedFor, declinedFor, streamsPerAgent, transcode, main, codecs,
     setTiles, loadPage, first, next, previous, declare, release,

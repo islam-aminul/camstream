@@ -38,13 +38,63 @@ describe('a camera the agent has never reported', () => {
     // It has no manifest and no codec, so every other branch would be reading
     // fields that are not there. It still has to be on screen: an operator
     // waiting for a camera that will never arrive needs the reason.
-    const v = view({ reported: false, agentOnline: false });
+    const v = view({ reported: false, agentOnline: true, agentHasReported: true });
     expect(v.status).toBe('unreported');
     expect(v.message).toContain('credentials');
   });
 
-  it('takes precedence over the agent being offline', () => {
-    expect(view({ reported: false, agentOnline: false }).status).toBe('unreported');
+  it('blames the agent when the agent is offline, not the camera', () => {
+    // This assertion used to say the opposite - that unreported took
+    // precedence over the agent being offline - and that was the bug.
+    //
+    // On 2026-09-06 an agent came back from a laptop suspend unable to obtain
+    // AWS credentials. It reported nothing for twenty-six minutes, and every
+    // camera on the site told the operator to check its cabling and its
+    // password. One of them had been streaming all night. Nothing was wrong
+    // with any camera, and the console sent somebody to look at all of them.
+    //
+    // An offline agent explains every tile beneath it. Saying anything about
+    // the camera first is guessing, and guessing wrong is expensive: it is a
+    // drive to a site to check a camera that is fine.
+    const v = view({ reported: false, agentOnline: false });
+    expect(v.status).toBe('offline');
+    expect(v.message).toContain('agent is not connected');
+    expect(v.message).not.toContain('credentials');
+  });
+
+  it('says wait, not fault, while the agent is still starting up', () => {
+    // Every update restarts an agent, and for about thirty seconds afterwards
+    // it has connected but not finished its first discovery sweep - so it has
+    // reported nothing and every one of its cameras is unreported. Measured
+    // at 09:36 on 2026-09-06: cameraCount read 0 and settled to 1 half a
+    // minute later, with nothing wrong at all.
+    //
+    // Telling somebody to check a camera during a window that clears itself is
+    // how a console teaches people to ignore it.
+    const v = view({ reported: false, agentOnline: true, agentHasReported: false });
+    expect(v.status).toBe('unreported');
+    expect(v.message).toContain('starting up');
+    expect(v.message).not.toContain('credentials');
+  });
+
+  it('does check the camera once the agent has looked and not found it', () => {
+    // The one case the original message was right about, and the only one in
+    // which it is worth anyone's time. The agent is connected, it has
+    // reported, and this camera was not in what it reported: it looked, and
+    // did not find it.
+    const v = view({ reported: false, agentOnline: true, agentHasReported: true });
+    expect(v.message).toContain('reachable');
+    expect(v.message).toContain('credentials');
+  });
+
+  it('does not assert a fault when the agent state is unknown', () => {
+    // agentHasReported is undefined against a control plane that does not send
+    // agents yet. Unknown must not become an accusation - but it must still
+    // say something useful, so it falls back to the checkable advice rather
+    // than to silence.
+    const v = view({ reported: false, agentOnline: true, agentHasReported: undefined });
+    expect(v.status).toBe('unreported');
+    expect(v.message).toContain('credentials');
   });
 });
 

@@ -119,6 +119,20 @@ export interface Stream {
   };
 }
 
+/**
+ * An agent's own state, returned beside the cameras it has reported.
+ *
+ * Needed because a camera an agent has never reported has no Stream record at
+ * all, so there is nowhere else to read its agent's condition from - and that
+ * is exactly the case where the console most needs to know it.
+ */
+export interface StreamAgent {
+  thingName: string;
+  online: boolean;
+  /** When the agent last reported, or null if it has not since connecting. */
+  lastReportAt: number | null;
+}
+
 /** What one agent has been asked to publish, and what it could not. */
 export interface DesiredState {
   thingName: string;
@@ -311,9 +325,12 @@ export const api = {
    * a screenful.
    */
   streams: (p: { tenantId?: string; premisesId: string; cameraIds: string[] }) =>
-    get<{ tenantId: string; cameras: Stream[] }>('/api/streams', {
+    get<{ tenantId: string; cameras: Stream[]; agents?: StreamAgent[] }>('/api/streams', {
       tenantId: p.tenantId, premisesId: p.premisesId, cameraIds: p.cameraIds.join(','),
-    }).then((r) => r.cameras),
+    // Agents are optional so a console deployed ahead of the lambda behaves
+    // as it did before rather than throwing: absent means unknown, and the
+    // tile treats unknown as "do not assert a fault".
+    }).then((r) => ({ cameras: r.cameras, agents: r.agents ?? [] })),
 
   /**
    * Declares what this viewer currently has on screen.
