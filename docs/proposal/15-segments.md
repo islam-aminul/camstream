@@ -196,7 +196,103 @@ the start of each viewing session.
 Both are cheaper than any continuous-publishing option by a wide margin, so this
 is a comfortable decision rather than a painful one.
 
-## 6. Making "no wait" true rather than merely fast
+## 6. The two-stream idea: fast start and cheap steady state at once
+
+Worth writing down properly, because it is the obvious next thought and it very
+nearly works.
+
+**The idea.** Publish two HLS renditions of the same camera: a short one
+(1-second segments) that a viewer can start on instantly, and a long one
+(10-second segments) that is cheap to run. The player begins on the short
+stream and hands over to the long one once it is established.
+
+### It is buildable, and cheaper
+
+One ffmpeg process can write both outputs from a single input — no second
+decode, and stream copy makes the extra output nearly free in CPU:
+
+```
+ffmpeg -rtsp_transport tcp -i rtsp://…  \
+  -c copy -f hls -hls_time 1  … fast/index.m3u8 \
+  -c copy -f hls -hls_time 10 … main/index.m3u8
+```
+
+**The short stream must be stopped after the handover**, or it costs more than
+it saves: running both for a whole session is 7,920 PUT per camera-hour against
+3,600 for 2-second segments throughout. Run it for the first ~20 seconds and it
+becomes a rounding error.
+
+| Approach | Annual cost | Behind live once settled |
+|---|---|---|
+| 2 s throughout *(recommended)* | $14,126 | ~6 s |
+| 1 s burst → 4 s steady | $8,005 | ~12 s |
+| 1 s burst → 10 s steady | $3,767 | ~30 s |
+
+So it saves around **$10,000 a year**. That is real money and the idea deserves
+a straight answer rather than a dismissal.
+
+### Four reasons it is not recommended here
+
+**1. The handover means falling backwards.** A player on the 1-second stream is
+about 2 s behind real time. The 10-second stream's newest complete segment can
+be up to 10 s old, and the three-segment rule puts a joining player 30 s back.
+The player cannot be closer to live than the stream it is consuming, so the
+handover has to lose 4–28 seconds — as a visible rewind, a deliberate slow-down
+drift, or a stall. All three are noticeable, and they happen while the viewer is
+looking at the tile.
+
+**2. HLS has no native mechanism for it.** Variant switching in a master
+playlist is driven by *bandwidth*, not by "I have been playing for twenty
+seconds". Doing this needs custom player logic to swap the source and seek to
+the right position. Custom player code is the most expensive kind: it has to
+work in browsers you do not have, and it fails on exam morning rather than in
+testing.
+
+**3. It adds a failure mode exactly where you cannot afford one.** If the
+handover fails, the viewer gets a stall or a black tile at the moment they are
+watching. The single-stream design has no such moment.
+
+**4. Warming already solves the problem it solves.** If a stream is started when
+an observer opens a *centre* rather than when they click a tile, then by the
+time they look at it the stream has been running for several seconds and has a
+normal playlist. There is no cold start to rescue, so there is nothing for the
+short stream to do. Warming costs one configuration decision; this costs a
+player rewrite.
+
+### One hard constraint worth knowing regardless
+
+**Do not implement this as two ffmpeg processes.** That opens two RTSP sessions
+to the camera, and cameras commonly cap concurrent sessions at two to four —
+NVR channels often lower. This design already opens a second session when a
+viewer expands a tile to main resolution, so a third would fail on constrained
+hardware and reduce how many viewers a camera can serve. If it is ever built, it
+must be one process with two outputs.
+
+### When it would be worth revisiting
+
+- If viewing sessions turn out to be very short and very frequent, so stream
+  starts dominate.
+- If observers are found to tolerate 30 seconds of latency, in which case the
+  long stream can be long and the saving grows.
+- If the platform grows several times, at which point $10,000 becomes
+  proportionally more than the engineering it costs.
+
+At today's numbers, $10,000 a year is roughly a fortnight of one engineer, and
+the player work plus its testing plus a new exam-day failure mode is more than a
+fortnight. **Two-second segments throughout get most of the benefit with none of
+the risk.**
+
+### The standard alternative, for completeness
+
+Low-Latency HLS solves the same problem properly: partial segments are published
+within an open segment, so a player gets sub-second latency *and* long segments.
+It is a real standard with CloudFront support. It is not proposed here because
+it multiplies request count substantially and invigilation does not need
+sub-second latency — but it is the right answer if latency ever becomes a hard
+requirement, and it is a better place to spend effort than a hand-rolled
+handover.
+
+## 7. Making "no wait" true rather than merely fast
 
 Three seconds is good; zero is better, and it comes from anticipating the click
 rather than tuning the encoder.
@@ -217,7 +313,7 @@ those are the ones they will open.
 With warming the 3 seconds is absorbed before the user asks for anything and the
 perceived wait is zero. Without it, 3 s is the floor.
 
-## 7. Summary
+## 8. Summary
 
 | Setting | Value | Why |
 |---|---|---|

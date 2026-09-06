@@ -155,6 +155,17 @@ rate production creates it, so a growing segment never accumulates buffer. It
 only postpones the same arithmetic. Whatever the first few segments do, the
 steady-state length decides whether the player runs dry.
 
+**"Could we run two streams — a short one to start on and a long one to settle into?"**
+Buildable, and it saves about $10,000 a year. One ffmpeg process writes both
+outputs, and the short one is stopped ~20 s in or it costs more than it saves.
+Not recommended, for four reasons: the handover has to fall 4–28 s backwards
+because a player cannot be closer to live than the stream it is consuming; HLS
+variant switching is bandwidth-driven so it needs custom player code; it adds a
+failure mode at exactly the moment somebody is watching; and warming on centre
+open already removes the cold start it exists to rescue. If it is ever built it
+must be **one** process with two outputs — two processes means two RTSP sessions
+per viewer, and cameras commonly cap those at two to four. (`15-segments.md` §6.)
+
 **"What is the cheapest thing we can do to reduce it further?"**
 Synthesise the playlist at read time with a CloudFront Function instead of
 rewriting it per segment — half of all PUTs are small playlist rewrites, so it
