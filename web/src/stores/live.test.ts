@@ -30,8 +30,12 @@ vi.mock('@/api', () => ({
       const next = from + limit < all.length ? String(from + limit) : undefined;
       return Promise.resolve({ total: all.length, cursor: next, items });
     },
-    streams: (p: { cameraIds: string[] }) => Promise.resolve(
-      p.cameraIds.filter((id) => reported.includes(id)).map((id) => ({
+    streams: (p: { cameraIds: string[] }) => Promise.resolve({
+      // The agent is returned whether or not it has reported anything, which
+      // is the point of it: a camera with no manifest still has an agent, and
+      // the tile needs its state to say anything true about the camera.
+      agents: [{ thingName: 'acme--hq--edge-01', online: true, lastReportAt: 1_000 }],
+      cameras: p.cameraIds.filter((id) => reported.includes(id)).map((id) => ({
         thingName: 'acme--hq--edge-01',
         cameraId: id,
         displayName: id,
@@ -46,7 +50,7 @@ vi.mock('@/api', () => ({
           main: '', subH264: '', mainH264: '', master: '',
         },
       })),
-    ),
+    }),
     // Re-cutting the video cookie to the site being watched, which the store
     // does before it hands any manifest to a player.
     session: (sessionId?: string, premisesId?: string) => {
@@ -139,6 +143,38 @@ describe('what the grid renders', () => {
     expect(live.entries).toHaveLength(4);
     expect(live.entries.every((e) => e.stream === undefined)).toBe(true);
     expect(live.entries[0]!.key).toBe('acme--hq--edge-01/cam-0001');
+  });
+
+  it('still knows the agent for a camera that has no stream', async () => {
+    // The join this exists for. An unreported camera has no stream record, so
+    // the tile used to read its agent's state out of the missing record and
+    // conclude the agent was offline - which meant it could never tell an
+    // offline agent from an unreachable camera, and told an operator to go and
+    // check the camera either way.
+    reported = [];
+    const live = useLiveStore();
+    live.tiles = 4;
+    await live.first();
+    await settled();
+
+    const entry = live.entries[0]!;
+    expect(entry.stream).toBeUndefined();
+    expect(entry.agent).toMatchObject({ thingName: 'acme--hq--edge-01', online: true });
+  });
+
+  it('leaves the agent undefined when the camera belongs to one that was not returned', async () => {
+    // Unknown has to stay unknown. A lookup miss must not become a fabricated
+    // offline agent, because the tile treats a known-offline agent as the
+    // explanation for everything below it and would then suppress the real
+    // reason.
+    reported = [];
+    const live = useLiveStore();
+    live.tiles = 4;
+    await live.first();
+    await settled();
+
+    live.cameras[0]!.assignedTo = 'acme--hq--somewhere-else';
+    expect(live.entries[0]!.agent).toBeUndefined();
   });
 
   it('joins each camera to its own manifest', async () => {

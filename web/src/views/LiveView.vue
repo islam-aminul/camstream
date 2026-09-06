@@ -144,6 +144,7 @@ onBeforeUnmount(() => { void live.release(); });
             :class="{ 'tile--selected': highlighted === entry.camera.cameraId }"
             :camera="entry.camera"
             :stream="entry.stream"
+            :agent="entry.agent"
             :viewer-codecs="live.codecs"
             :demanded="live.demandedFor.has(entry.key)"
             :declined="live.declinedFor.has(entry.key)"

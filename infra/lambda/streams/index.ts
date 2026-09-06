@@ -135,5 +135,46 @@ export async function handler(
   });
 
   cameras.sort((a, b) => a.displayName.localeCompare(b.displayName));
-  return json(200, { tenantId, cameras });
+
+  // The agents themselves, not only the cameras they have reported.
+  //
+  // A camera that an agent has never reported has no record here at all, so
+  // the console had nothing to read its agent's state from and assumed the
+  // worst about the camera - it told an operator to check a camera's cabling
+  // and password when the truth was that its agent was offline, or restarting,
+  // or unable to reach AWS. That is the wrong place to send somebody, and it
+  // is the common case rather than the rare one: an agent with nothing
+  // reported is exactly an agent that is not well.
+  //
+  // Free, in the sense that matters: the device records were already fetched
+  // above to decide each camera's `online`, so this adds no query. Scope is
+  // applied for the same reason it is applied to cameras - a restricted viewer
+  // must not learn which agents exist outside their sites.
+  return json(200, { tenantId, cameras, agents: visibleAgents(devices, scope) });
+}
+
+
+/**
+ * The agents at this site, as the console is allowed to see them.
+ *
+ * Exported and pure so the scope filter can be tested. It carries thing names,
+ * and a thing name is `<tenant>--<premises>--<device>`, so an unscoped version
+ * of this would tell a viewer confined to one site the names of every other
+ * site in the tenant - the same disclosure `/api/watch` once had, in a new
+ * field. See scope-disclosure.test.ts.
+ */
+export function visibleAgents(
+  devices: Record<string, unknown>[],
+  scope: string[],
+): { thingName: string; online: boolean; lastReportAt: number | null }[] {
+  return devices
+    .map((device) => ({
+      thingName: String(device.thingName ?? ''),
+      online: device.connected === true,
+      // What the agent last said about itself. The console uses it to tell
+      // "has not reported yet" from "reported, and this camera was not in
+      // it" - the first is a wait, the second is a fault worth acting on.
+      lastReportAt: typeof device.lastReportAt === 'number' ? device.lastReportAt : null,
+    }))
+    .filter((agent) => agent.thingName !== '' && withinScope(agent.thingName, scope));
 }
