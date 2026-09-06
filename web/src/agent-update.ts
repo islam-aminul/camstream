@@ -21,11 +21,22 @@ export interface UpdatableAgent {
  * @param currentVersion what an Update would install, or null when the control
  *   plane has not said. Null means unknown, not "not current": offering an
  *   update that may be unnecessary is better than hiding one that is needed.
+ * @param asked whether this agent has already been told, since the rows on
+ *   screen were loaded. See {@link askedRefusal}.
  */
 export function updateRefusal(
   agent: UpdatableAgent,
   currentVersion: string | null,
+  asked = false,
 ): string | null {
+  // First, and ahead of every other reason. Once an agent has been told, this
+  // page knows nothing about what happened next: the fields it is deciding
+  // from describe the agent before the instruction, so "connected" and
+  // "running 0.1.6" are both about to stop being true. Answering from them
+  // would be answering from data that is known to be stale.
+  if (asked) {
+    return askedRefusal;
+  }
   if (!agent.online) {
     return 'The agent must be connected to be told';
   }
@@ -34,3 +45,22 @@ export function updateRefusal(
   }
   return null;
 }
+
+/**
+ * Why a button is disabled after it has been clicked.
+ *
+ * An update takes tens of seconds: the agent fetches thirty megabytes, stages
+ * the jar, exits, and the service manager restarts it. For all of that the row
+ * on screen still says what it said before the click - connected, on the old
+ * version - so the button would look as clickable as it did the first time.
+ *
+ * Clicking it again is not harmless. The second instruction arrives while the
+ * first download is in flight or while the agent is restarting, and on a site
+ * with one camera every restart is a gap in the only recording anyone has.
+ *
+ * So the button stays disabled until the rows are loaded again, which is the
+ * first moment this page has anything new to decide from. It says to refresh
+ * rather than merely going grey, because a greyed control with no explanation
+ * invites the same question the tooltip exists to answer.
+ */
+export const askedRefusal = 'Asked to update — refresh to see whether it took';
