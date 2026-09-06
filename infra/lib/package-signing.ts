@@ -110,7 +110,11 @@ export class PackageSigning extends Construct {
 
     // Anchored on this key's ARN as well as the event name, so another
     // asymmetric key added later cannot quietly start paging this topic.
-    const signings = new logs.MetricFilter(this, 'SigningUse', {
+    // Not 'SigningUse': that id belonged to the EventBridge rule this
+    // replaces, and CloudFormation refuses to change a resource's type under
+    // an existing logical id. Reusing it fails the deploy rather than the
+    // synth, which is a slower way to find out.
+    const signings = new logs.MetricFilter(this, 'SigningUseFilter', {
       logGroup: trailLogs,
       metricNamespace: 'CamStream',
       metricName: 'ReleaseKeySignings',
