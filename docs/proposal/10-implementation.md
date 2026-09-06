@@ -75,56 +75,57 @@ the new one's discovery, and that is where the migration effort should go.
 per-camera concurrency, and the supervision model above is built on modern
 concurrency primitives. There is no plan to back-port it to 8.
 
-### 2.2 Publishing is continuous, and that is costed honestly
+### 2.2 Publishing is on demand, with no margin hours
 
-You sync exam shift hours to agents and publish continuously through shift plus
-margin, because the margin is what stops an observer waiting when they open a
-camera. That requirement is respected here rather than assumed away.
+A camera is published only while somebody is watching it. There are no shift
+hours synced to agents, no margin, and no stream running for an audience that
+does not exist.
 
-The consequence is that publishing cost is fixed — ~$59,600/year across your
-exam calendar, which is **92% of the entire bill** (`20-cost.md` §5). It does
-not vary with viewers at all; all viewing together is 6%. Two things make that
-affordable:
+This is the largest change from the current platform and it is worth being
+precise about why it is not a compromise:
 
-- **10-second segments, kept deliberately.** This project defaults to 4 s, and
-  carrying that default across unexamined would cost **$89,424 a year**. Short
-  segments exist here to shorten the wait when a viewer opens a camera that is
-  not running; you pre-roll with a margin, so that wait does not exist and the
-  money would buy nothing. `20-cost.md` §3.1.
-- **Shift-bounded publishing.** Already how you operate. It is the difference
-  between 120–240 active days a year and 365.
+- **It is cheaper by roughly twentyfold.** Published camera-hours become
+  viewer-stream-hours rather than camera-count × shift-hours.
+- **It is a better viewer experience.** A viewer who starts their own stream
+  sits at the live edge — about six seconds behind — where a viewer joining a
+  continuously running stream is governed by the three-target-duration rule and
+  sits thirty seconds behind. `15-segments.md` §4.
 
-Because publishing dominates so completely, the highest-value optimisation is on
-the write path and nowhere else: synthesising the playlist at read time removes
-half of all PUTs — **~$29,800, about 46% of the total** — and changes nothing an
-observer can perceive.
+**The requirement is that nobody waits for the feed**, and that is met by
+anticipation rather than by leaving streams running:
 
-**Take the first segment, not the steady-state one.** The one setting worth
-importing from this project is `-hls_init_time 1`, which cuts the *first*
-segment at the first keyframe rather than at the full target duration. Measured
-against a 2-second-GOP camera it took time-to-first-frame from 6.4 s to 3.0 s,
-and at a 10-second target the effect is larger. That is what could shorten your
-margin hours, and it costs one extra short object per stream start.
+| Mechanism | Effect |
+|---|---|
+| Warm on **centre open**, not tile click | The grid renders into streams that are already running. Absorbs the whole 3 s |
+| **Linger** 30–60 s after the last viewer | Flicking away and back is instant |
+| Warm an observer's **assigned centres at login** | They are assigned to a few; those are what they open |
 
-**Enforce shift windows server-side as well as in the agent.** The agent
-stopping at the end of a shift is what bounds the bill; if that is the only
-control, one agent with a wrong clock publishes overnight and nobody notices
-until the invoice. The control plane should refuse desired state outside a
-centre's shift window. This is a cheap guard and it is the one cost control that
-is genuinely load-bearing.
+Measured cold start is 3.0 s to first frame with `hls_init_time 1`, dominated by
+RTSP negotiation and the wait for a keyframe. Warming removes it from the user's
+perception entirely; without warming, 3 s is the floor and no encoder setting
+gets below it.
+
+**Segment length follows from on-demand, and it is short.** 2 seconds, because a
+player that starts on the only available segment runs dry for `D − d0` while the
+next one is produced — a 10-second steady segment gives a picture in four
+seconds and then freezes it for eight. `15-segments.md` §4.
+
+**Enforce stream stop server-side.** Under on-demand, "the stream ends when its
+last viewer leaves" is what bounds the entire bill. If that lives only in the
+agent, one stuck viewer session publishes overnight. It is the one cost control
+that is genuinely load-bearing.
 
 ### 2.3 Deletion, which is your current operational pain
 
 A single-threaded `find -mtime` that cannot finish during peak is not a tuning
-problem. At your national-exam peak of 20,000 cameras and 10-second segments the
-estate produces `20,000 × 360 = 7,200,000` objects an hour, and a 2-minute window
-means deleting them at the same rate — 2 million unlinks an hour, on a file
-system that schedules deletes below the reads it is also serving.
+problem. It is what happens when a POSIX file system is used as a high-churn
+ring buffer while it is also serving every viewer, and deletes are scheduled
+below reads.
 
 On S3 this operation does not exist as a problem:
 
 - **DELETE requests are free.** Not cheap — free. There is no cost line for
-  removing 7 million objects an hour.
+  removing objects at any rate.
 - **There is no sweep.** The agent already tracks its own sliding window to
   write the playlist; deleting the object that just fell out of it is the same
   loop, not a separate scanner racing the writers.
@@ -133,28 +134,27 @@ On S3 this operation does not exist as a problem:
 - **A one-day lifecycle rule is the backstop** for objects orphaned by a crash,
   which is the only case the agent cannot clean up itself.
 
-Resident storage across the whole estate at a 2-minute window is about **33 GB**
-at the 20,000-camera peak. Fifty EFS file systems are replaced by an
-object-storage line too small to appear on a bill.
+On-demand publishing shrinks it again, because only watched cameras hold
+segments at all: a few hundred megabytes across the estate at peak. Fifty EFS
+file systems are replaced by an object-storage line too small to appear on a
+bill.
 
 ### Segment length
 
-| | This project | Your platform | Proposal |
-|---|---|---|---|
-| Steady state | 4 s | 10 s | **10 s or longer** — yours, see below |
-| First segment | 1 s (`hls_init_time`) | 10 s | **1 s** — ours |
+| | Current platform | Proposal |
+|---|---|---|
+| Steady state | 10 s | **2 s** |
+| First segment | 10 s | **1 s** (`hls_init_time`) |
+| Publishing | Continuous, shift + margin | **On demand** |
 
-**Do not ramp between them.** A growing segment leaves no gap — segments are
-contiguous and `#EXTINF` declares each real duration — but a ramp only helps
-when a viewer may arrive at any moment. You pre-roll while nobody watches and
-then observers watch continuously, so the right answer is a constant.
+Short segments are a consequence of on-demand, not a preference. A player that
+starts on the only available segment runs dry for `D − d0` while the next one is
+made, so a 10-second steady segment stalls it for eight seconds immediately
+after the first frame.
 
-**Which constant is a latency decision worth ~$10,000 per five seconds.** A
-viewer sits about three segments behind live, so 10 s is ~30 s behind and 20 s
-is ~60 s. The floor is that a player needs three segments in the playlist to
-start. Your 2-minute retention window is an EFS artefact rather than a
-requirement — on S3 it is free to widen — so latency is the only real limit.
-`20-cost.md` §3.3.
+**Ramping between lengths does not help.** Playback consumes media at the rate
+production creates it, so a growing segment never accumulates buffer — it only
+postpones the same arithmetic. `15-segments.md` §4.
 
 Both projects chose correctly for their own model, and the proposal takes one
 setting from each. The agent already supports both: `segmentDurationMs` is
@@ -185,14 +185,14 @@ s3://<live-bucket>/
 the IAM boundary and the CloudFront cookie scope. One naming decision doing
 three jobs is worth the slight ugliness.
 
-**Lifecycle:** the agent deletes its own segments as the 2-minute window rolls
-— DELETE is free and needs no sweep. A 1-day lifecycle rule is the backstop for
-objects orphaned by a crash, which is the only case the agent cannot clean up
-itself. S3 lifecycle granularity is one day, so it can only ever be a backstop;
-the window itself has to be the agent's job.
+**Lifecycle:** the agent deletes its own segments as the playlist window rolls
+— DELETE is free and needs no sweep. At 2-second segments and a four-segment
+window that is about 8 seconds of media per watched stream. A 1-day lifecycle
+rule is the backstop for objects orphaned by a crash, which is the only case the
+agent cannot clean up itself; S3 lifecycle granularity is one day, so it can
+only ever be a backstop.
 
-**There is no archive in this path**, and today you do not keep one — files are
-deleted after two minutes. If retention is ever required, it is a *separate*
+**There is no archive in this path**, and today you do not keep one. If retention is ever required, it is a *separate*
 path: the agent writes 5-minute MP4 objects to a different prefix and a
 different storage class (Glacier Instant Retrieval), not HLS segments. Writing
 archive as segments would cost roughly 30× more in requests for identical bytes.

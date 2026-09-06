@@ -31,17 +31,19 @@ operational knowledge about cameras, not the code.
 
 **The delete problem stops existing.** The single-threaded `find` that cannot
 keep up at peak has no equivalent here. The agent removes its own objects as the
-2-minute window rolls, S3 charges nothing for DELETE, and there is no queue to
-fall behind on. Fifty file systems become about 33 GB resident.
+playlist window rolls, S3 charges nothing for DELETE, and there is no queue to
+fall behind on. Fifty file systems become a few hundred megabytes.
 
-**Cost changes shape, not just size.** ~$65,000/year against an estimated
-~$314k, or ~$35,200 with one read-path optimisation. The important part is that
-the current bill is identical in June and on exam morning, because it is
-provisioned capacity sized for two national exam days.
+**Cost changes shape, not just size.** ~$13,700–22,700/year against an estimated
+~$314k, because nothing is published unless somebody is watching. The current
+bill is identical in June and on exam morning; this one is near zero between
+exams.
 
-**S3 PUT requests are 92% of the bill.** Not bandwidth, not storage. Viewing is
-6%. Every instinct about video platforms says bandwidth dominates; here it does
-not, and that redirects the entire optimisation conversation to the write path.
+**On demand is better *and* cheaper, which is unusual.** A viewer who starts
+their own stream sits ~6 s behind live. A viewer joining a stream that has been
+running all shift is governed by HLS's three-target-duration rule and sits ~30 s
+behind. Dropping margin hours is worth $42,000–51,000 a year *and* improves the
+experience.
 
 **The security boundary is the thing name.** Every agent's credentials, topics
 and S3 prefix are scoped by `${credentials-iot:ThingName}`. A compromised centre

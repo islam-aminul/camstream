@@ -36,9 +36,10 @@ aws s3api put-public-access-block \
     BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
 ```
 
-**The lifecycle backstop.** The agent deletes its own segments as the 2-minute
-window rolls; this only catches objects orphaned by a crash. One day is the
-finest granularity S3 offers, which is why it cannot *be* the window.
+**The lifecycle backstop.** The agent deletes its own segments as the playlist
+window rolls — about 8 seconds of media per watched stream at 2-second segments.
+This rule only catches objects orphaned by a crash. One day is the finest
+granularity S3 offers, which is why it cannot *be* the window.
 
 ```bash
 cat > /tmp/lifecycle.json <<'JSON'
@@ -55,8 +56,9 @@ aws s3api put-bucket-lifecycle-configuration \
   --lifecycle-configuration file:///tmp/lifecycle.json
 ```
 
-**Cost:** storage only. At a 2-minute window across 20,000 cameras, ~33 GB
-resident ≈ $1/month. Ingest is free; DELETE is free.
+**Cost:** storage only. Under on-demand publishing only watched cameras hold
+segments, so the resident set is a few hundred megabytes at peak — cents a
+month. Ingest is free; DELETE is free.
 
 ---
 

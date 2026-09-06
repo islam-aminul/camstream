@@ -77,9 +77,10 @@ at the edge, close to the viewer. Authorisation is a signed cookie, checked at
 the edge, so an unauthorised request is refused before it reaches anything you
 pay for per request.
 
-**Cost becomes proportional to use rather than to peak.** Roughly $65,000 a
-year against an estimated $314,000, and $35,200 with one optimisation. Between
-exams the platform costs approximately nothing. During a shift it costs the segments
+**Cost becomes proportional to use rather than to peak.** Roughly $13,700 to
+$22,700 a year against an estimated $314,000 — because nothing is published
+unless somebody is watching it. Between exams the platform costs approximately
+nothing. During a shift it costs the segments
 actually written and the bytes actually watched. This is structural, not a
 saving found by tuning.
 
@@ -87,8 +88,9 @@ saving found by tuning.
 own objects as the two-minute window rolls, S3 charges nothing at all for DELETE
 requests, and there is no queue to fall behind on. A one-day lifecycle rule sits
 underneath as a backstop for anything a crash orphaned. Across the whole estate
-the resident two-minute window is about 33 GB at peak — the fifty file systems are
-replaced by roughly a pound a year of object storage.
+and under on-demand publishing only watched cameras hold segments at all — a few
+hundred megabytes across the estate at peak. Fifty file systems replaced by an
+object-storage line too small to notice.
 
 ## How the agent is trusted without a shared secret
 
@@ -164,17 +166,15 @@ exhausted, and signed remote update so a fix does not need a site visit. See
 whether a centre is watchable on exam morning.
 
 **The request cost is the whole bill, and it is worth knowing that up front.**
-S3 `PUT` requests are **92%** of the projected cost — more than bandwidth,
-storage and compute combined, and by a wide margin. Viewing is 6%. That is
-counter-intuitive enough that it is the first thing to say in a design review,
-because every instinct about video platforms says bandwidth dominates, and here
-it does not.
+S3 `PUT` requests are still the largest single line — about 60% — but the
+number that matters is that **publishing on demand shrinks the base twentyfold**.
+Dropping margin hours is worth $42,000–51,000 a year on its own.
 
-It follows that the only optimisations worth discussing are on the write path,
-and the largest of them is **segment length**. Keeping your 10 seconds rather
-than adopting this project's 4-second default is worth $89,424 a year — more
-than every other optimisation combined. Synthesising playlists at read time is
-worth another 46%, and changes nothing an observer can see.
+The part worth saying out loud in a review is that it is **not a
+cost-versus-quality trade**. A viewer who starts their own stream sits about six
+seconds behind live; a viewer joining a continuously running stream is governed
+by HLS's three-target-duration rule and sits thirty seconds behind. On demand is
+both cheaper and better, which is unusual enough to be worth stating twice.
 
 ## Why this shape rather than MediaLive / IVS / a managed service
 

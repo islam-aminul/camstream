@@ -105,84 +105,61 @@ built and verified end to end in the reference implementation.
 ## From finance
 
 **"What does it cost?"**
-~$65,000/year across your whole exam calendar, or ~$35,200 with one read-path
-optimisation, against an estimated ~$314k for the current fleet. But the ratio
-is not the point — the current bill is identical in June and on exam morning,
-because it is sized for two national exam days. (`20-cost.md` §5.)
+~$13,700/year at 4-second segments, ~$22,700 at 2-second, against an estimated
+~$314k for the current fleet. The gap is not efficiency — it is that nothing is
+published unless somebody is watching it. (`20-cost.md` §5.)
 
 **"Your comparison numbers for our platform are guesses."**
 They are, and they are labelled as such. Replace them with actuals. If those EC2
 instances are on 3-year Savings Plans the current figure may be ~40% lower — in
 which case the honest recommendation is to migrate at renewal rather than now.
 
+**"Where does the saving actually come from?"**
+Dropping margin hours. Publishing continuously through shift plus margin costs
+$65,016 a year at 10-second segments; publishing only what is watched costs
+$13,700–22,700. That single change is worth **$42,000–51,000**, and it is worth
+more than every encoder setting in the document combined.
+
+**"So we are trading viewer experience for cost?"**
+No — the opposite, and this is the point most worth making. A viewer who starts
+their own stream sits about **6 seconds** behind live. A viewer joining a stream
+that has been running all shift is governed by HLS's rule against starting
+closer than three target durations to the live edge, and sits about **30 seconds**
+behind. On demand is cheaper *and* fresher. Margin hours buy a permanent delay
+in order to avoid a three-second wait.
+
+**"Won't observers wait three seconds every time they open a camera?"**
+Only if nothing anticipates them. Warm the streams when an observer opens a
+**centre** rather than when they click a tile — by the time the grid renders,
+they are running — and keep a stream alive 30–60 s after the last viewer so
+flicking back is instant. With warming the perceived wait is zero. Without it,
+3 s is the floor: RTSP negotiation and the wait for a keyframe dominate, and no
+encoder setting removes them.
+
 **"What's the biggest cost risk?"**
-My reading of your exam calendar. Publishing is 92% of the bill and scales with
-cameras × hours × days, and the two monthly patterns are 92% of the total
-between them. If those 10 days a month are really 15, add ~$28,000. Everything
-else is noise by comparison.
+Viewer concurrency, which under on-demand is now the dominant variable rather
+than an afterthought. **Count streams on screens, not people** — one observer
+with a 25-tile grid is 25 streams, not one. If 500 concurrent streams is really
+1,500, scenario A roughly triples.
 
-**"Surely bandwidth is the big number?"**
-No, and this is the most useful thing in the costing. S3 **PUT requests are 92%**
-of the bill; all viewing together is 6%. You publish 13–50 cameras for every one
-being watched, so the write path dominates completely. Every instinct says
-bandwidth; the arithmetic says requests.
+**"Why not longer segments to cut requests further?"**
+Because on-demand start breaks. A player that begins on the only available
+segment holds `d0` seconds of media while the next takes `D` seconds to make, so
+it runs dry for `D − d0`. Ten-second segments give a picture in four seconds and
+then freeze it for eight — worse than waiting, because a stutter reads as broken
+where a wait reads as loading. (`15-segments.md` §4.)
 
-**"So should we argue about viewer counts?"**
-No — and it is worth saying so early to save the meeting. Tripling every viewer
-number adds about $8,000 to a $65,000 bill.
+**"Could we ramp the segment length up instead?"**
+No, and it is worth understanding why: playback consumes media at exactly the
+rate production creates it, so a growing segment never accumulates buffer. It
+only postpones the same arithmetic. Whatever the first few segments do, the
+steady-state length decides whether the player runs dry.
 
-**"Any way this costs more than expected?"**
-Three: my calendar assumptions being wrong (above); anyone putting 1080p in a
-grid, which is 20× per tile; and shift windows not enforced server-side, so an
-agent with a wrong clock publishes overnight. The third is the one that is
-genuinely load-bearing, and it is one guard in the control plane.
-
-**"Your reference system uses 4-second segments. Are we switching to those?"**
-No — and this is the most expensive question in the document. Keep your 10 s.
-The 4 s default exists because that project publishes *on demand*, so segment
-length sits directly in the wait when a viewer opens a camera. You pre-roll with
-a margin, so that wait does not exist. Carrying the default across would cost
-**$89,424 a year** for nothing. (`20-cost.md` §3.1.)
-
-**"Could we grow the segment gradually — would that leave gaps in the video?"**
-No gaps. Segments are contiguous whatever their length, `#EXTINF` declares each
-one's real duration, and players handle a playlist of mixed durations — this
-project ramps 1 s to 4 s in production and the playlist reads `#EXTINF:3.274`
-then `6.547` on a live camera. But ramping is the wrong shape for your model:
-you pre-roll while nobody watches, then observers watch continuously, so there
-is no moment when a growing segment is the right answer. Pick a constant
-instead. (`20-cost.md` §3.2.)
-
-**"Then how long should the segments be?"**
-It is a latency question, not a technical one, and it is worth ~$10,000 per five
-seconds. A viewer sits about three segments behind live: 10 s is ~30 s behind
-and costs $65,016; 15 s is ~45 s behind and costs $44,893; 20 s is ~60 s behind
-and costs $34,832. Sixty-second segments break playback outright, because a
-player needs three segments in the playlist and your 2-minute window would hold
-two. **Ask the invigilation team how far behind live an observer may be** — that
-single answer is worth more than anything decided in the design review.
-
-**"Doesn't the 2-minute retention window limit how long segments can be?"**
-Only because it is an EFS artefact. It was chosen because the delete sweep could
-not keep up with more; on S3 the window costs 33 GB and deleting is free, so
-widening it to four minutes to hold twelve 20-second segments costs about 66 GB.
-Do not carry the 2-minute figure across as if it were a requirement.
-
-**"Is there anything in their settings worth taking?"**
-One thing: `-hls_init_time 1`, which cuts the *first* segment at the first
-keyframe instead of at the full target duration. Measured on a 2-second-GOP
-camera it took time-to-first-frame from 6.4 s to 3.0 s, and the effect is larger
-at a 10-second target. Its value is that a stream becomes watchable sooner after
-*any* restart — every agent update, every network recovery — not only at shift
-start. As a margin saving it is small: ten minutes off each shift-day is about
-$1,128 a year.
-
-**"What is the cheapest thing we can do to reduce it?"**
-Synthesise the HLS playlist at read time with a CloudFront Function instead of
-rewriting it on every segment. Half of all PUTs are 1 KB playlist rewrites, so
-this removes **~$29,800 — about 46% of the entire bill** — and changes nothing
-an observer can perceive. One function, on the read path, at $0.10 per million
-invocations.
+**"What is the cheapest thing we can do to reduce it further?"**
+Synthesise the playlist at read time with a CloudFront Function instead of
+rewriting it per segment — half of all PUTs are small playlist rewrites, so it
+removes ~$7,000 at 2-second segments. Worth doing, but no longer the headline it
+was under continuous publishing.
 
 **"What's the migration cost?"**
 Not modelled, and it is a programme cost rather than an infrastructure one.
@@ -195,9 +172,10 @@ real people. Budget it separately and honestly.
 
 **"Our delete sweep can't keep up. Does this fix it?"**
 It removes the operation. There is no sweep: the agent deletes its own objects
-as the 2-minute window rolls, S3 charges **nothing at all** for DELETE, and
+as the playlist window rolls, S3 charges **nothing at all** for DELETE, and
 there is no queue to fall behind on. A one-day lifecycle rule catches anything
-orphaned by a crash. 33 GB resident across the whole estate at peak.
+orphaned by a crash. Under on-demand only watched cameras hold segments at all,
+so the resident set is a few hundred megabytes across the estate at peak.
 
 **"How do we know a centre is unwell before an exam?"**
 Agents heartbeat health — CPU, memory, disk, uplink throughput, per-task health,
