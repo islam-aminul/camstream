@@ -292,7 +292,88 @@ sub-second latency — but it is the right answer if latency ever becomes a hard
 requirement, and it is a better place to spend effort than a hand-rolled
 handover.
 
-## 7. Making "no wait" true rather than merely fast
+## 7. Is the playlist synthesised, and would that help the start?
+
+**No, it is not.** ffmpeg writes `index.m3u8` and the agent uploads it, once per
+segment. Synthesising it at read time comes up twice in this proposal — as a
+cost saving and as a latency lever — and the two cases have different answers.
+
+### Where the three seconds actually goes
+
+```
+  0.0 s  ────────────  ffmpeg starts, RTSP negotiation
+  1.2 s  ────          first keyframe arrives
+  2.0 s  ──            first segment written and uploaded
+       + up to 2.0 s   waiting for the player's next manifest poll   <- avoidable
+       + ~1.0 s        fetch playlist, fetch init, fetch segment, decode
+  ────────────────────────────────────────────────────────────────
+  3.0 – 5.0 s to first frame
+```
+
+The first 2.0 seconds is RTSP negotiation and waiting for a keyframe. **Nothing
+about playlists touches it.** Only warming (§8) removes it, by spending it
+before the viewer asks.
+
+The avoidable part is the middle line, and it is larger than the synthesis
+question. On a cold start the manifest legitimately does not exist yet, so the
+player 404s and retries — and in this project's player that retry is a **fixed
+2000 ms**. If the first segment lands just after a poll, two seconds are simply
+lost. The measured "3.0 s" is the lucky end of a 3.0–5.0 s range.
+
+### So the ranking is not what the question implies
+
+| Fix | Gain | Cost |
+|---|---|---|
+| **Poll faster while starting** (250–400 ms, backing off) | up to **1.75 s** | two lines of player code |
+| **Warm on centre open** (§8) | the whole 3 s, from perception | one product decision |
+| Agent writes a placeholder playlist at stream start | ~0.3 s, removes the 404 entirely | one PUT per stream start (~$24/yr) |
+| Synthesise at the edge | ~0.2 s beyond the above | a Lambda on the hot path |
+
+**Synthesis is last for latency**, because everything it would fix is fixed more
+cheaply by the three rows above it. The 404-and-retry cycle is the problem, and
+you do not need a Lambda to stop 404ing — you need the agent to write a playlist
+a moment earlier, or the player to ask a moment more often.
+
+### Synthesis for cost is a different question, and the answer is yes-but
+
+Half of all PUTs are playlist rewrites of a few hundred bytes. Removing them:
+
+```
+  playlist PUTs saved   784,800 camera-hours × 1,800 / 1,000 × $0.005 = $7,063
+```
+
+The catch is *what* does the synthesising:
+
+- **CloudFront Functions** cost almost nothing — 1.18 billion playlist requests
+  a year is about **$118** — but they **cannot make network calls**. They cannot
+  list a bucket or read a database, so they cannot know which segments actually
+  exist. Synthesising from a naming convention alone means eventually emitting a
+  playlist that references a segment that is not there, which the player sees as
+  a 404 mid-stream.
+- **Lambda@Edge** can do I/O: about **$711/year** at this request volume
+  including duration. Net saving roughly **$6,350**.
+
+So it pays for itself about ninefold. The reason it is still not proposed for
+day one is that it puts a Lambda in front of **every playlist request on the
+platform**. If it fails, every stream fails, and it fails during an exam rather
+than during testing. Writing a small file to S3 has no such failure mode.
+
+**Revisit it once the platform is boring**, not while it is being built.
+
+### The real latency version of this idea is LL-HLS
+
+If synthesis is wanted specifically for start-up latency, the standardised form
+is Low-Latency HLS: the server holds a playlist request open until the next
+segment exists (`_HLS_msn` blocking reload) and advertises partial segments
+before they close. That removes polling delay entirely rather than shortening
+it, and it is a real specification with CloudFront support.
+
+It is not proposed here because it multiplies request count and invigilation
+does not need sub-second latency. But if latency ever becomes a hard
+requirement, LL-HLS is where to spend the effort — not on a hand-rolled
+synthesiser, and not on the two-stream handover in §6.
+
+## 8. Making "no wait" true rather than merely fast
 
 Three seconds is good; zero is better, and it comes from anticipating the click
 rather than tuning the encoder.
@@ -313,7 +394,7 @@ those are the ones they will open.
 With warming the 3 seconds is absorbed before the user asks for anything and the
 perceived wait is zero. Without it, 3 s is the floor.
 
-## 8. Summary
+## 9. Summary
 
 | Setting | Value | Why |
 |---|---|---|

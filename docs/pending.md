@@ -233,6 +233,41 @@ measured" and "absent because the platform would not say" identically, so an
 idle agent looks broken. That is a display fix, not an agent fix: say *no
 uploads in this interval* rather than showing a dash.
 
+### The player's manifest retry is a fixed 2 s, and it costs up to 2 s of start-up
+
+`web/src/player/attach.ts` retries a missing manifest on a **fixed 2000 ms**
+timer. On an on-demand start the manifest legitimately does not exist for the
+first ~2 s — RTSP negotiation, then waiting for a keyframe, then the first
+segment — so the player always 404s at least once and then waits a full two
+seconds before asking again.
+
+If the first segment lands just *after* a poll, that entire two seconds is
+wasted. Time to first frame is therefore not the 3.0 s measured, but a
+**3.0–5.0 s range**, and which end you get is luck.
+
+The measurement quoted throughout `docs/proposal/` — 3.0 s with
+`hls_init_time`, 6.4 s without — was taken at the lucky end. The *comparison*
+stands, because both were measured the same way, but the absolute figure is
+optimistic and should be requoted once this is fixed.
+
+**The fix is small:** poll every ~250–400 ms for the first few seconds, then
+back off to the current cadence. A handful of extra 404s against CloudFront
+costs essentially nothing, and it removes up to 1.75 s from every on-demand
+start. Worth doing before any further work on segment length, because it is
+larger than most of the differences being argued about there.
+
+Two adjacent options, cheaper than they sound and worth considering together:
+
+- **Have the agent write a placeholder playlist the moment it starts ffmpeg**,
+  so there is no 404 at all. One extra PUT per stream start. Needs testing —
+  hls.js may report an empty live playlist as `levelEmptyError` rather than
+  waiting politely.
+- **Warm on demand-declaration rather than on tile mount**, so the RTSP connect
+  overlaps the console's own render instead of following it.
+
+Found on 2026-09-06 while answering a question about whether synthesising the
+playlist would help start-up. It would, a little — but far less than this.
+
 ### The restart gap, and why the obvious fix is wrong
 
 An agent answers "ignoring request for unknown camera" for the first 15-30
