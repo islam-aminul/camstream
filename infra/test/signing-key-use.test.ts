@@ -19,7 +19,18 @@ import { resolveConfig } from '../lib/config';
  * A signature made by anyone but the release path would have left no trace
  * anybody would see.
  */
+/** Synthesised once: the template is a pure function of the context, and
+ *  bundling every lambda per assertion is what made this file a minute long. */
+let template: Template | undefined;
+
 function synth() {
+  if (!template) {
+    template = synthesise();
+  }
+  return template;
+}
+
+function synthesise() {
   const app = new App({
     context: {
       'camstream:account': '123456789012',
