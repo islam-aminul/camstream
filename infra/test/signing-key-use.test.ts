@@ -45,76 +45,85 @@ function synth() {
   return Template.fromStack(stack);
 }
 
-/** The one rule that watches the signing key. */
-function signingRule(template: Template): Record<string, unknown> {
-  const rules = template.findResources('AWS::Events::Rule', {
-    Properties: {
-      EventPattern: Match.objectLike({ source: ['aws.kms'] }),
-    },
-  });
-  const found = Object.values(rules);
+/** The metric filter that counts signings. */
+function signingFilter(template: Template): Record<string, unknown> {
+  const filters = template.findResources('AWS::Logs::MetricFilter');
+  const found = Object.values(filters)
+    .map((f) => (f as { Properties: Record<string, unknown> }).Properties)
+    .filter((p) => JSON.stringify(p).includes('ReleaseKeySignings'));
   expect(found).toHaveLength(1);
-  return (found[0] as { Properties: Record<string, unknown> }).Properties;
+  return found[0];
 }
 
 describe('watching the release signing key', () => {
-  it('notices Sign, on the default bus, with no trail needed', () => {
-    // KMS logs its cryptographic operations as CloudTrail management events,
-    // which reach the default event bus without a trail existing. A trail
-    // would mean an S3 bucket, a log group and a standing cost for the same
-    // information.
-    const pattern = signingRule(synth()).EventPattern as Record<string, unknown>;
-    expect(pattern['detail-type']).toEqual(['AWS API Call via CloudTrail']);
-    const detail = pattern.detail as Record<string, unknown>;
-    expect(detail.eventName).toEqual(['Sign']);
-    expect(detail.eventSource).toEqual(['kms.amazonaws.com']);
+  it('uses a trail into logs, because EventBridge cannot see this event', () => {
+    // Tried EventBridge first and it does not work. kms:Sign is a management
+    // event and carries the key ARN in `resources`, but it is flagged
+    // readOnly: true, and EventBridge does not deliver read-only management
+    // events. The rule was deployed, the key was signed with, and thirty
+    // minutes later TriggeredRules had no data points at all.
+    //
+    // This is pinned as a test rather than only as a comment because the
+    // EventBridge version looks more elegant and someone will propose it
+    // again - including me, if I forget.
+    const template = synth();
+    template.resourceCountIs('AWS::CloudTrail::Trail', 1);
+    const rules = template.findResources('AWS::Events::Rule', {
+      Properties: { EventPattern: Match.objectLike({ source: ['aws.kms'] }) },
+    });
+    expect(Object.keys(rules)).toHaveLength(0);
   });
 
-  it('watches only Sign, not Verify or GetPublicKey', () => {
+  it('counts Sign on this key, and nothing else', () => {
+    const pattern = JSON.stringify(signingFilter(synth()).FilterPattern);
+    expect(pattern).toContain('Sign');
+    expect(pattern).toContain('kms.amazonaws.com');
+    // Anchored on the key ARN, so another asymmetric key added later cannot
+    // quietly start paging this topic.
+    expect(pattern).toContain('resources[0].ARN');
+  });
+
+  it('does not count Verify or GetPublicKey', () => {
     // Verify is never called by anything: agents check locally against the
     // public key compiled into them. GetPublicKey is how that key gets into a
-    // build, and is a read of something already published in the repository.
-    // Including either would make this alert routine, and a routine alert is
-    // one nobody reads on the day it matters.
-    const detail = (signingRule(synth()).EventPattern as Record<string, unknown>)
-      .detail as Record<string, unknown>;
-    expect(detail.eventName).not.toContain('Verify');
-    expect(detail.eventName).not.toContain('GetPublicKey');
+    // build, and is a read of something already committed to this repository.
+    // Either would make the alert routine, and a routine alert is one nobody
+    // reads on the day it matters.
+    const pattern = JSON.stringify(signingFilter(synth()).FilterPattern);
+    expect(pattern).not.toContain('Verify');
+    expect(pattern).not.toContain('GetPublicKey');
   });
 
-  it('is scoped to the release key rather than every key in the account', () => {
-    // Other keys here are symmetric and cannot be signed with at all, so this
-    // is belt and braces - but an unscoped rule would start paging about
-    // somebody else's key the day an asymmetric one is added, and an alert
-    // that fires for unrelated reasons stops being read.
-    const detail = (signingRule(synth()).EventPattern as Record<string, unknown>)
-      .detail as Record<string, unknown>;
-    expect(detail.resources).toBeDefined();
-    expect(JSON.stringify(detail.resources)).toContain('ReleaseKey');
+  it('reports absence as zero, so it does not sit in INSUFFICIENT_DATA', () => {
+    // Nothing signing is the ordinary state between releases. Without a
+    // default the alarm would live in INSUFFICIENT_DATA and get muted by
+    // whoever is tired of looking at it - and then it is gone.
+    const transformation = (signingFilter(synth()).MetricTransformations as
+      { DefaultValue?: number }[])[0];
+    expect(transformation.DefaultValue).toBe(0);
   });
 
-  it('actually notifies the alarm topic', () => {
-    // The failure this whole file is guarding against is the one the alarms
-    // test found before: seven alarms publishing to a topic nobody was
-    // subscribed to. A rule with no target is the same mistake earlier in the
-    // chain.
-    const targets = signingRule(synth()).Targets as { Arn: unknown }[];
-    expect(targets).toHaveLength(1);
-    expect(JSON.stringify(targets[0].Arn)).toContain('AlarmTopic');
+  it('fires on a single signature, and tells the alarm topic', () => {
+    // One signature is the whole event. There is no suspicious rate to
+    // detect, and a threshold high enough to be quiet would also be high
+    // enough to miss the one that matters.
+    const alarms = synth().findResources('AWS::CloudWatch::Alarm');
+    const found = Object.values(alarms)
+      .map((a) => (a as { Properties: Record<string, unknown> }).Properties)
+      .filter((p) => JSON.stringify(p.MetricName ?? p).includes('ReleaseKeySignings'));
+    expect(found).toHaveLength(1);
+    expect(found[0].Threshold).toBe(1);
+    expect(found[0].ComparisonOperator).toBe('GreaterThanOrEqualToThreshold');
+    expect(JSON.stringify(found[0].AlarmActions)).toContain('AlarmTopic');
   });
 
-  it('says who signed, and when, in the message itself', () => {
+  it('says what to do about it in the alarm itself', () => {
     // An alert that only says "the key was used" sends somebody to CloudTrail
-    // to find the one thing they wanted to know. At three in the morning the
-    // difference between that and a name in the message is whether anybody
-    // bothers.
-    const targets = signingRule(synth()).Targets as { InputTransformer?: unknown }[];
-    const transformer = JSON.stringify(targets[0].InputTransformer);
-    expect(transformer).toContain('$.detail.userIdentity.arn');
-    expect(transformer).toContain('$.detail.eventTime');
-    expect(transformer).toContain('$.detail.sourceIPAddress');
-    // And the sentence that says what to do about it, which is the part
-    // somebody reads first.
-    expect(transformer).toContain('compromise of the');
+    // for the one thing they wanted to know.
+    const alarms = synth().findResources('AWS::CloudWatch::Alarm');
+    const found = Object.values(alarms)
+      .map((a) => (a as { Properties: Record<string, unknown> }).Properties)
+      .filter((p) => JSON.stringify(p).includes('ReleaseKeySignings'));
+    expect(found[0].AlarmDescription).toContain('compromise of the fleet update path');
   });
 });
