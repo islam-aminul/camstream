@@ -77,6 +77,11 @@ What it did not: `kms:Sign` on the release key is now the whole trust boundary
 for what the fleet will run. It should be held by the release path and nothing
 else, and it is worth an alarm on its use. The design is in `signing.md`.
 
+Verified on both agents on 2026-09-06 by driving the installed jar's own
+`Updater` against unsigned, foreign-signed and bit-flipped bundles — see
+`signing.md`. That check is `OnDeviceCheck` in the agent test sources and is
+the thing to re-run after a key rotation.
+
 One operational consequence, recorded because it will look like a bug the first
 time somebody hits it: **0.1.0 can no longer be installed remotely.** It is the
 one bundle in the downloads prefix published before signing existed, and every

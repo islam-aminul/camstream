@@ -130,6 +130,43 @@ dgst -sha256 -verify` — the same check the agent makes, from outside the agent
 All six verified. 0.1.1 through 0.1.3 carry signatures too; 0.1.0 does not, and
 is the one bundle this change makes unreachable.
 
+### Checked on the hardware, after shipping
+
+Unit tests prove the code refuses. They cannot prove the *artifact* refuses —
+the signing key is a resource inside the jar, packaging can lose it, and the
+symptom of a build that trusts nothing is silence until the next release.
+
+So `OnDeviceCheck` (in the agent's test sources, with a `main` rather than a
+`@Test`) is pointed at an installed jar and drives the real `Updater.install`.
+Run on 2026-09-06 against both agents, after they had taken 0.1.7:
+
+```
+                                     rpi4b (aarch64)   gate-house (Windows)
+the real published bundle is TRUSTED  TRUSTED  OK       TRUSTED  OK
+no signature is UNSIGNED              UNSIGNED OK       UNSIGNED OK
+a foreign signature is REJECTED       REJECTED OK       REJECTED OK
+one flipped bit is REJECTED           REJECTED OK       REJECTED OK
+an unsigned bundle                    not staged, no exit, not recorded
+a foreign-signed bundle               not staged, no exit, not recorded
+```
+
+The first row is the one that makes the rest mean anything: a jar that refused
+everything would pass every other line. Both machines run a jar with the same
+SHA-256, which is worth knowing — the Windows and Linux bundles differ, the jar
+inside them does not.
+
+It is safe to run against a live agent: it writes only under its own temporary
+directory and touches no network, no topic and not the running service. Worth
+running after a key rotation, which is the change that can strand a fleet
+silently — an agent trusting only the retired key works until the first bundle
+signed with the new one, and then refuses every update including the fix.
+
+An end-to-end version of the negative case — publishing an unsigned bundle and
+clicking update — was deliberately not done. It means putting a package the
+fleet must refuse into the live downloads prefix, which is a worse thing to
+have lying around than the evidence is worth, given the above exercises the
+same code on the same hardware.
+
 ### Where the escape hatch is
 
 There is no configuration flag to accept unsigned packages, deliberately. Such a
