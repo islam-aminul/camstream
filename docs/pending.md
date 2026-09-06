@@ -47,6 +47,56 @@ nothing can be sent to a customer until production access is requested. That is
 a support ticket, usually granted within a day, and worth raising early because
 it is refused more often for accounts with no sending history.
 
+### An agent does not recover from the laptop sleeping
+
+**Seen on 2026-09-06.** The Windows machine hosting `gate-house` slept
+overnight and woke at 08:19. MQTT reconnected within seconds and the console
+showed the agent connected — but every camera on the site read "Registered, but
+its agent has not reported it yet", including the one that had been streaming
+the night before.
+
+What the log shows, and it is all it shows:
+
+```
+08:19:41 WARN  MQTT connection interrupted: socket not connected.
+08:19:47 WARN  could not send report: IllegalStateException:
+               Could not obtain AWS credentials for acme-ltd--hq-north--gate-house
+08:19:56 INFO  MQTT connection resumed (sessionPresent=false)
+08:19:56 WARN  could not send report: ... Could not obtain AWS credentials ...
+08:19:56 WARN  could not fetch configuration: ... Could not obtain AWS credentials ...
+```
+
+And then nothing at all for twenty-six minutes, until the service was
+restarted, at which point it recovered immediately and completely: discovery
+found the camera, configuration applied, the report went through.
+
+**What is established.** The agent could not obtain AWS credentials after the
+resume; `lastReportAt` stayed at the previous evening while `connected` stayed
+true, which is what put the misleading message on every camera; and it did not
+recover on its own in twenty-six minutes.
+
+**What is not.** Why the credential fetch kept failing, and whether the
+supervised tasks were still running at all. The obvious suspect is
+`IotCredentialsProvider`: it holds one `HttpClient` for the life of the process
+and `resolveCredentials()` is `synchronized` across the network call, so a
+fetch that hangs on a connection the resume has silently killed would block
+every task that needs credentials behind one monitor. That is a hypothesis and
+nothing more — the evidence that would have settled it was a thread dump, and
+the attempt to take one killed the JVM instead (a JDK 25 `jcmd` attaching to
+the bundled JRE 21), which is also what restarted the service and ended the
+incident.
+
+**Next time it happens, dump threads first**, with a matching JDK and against a
+service the current user can attach to. Until then this is not diagnosed and
+should not be "fixed" by guessing at the provider.
+
+One thing was fixed on the strength of it, because it is wrong independently of
+the cause: a heartbeat that cannot be published was logged at `debug`, so at the
+level the agent actually ships at, the log said nothing whatsoever about
+heartbeats — while the alarm that fired at 01:54 IST was *about* heartbeats
+stopping. It is a warning now, reported once per distinct fault with a count on
+recovery.
+
 ### No password reset
 
 There is no forgot-password flow in the console and none in the auth client. A

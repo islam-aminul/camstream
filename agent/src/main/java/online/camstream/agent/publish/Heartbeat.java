@@ -73,6 +73,10 @@ public final class Heartbeat {
     /** Sending on the edge itself, so a stream starting or stopping is never missed. */
     private int lastPublishing = -1;
 
+    /** The fault last reported, so an outage is one log line rather than many. */
+    private String failureReported;
+    private int failuresSinceReported;
+
     @FunctionalInterface
     public interface Publisher {
         void publish(String suffix, String payload);
@@ -162,10 +166,47 @@ public final class Heartbeat {
             publisher.publish("heartbeat", MAPPER.writeValueAsString(body));
             lastSent = now;
             lastPublishing = publishing;
+            recovered();
         } catch (Exception e) {
             // A failed publish must not stop the agent; the next tick retries.
-            log.debug("could not publish heartbeat: {}", e.toString());
+            failed(e);
         }
+    }
+
+    /**
+     * Says a heartbeat could not be sent — once per distinct fault.
+     *
+     * This was {@code log.debug}, which meant a fleet-wide alarm with nothing
+     * behind it. The heartbeat is what the "no agent has sent a heartbeat for
+     * forty-five minutes" alarm watches, so when it stops the alarm is the
+     * only thing that speaks, and the agent's own log at the shipped level is
+     * silent about the one subject the alarm is about. That happened on
+     * 2026-09-06: the alarm fired at 01:54 IST and the agent log had not a
+     * word about heartbeats anywhere in it.
+     *
+     * Reported once rather than every tick, because an outage lasting hours
+     * would otherwise write the same line hundreds of times and bury whatever
+     * caused it — the pattern HlsPublisher already uses for upload failures.
+     */
+    private void failed(Exception cause) {
+        String reason = cause.toString();
+        if (!reason.equals(failureReported)) {
+            // A different fault is a different event, even mid-outage.
+            log.warn("could not publish heartbeat: {}", reason);
+            failureReported = reason;
+            failuresSinceReported = 0;
+        }
+        failuresSinceReported++;
+    }
+
+    /** Says so, once, when heartbeats start being accepted again. */
+    private void recovered() {
+        if (failureReported == null) {
+            return;
+        }
+        log.info("heartbeat recovered after {} failure(s)", failuresSinceReported);
+        failureReported = null;
+        failuresSinceReported = 0;
     }
 
     /**
