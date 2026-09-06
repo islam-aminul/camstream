@@ -44,8 +44,13 @@ async function upgrade(agent: Agent, platform: Platform) {
   createError.value = null;
   try {
     const result = await api.upgradeAgent(agent.thingName, platform);
+    // Only on success. A failed instruction was never sent, so the button
+    // should stay live for a retry rather than telling the operator to refresh
+    // and find out - there is nothing to find out.
+    asked.value = new Set(asked.value).add(agent.thingName);
     notice.value = `Asked ${agent.siteName || agent.thingName} to install ${result.version}. `
-      + 'It restarts itself, and reappears here within a minute or two.';
+      + 'It restarts itself, and reappears here within a minute or two. '
+      + 'Refresh to see whether it took.';
   } catch (err) {
     createError.value = (err as Error).message;
   } finally {
@@ -112,6 +117,16 @@ const createError = ref<string | null>(null);
  */
 const currentVersion = ref<string | null>(null);
 
+/**
+ * Agents told to update since these rows were loaded.
+ *
+ * Cleared when rows arrive rather than when they are requested: until the new
+ * data is actually here, the button is still deciding from fields that predate
+ * the instruction, and clearing early would re-enable it against exactly the
+ * stale row the disabling exists for.
+ */
+const asked = ref(new Set<string>());
+
 const load = (params: { q?: string; cursor?: string; limit: number }) =>
   api.agents({
     tenantId: selection.tenantParam,
@@ -119,8 +134,14 @@ const load = (params: { q?: string; cursor?: string; limit: number }) =>
     ...params,
   }).then((page) => {
     currentVersion.value = page.currentVersion ?? null;
+    asked.value = new Set();
     return page;
   });
+
+/** Whether this agent's Update button is refused, and why. */
+function refusal(agent: Agent): string | null {
+  return refusalFor(agent, currentVersion.value, asked.value.has(agent.thingName));
+}
 
 
 const resetOn = computed(() => [selection.customerId, selection.premisesId]);
@@ -330,12 +351,12 @@ async function create() {
         <Column header="" style="width: 8rem">
           <template #body="{ data }">
             <Button
-              v-tooltip.top="refusalFor(data, currentVersion)
+              v-tooltip.top="refusal(data)
                 ?? 'Tell this agent to fetch the current build and restart into it'"
               size="small" text severity="secondary" label="Update"
               :loading="upgrading === data.thingName"
-              :disabled="refusalFor(data, currentVersion) !== null"
-              :title="refusalFor(data, currentVersion) ?? 'Install the current build and restart'"
+              :disabled="refusal(data) !== null"
+              :title="refusal(data) ?? 'Install the current build and restart'"
               @click="upgrade(data, platform)"
             />
           </template>

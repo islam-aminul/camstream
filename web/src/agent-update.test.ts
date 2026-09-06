@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { updateRefusal } from './agent-update';
+import { updateRefusal, askedRefusal } from './agent-update';
 
 /**
  * Offering an Update that would do nothing is not a harmless button.
@@ -66,5 +66,61 @@ describe('offering an update', () => {
     // that holds the guards in place.
     expect(updateRefusal({ online: true, agentVersion: null }, null)).toBeNull();
     expect(updateRefusal({ online: true }, null)).toBeNull();
+  });
+});
+
+/**
+ * A second click is the expensive one.
+ *
+ * An update takes tens of seconds - fetch thirty megabytes, stage the jar,
+ * exit, wait for the service manager - and for all of it the row on screen
+ * still says connected and still says the old version, because nothing has
+ * been reloaded. So the button looks exactly as clickable as it did before,
+ * and the operator who is not sure the first click registered clicks again.
+ *
+ * That was observed: a double click on a live agent sent two update
+ * instructions seconds apart. It was harmless only by luck - the second
+ * arrived while the agent was down for its restart and IoT does not queue for
+ * a disconnected device, so it was dropped. Had it landed a moment earlier it
+ * would have reached an agent mid-download.
+ *
+ * The fix is not to remember the click for a while and hope. It is to refuse
+ * until the page has something new to decide from, because that is the honest
+ * statement of what this page knows.
+ */
+describe('after an update has been asked for', () => {
+  it('refuses a second click on the same agent', () => {
+    expect(updateRefusal({ online: true, agentVersion: '0.1.0' }, '0.1.1', true))
+      .toBe(askedRefusal);
+  });
+
+  it('says to refresh rather than going silently grey', () => {
+    // A disabled control with no reason invites the question the tooltip is
+    // there to answer, and the answer here is an instruction: reload.
+    expect(askedRefusal).toMatch(/refresh/i);
+  });
+
+  it('wins over every other reason, because the row is now stale', () => {
+    // The agent is about to disconnect and about to change version, so both
+    // other refusals are answering from fields that are known to be out of
+    // date. Reporting "already running 0.1.1" here would be reporting the
+    // update as complete before anything has confirmed it.
+    expect(updateRefusal({ online: false, agentVersion: '0.1.0' }, '0.1.1', true))
+      .toBe(askedRefusal);
+    expect(updateRefusal({ online: true, agentVersion: '0.1.1' }, '0.1.1', true))
+      .toBe(askedRefusal);
+  });
+
+  it('does not affect agents that were not asked', () => {
+    // The flag is per agent. Disabling the whole column after one click would
+    // stop an operator updating the rest of a site without a reload.
+    expect(updateRefusal({ online: true, agentVersion: '0.1.0' }, '0.1.1', false)).toBeNull();
+  });
+
+  it('defaults to not-asked, so an omitted argument cannot disable a button', () => {
+    // Every existing caller passes two arguments. If the default were true,
+    // the whole column would be dead on first render and the page would look
+    // broken rather than cautious.
+    expect(updateRefusal({ online: true, agentVersion: '0.1.0' }, '0.1.1')).toBeNull();
   });
 });
