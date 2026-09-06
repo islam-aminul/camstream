@@ -86,9 +86,34 @@ the attempt to take one killed the JVM instead (a JDK 25 `jcmd` attaching to
 the bundled JRE 21), which is also what restarted the service and ended the
 incident.
 
-**Next time it happens, dump threads first**, with a matching JDK and against a
-service the current user can attach to. Until then this is not diagnosed and
-should not be "fixed" by guessing at the provider.
+**The next occurrence will dump its own threads.** Attaching from outside is
+not available here and never really was: the Windows service runs as a virtual
+account no ordinary user may attach to, the Linux unit is inside a hardened
+systemd sandbox, and the bundled runtime is a JRE with no attach tooling in it.
+So the supervisor now watches for a task that has gone in and not come out, and
+logs `Thread.getAllStackTraces` when one has - which needs no attach, no
+privilege and no matching toolchain.
+
+Why the supervisor could not already see it: `execute()` catches a task that
+*throws*, logs it, backs it off and retries. A task that *blocks* reaches none
+of that. It never returns, so it never reaches the finally that reschedules it,
+never records a failure, and simply stops - leaving an agent that looks healthy
+from every angle including its own last heartbeat. That is exactly the shape of
+the twenty-six minutes above.
+
+The watchdog owns a thread of its own, which is the part that matters: tasks
+wedge by occupying a pool thread and never giving it back, so a watchdog on
+that pool would queue behind the very tasks it reports on and go quiet with
+them. There is a test that starves the pool completely and requires it to speak
+anyway.
+
+Still not diagnosed, and still not to be "fixed" by guessing at the provider.
+The leading suspicion remains `IotCredentialsProvider` - one `HttpClient` for
+the life of the process, and `resolveCredentials()` `synchronized` across the
+network call, so a fetch hanging on a socket the resume killed would block
+every credential-needing task behind one monitor. The dump will say whether
+that is right. If it is, the stacks will show several `camstream-supervisor`
+threads BLOCKED on the same monitor with one owner inside `fetch`.
 
 One thing was fixed on the strength of it, because it is wrong independently of
 the cause: a heartbeat that cannot be published was logged at `debug`, so at the

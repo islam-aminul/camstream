@@ -31,6 +31,12 @@ public final class Supervisor implements AutoCloseable {
     /** A task running this long before failing counts as having recovered. */
     private static final Duration HEALTHY_AFTER = Duration.ofMinutes(5);
 
+    /** No task is called stuck sooner than this, whatever its cadence. */
+    private static final Duration MIN_PATIENCE = Duration.ofMinutes(5);
+
+    /** How often the watchdog looks. Cheap: a few volatile reads. */
+    private static final Duration WATCHDOG_INTERVAL = Duration.ofMinutes(1);
+
     /**
      * A supervised unit of work, retried on failure.
      *
@@ -61,23 +67,127 @@ public final class Supervisor implements AutoCloseable {
         final Task task;
         final Backoff backoff = new Backoff(MIN_BACKOFF, MAX_BACKOFF, HEALTHY_AFTER);
         Instant lastSuccess = Instant.now();
+        /** When the current run began, or null when this task is not running. */
+        volatile Instant startedAt;
+        /** So one stuck episode is one dump, not one a minute for ever. */
+        volatile boolean stuckReported;
 
         State(Task task) {
             this.task = task;
         }
+
+        Duration patience() {
+            return patienceFor(task.interval());
+        }
     }
 
     private final ScheduledExecutorService scheduler;
+    /**
+     * The watchdog's own thread, and it must be its own.
+     *
+     * It exists to notice tasks that have stopped coming back, and the way
+     * they stop coming back is by occupying a pool thread for ever. A watchdog
+     * sharing that pool would be queued behind exactly the tasks it is meant
+     * to report on, and would go quiet at the same moment they did.
+     */
+    private final ScheduledExecutorService watchdog;
+    /** Overrides each task's patience, for tests only; null in production. */
+    private final Duration watchdogPatience;
     private final List<State> states = new CopyOnWriteArrayList<>();
     private volatile boolean running = true;
 
     public Supervisor(int threads) {
+        this(threads, WATCHDOG_INTERVAL, null);
+    }
+
+    /**
+     * @param watchdogInterval how often to look for stuck tasks
+     * @param watchdogPatience how long a run may take before it counts as
+     *   stuck, or null to use each task's own. Both exist so a test can prove
+     *   the watchdog fires *on its own thread* while every pool thread is
+     *   blocked - which is the whole reason it has one, and cannot be shown by
+     *   calling the check directly.
+     */
+    Supervisor(int threads, Duration watchdogInterval, Duration watchdogPatience) {
+        this.watchdogPatience = watchdogPatience;
         this.scheduler = Executors.newScheduledThreadPool(threads, runnable -> {
             Thread thread = new Thread(runnable);
             thread.setDaemon(true);
             thread.setName("camstream-supervisor");
             return thread;
         });
+        this.watchdog = Executors.newSingleThreadScheduledExecutor(runnable -> {
+            Thread thread = new Thread(runnable);
+            thread.setDaemon(true);
+            thread.setName("camstream-watchdog");
+            return thread;
+        });
+        this.watchdog.scheduleWithFixedDelay(() -> checkForStuckTasks(this.watchdogPatience),
+                watchdogInterval.toMillis(), watchdogInterval.toMillis(), TimeUnit.MILLISECONDS);
+    }
+
+    /**
+     * How long a run may take before it is treated as stuck.
+     *
+     * Three intervals, because a task that has taken three times its own
+     * cadence is late by its own standard rather than by a number chosen here
+     * — but never less than five minutes, so publishing at 250ms is not called
+     * stuck for one slow upload.
+     */
+    static Duration patienceFor(Duration interval) {
+        Duration byCadence = interval.multipliedBy(3);
+        return byCadence.compareTo(MIN_PATIENCE) > 0 ? byCadence : MIN_PATIENCE;
+    }
+
+    /**
+     * Reports tasks that went in and never came out.
+     *
+     * The failure this exists for: on 2026-09-06 an agent came back from a
+     * laptop suspend unable to obtain AWS credentials, and then said nothing
+     * whatsoever for twenty-six minutes. Not one error — silence. A task that
+     * throws is caught, logged, backed off and retried by execute() below; a
+     * task that *blocks* is none of those things. It never reaches the finally
+     * that reschedules it, never records a failure, and simply stops, leaving
+     * an agent that looks connected and healthy from every angle including its
+     * own last heartbeat.
+     *
+     * There is no fix here, deliberately. What went wrong that morning is
+     * still unknown, and the attempt to find out by attaching a debugger
+     * killed the process and ended the incident. This makes the next
+     * occurrence explain itself instead.
+     */
+    void checkForStuckTasks() {
+        checkForStuckTasks(null);
+    }
+
+    /**
+     * @param patience overrides each task's own, for tests. Waiting out the
+     *   real five minutes would make this untestable, and a watchdog nobody
+     *   has watched work is a watchdog that fires into a void on the night it
+     *   is needed.
+     */
+    void checkForStuckTasks(Duration patience) {
+        if (!running) {
+            return;
+        }
+        Instant now = Instant.now();
+        for (State state : states) {
+            Instant started = state.startedAt;
+            if (started == null) {
+                // Not running: nothing to judge. The flag is cleared by
+                // execute() when the run actually returns, not here.
+                continue;
+            }
+            Duration allowed = patience != null ? patience : state.patience();
+            if (state.stuckReported || Duration.between(started, now).compareTo(allowed) < 0) {
+                continue;
+            }
+            state.stuckReported = true;
+            log.error("[{}] has been running for {}s without returning, which is longer than "
+                            + "anything it should do. Dumping threads — see docs/pending.md.{}{}",
+                    state.task.name(), Duration.between(started, now).toSeconds(),
+                    System.lineSeparator(), ThreadDump.take());
+        }
     }
 
     /** Registers a task and starts it after one interval. */
@@ -128,6 +238,7 @@ public final class Supervisor implements AutoCloseable {
         }
         Duration next = state.task.interval();
         state.backoff.started();
+        state.startedAt = Instant.now();
         try {
             state.task.body().run();
             if (!state.backoff.healthy()) {
@@ -145,6 +256,14 @@ public final class Supervisor implements AutoCloseable {
             log.warn("[{}] failed ({} in a row), next attempt in {}s: {}",
                     state.task.name(), state.backoff.consecutiveFailures(), next.toSeconds(), e.toString());
         } finally {
+            state.startedAt = null;
+            // Re-armed here, by the task itself, rather than by the watchdog
+            // noticing it idle. The watchdog looks once a minute, so a task
+            // that wedged, recovered and wedged again between two looks would
+            // otherwise have its second episode silently swallowed - and a
+            // fault that comes and goes is exactly the kind worth catching
+            // twice.
+            state.stuckReported = false;
             schedule(state, next);
         }
     }
@@ -167,6 +286,7 @@ public final class Supervisor implements AutoCloseable {
     @Override
     public void close() {
         running = false;
+        watchdog.shutdownNow();
         scheduler.shutdownNow();
     }
 }
