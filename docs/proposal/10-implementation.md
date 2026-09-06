@@ -69,14 +69,21 @@ You sync exam shift hours to agents and publish continuously through shift plus
 margin, because the margin is what stops an observer waiting when they open a
 camera. That requirement is respected here rather than assumed away.
 
-The consequence is that publishing cost is fixed at ~$43,200/year (`20-cost.md`
-§3) rather than varying with viewers. Two things make that affordable:
+The consequence is that publishing cost is fixed — ~$39,800/year across your
+exam calendar, which is **89% of the entire bill** (`20-cost.md` §5). It does
+not vary with viewers at all; all viewing together is 8%. Two things make that
+affordable:
 
 - **10-second segments.** Your existing choice, and a good one — it halves the
   request cost against a 4-second design, at the price of a few seconds of
   additional live delay that a monitoring workload can absorb.
 - **Shift-bounded publishing.** Already how you operate. It is the difference
-  between 480 billable hours a year and 8,760.
+  between ~134 active days a year and 365.
+
+Because publishing dominates so completely, the highest-value optimisation is on
+the write path and nowhere else: synthesising the playlist at read time removes
+half of all PUTs — **~$19,900, about 45% of the total** — and changes nothing an
+observer can perceive.
 
 **Enforce shift windows server-side as well as in the agent.** The agent
 stopping at the end of a shift is what bounds the bill; if that is the only
@@ -88,15 +95,15 @@ is genuinely load-bearing.
 ### 2.3 Deletion, which is your current operational pain
 
 A single-threaded `find -mtime` that cannot finish during peak is not a tuning
-problem. At 25,000 cameras and 10-second segments the estate produces
-`25,000 × 360 = 9,000,000` objects an hour, and a 2-minute window means deleting
-them at the same rate — roughly 2.5 million unlinks an hour, on a file system
-that schedules deletes below the reads it is also serving.
+problem. At your national-exam peak of 20,000 cameras and 10-second segments the
+estate produces `20,000 × 360 = 7,200,000` objects an hour, and a 2-minute window
+means deleting them at the same rate — 2 million unlinks an hour, on a file
+system that schedules deletes below the reads it is also serving.
 
 On S3 this operation does not exist as a problem:
 
 - **DELETE requests are free.** Not cheap — free. There is no cost line for
-  removing 9 million objects an hour.
+  removing 7 million objects an hour.
 - **There is no sweep.** The agent already tracks its own sliding window to
   write the playlist; deleting the object that just fell out of it is the same
   loop, not a separate scanner racing the writers.
@@ -105,9 +112,9 @@ On S3 this operation does not exist as a problem:
 - **A one-day lifecycle rule is the backstop** for objects orphaned by a crash,
   which is the only case the agent cannot clean up itself.
 
-Resident storage across the whole estate at a 2-minute window is about **41 GB**.
-Fifty EFS file systems are replaced by an object-storage line too small to
-appear on a bill.
+Resident storage across the whole estate at a 2-minute window is about **33 GB**
+at the 20,000-camera peak. Fifty EFS file systems are replaced by an
+object-storage line too small to appear on a bill.
 
 ### Renditions
 
@@ -314,9 +321,10 @@ handles far more, but the *pattern* — presence events driving DynamoDB writes,
 desired-state fan-out on viewer change — has not been run at 1,500. Test with a
 simulator publishing synthetic heartbeats before committing.
 
-**S3 request rate on one bucket.** At 10-second segments and 25,000 cameras
-publishing continuously, steady state is `25,000 × 720 / 3600` ≈ **5,000 PUT/s**
-plus ~2,500 DELETE/s. S3 sustains 3,500 PUT/s *per prefix* and scales
+**S3 request rate on one bucket.** At 10-second segments and the 20,000-camera
+national-exam peak, steady state is `20,000 × 720 / 3600` = **4,000 PUT/s** plus
+2,000 DELETE/s. That is above the 3,500 PUT/s S3 sustains per prefix, so the key
+distribution stops being academic. S3 sustains 3,500 PUT/s *per prefix* and scales
 automatically as it learns the key distribution, and thing names spread the keys
 naturally — so this should be comfortable. But "should be" is not a load test,
 and the one thing that would break it is a key layout that puts a shared
@@ -335,10 +343,11 @@ An exam starting at 09:00 nationwide is a step function. Consider provisioned
 capacity with scheduled scaling for exam days, which is cheaper as well as
 safer under a known-in-advance peak.
 
-**The agent at 30+ cameras per centre.** 25,000 cameras across 800 centres
-averages ~31 per centre, and this design has been measured to 12 concurrent
-streams on modest hardware. Since publishing is continuous, every camera at a
-centre is live for the whole shift — there is no demand-driven relief. Your
+**The agent at 30+ cameras per centre.** 20,000 cameras across 800 centres
+averages ~25 per centre at national-exam peak, and this design has been measured
+to 12 concurrent streams on modest hardware. Since publishing is continuous,
+every camera at a centre is live for the whole shift — there is no demand-driven
+relief. Your
 existing agents already carry this load, so the risk is not the workload but
 whether the S3 uploader keeps up with 31 streams × 6 segments/minute = ~3
 uploads/second per agent. At the measured 122 ms per segment that is

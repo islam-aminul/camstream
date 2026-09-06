@@ -42,11 +42,11 @@ centres, and which centres those are is an accident of agent id.
 
 **And the deletes cannot keep up.** A single-threaded `find` removing files
 older than two minutes falls behind during peak, because EFS schedules deletes
-below reads and you are asking it to sustain roughly 2.5 million unlinks an hour
-while it is also serving every viewer. That is not a tuning problem. It is what
-a POSIX file system does when used as a high-churn ring buffer, and it is the
-clearest signal in the current design that the storage layer is the wrong shape
-for the workload.
+below reads and you are asking it to sustain some two million unlinks an hour at
+a national-exam peak, while it is also serving every viewer. That is not a
+tuning problem. It is what a POSIX file system does when used as a high-churn
+ring buffer, and it is the clearest signal in the current design that the
+storage layer is the wrong shape for the workload.
 
 ## What is proposed
 
@@ -77,8 +77,9 @@ at the edge, close to the viewer. Authorisation is a signed cookie, checked at
 the edge, so an unauthorised request is refused before it reaches anything you
 pay for per request.
 
-**Cost becomes proportional to use rather than to peak.** Between exams the
-platform costs approximately nothing. During a shift it costs the segments
+**Cost becomes proportional to use rather than to peak.** Roughly $44,500 a
+year against an estimated $314,000, and $24,600 with one optimisation. Between
+exams the platform costs approximately nothing. During a shift it costs the segments
 actually written and the bytes actually watched. This is structural, not a
 saving found by tuning.
 
@@ -86,7 +87,7 @@ saving found by tuning.
 own objects as the two-minute window rolls, S3 charges nothing at all for DELETE
 requests, and there is no queue to fall behind on. A one-day lifecycle rule sits
 underneath as a backstop for anything a crash orphaned. Across the whole estate
-the resident two-minute window is about 41 GB — the fifty file systems are
+the resident two-minute window is about 33 GB at peak — the fifty file systems are
 replaced by roughly a pound a year of object storage.
 
 ## How the agent is trusted without a shared secret
@@ -164,16 +165,16 @@ continuously with a margin so that an observer opening a camera sees it
 instantly. That requirement survives this change unaltered, and the costing
 respects it rather than assuming it away.
 
-**It is not free at rest if you archive everything.** Continuous retention of
-25,000 cameras is a storage bill regardless of architecture, and the design for
-it is different from the design for live view — see `20-cost.md`, which treats
-them separately because conflating them is how the number becomes frightening.
+**The request cost is the whole bill, and it is worth knowing that up front.**
+S3 `PUT` requests are **89%** of the projected cost — more than bandwidth,
+storage and compute combined, and by a wide margin. Viewing is 8%. That is
+counter-intuitive enough that it is the first thing to say in a design review,
+because every instinct about video platforms says bandwidth dominates, and here
+it does not.
 
-**The request cost is real and is the dominant line.** At 25,000 cameras
-publishing continuously, S3 `PUT` requests cost more than the bandwidth and far
-more than the storage. This is the number that decides the design, and it is
-addressed head on rather than buried: publish on demand, and archive as large
-objects rather than as segments.
+It follows that the only optimisations worth discussing are on the write path.
+The best of them — synthesising playlists at read time — removes 45% of the
+entire bill and changes nothing an observer can see.
 
 ## Why this shape rather than MediaLive / IVS / a managed service
 
@@ -215,5 +216,5 @@ is called out with what to test.
 | Document | Answers |
 |---|---|
 | `10-implementation.md` | What gets built, the data model, the integration API contract, the security model, and what is unproven at scale |
-| `20-cost.md` | What it costs at 25,000 cameras, with the workings exposed and every assumption labelled |
+| `20-cost.md` | What it costs across your actual exam calendar, with the workings exposed and every assumption labelled |
 | `30-runbook.md` | The commands, in order, to stand the whole thing up by hand |

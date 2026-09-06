@@ -9,7 +9,8 @@ the room, with a pointer to where the detail lives.
 
 **"We already have a working platform. Why rebuild?"**
 It works; the objection is what it costs and where the risk sits. Three fixed
-tiers — WildFly, EFS, Nginx — are paid for 365 days to serve 60. And the delete
+tiers — WildFly, EFS, Nginx — are paid for 365 days to serve about 134, and are
+sized for the two national exam days among them. And the delete
 sweep already cannot keep up at peak, which is not a tuning problem but a sign
 the storage layer is the wrong shape for a high-churn ring buffer.
 
@@ -31,7 +32,7 @@ December 2020. A segment is readable the moment `PutObject` returns. This
 objection was correct until 2020 and is the most common out-of-date one you will
 hear.
 
-**"5,000 PUT/s to one bucket — will S3 throttle?"**
+**"4,000 PUT/s to one bucket — will S3 throttle?"**
 S3 sustains 3,500 PUT/s *per prefix* and partitions automatically as it learns
 the key distribution. Keys are spread by thing name, so the load is spread by
 construction. That said it is listed as unproven at scale — run a synthetic
@@ -51,10 +52,10 @@ are perhaps 300 lines. Weigh that against the operational lock-in of 50 hand-
 sharded file systems.
 
 **"Why not Kubernetes / ECS instead of Lambda?"**
-Because the workload is 60 days a year. A container platform is provisioned
-capacity with a different name; it would solve the sharding problem but not the
-paying-for-idle one. Lambda here handles control plane only — no video passes
-through it.
+Because the workload is ~134 active days a year, and the peak that sizes it is
+two of them. A container platform is provisioned capacity with a different name;
+it would solve the sharding problem but not the paying-for-idle one. Lambda here
+handles control plane only — no video passes through it.
 
 ---
 
@@ -104,9 +105,10 @@ built and verified end to end in the reference implementation.
 ## From finance
 
 **"What does it cost?"**
-~$59k–114k/year depending on viewer concurrency, against an estimated ~$314k for
-the current fleet. But the ratio is not the point — the current bill is identical
-in June and on exam morning. (`20-cost.md`.)
+~$44,500/year across your whole exam calendar, or ~$24,600 with one read-path
+optimisation, against an estimated ~$314k for the current fleet. But the ratio
+is not the point — the current bill is identical in June and on exam morning,
+because it is sized for two national exam days. (`20-cost.md` §5.)
 
 **"Your comparison numbers for our platform are guesses."**
 They are, and they are labelled as such. Replace them with actuals. If those EC2
@@ -114,15 +116,33 @@ instances are on 3-year Savings Plans the current figure may be ~40% lower — i
 which case the honest recommendation is to migrate at renewal rather than now.
 
 **"What's the biggest cost risk?"**
-Viewer concurrency. The spread is $14,900 to $69,100/year depending on how many
-camera tiles are on screens at once. Count tiles, not observers — it is a
-half-day measurement that firms up the largest variable.
+My reading of your exam calendar. Publishing is 89% of the bill and scales with
+cameras × hours × days, and the monthly-exam pattern alone is 78% of the total.
+If those 10 days a month are really 15, add ~$17,000. Everything else is noise
+by comparison.
+
+**"Surely bandwidth is the big number?"**
+No, and this is the most useful thing in the costing. S3 **PUT requests are 89%**
+of the bill; all viewing together is 8%. You publish 13–50 cameras for every one
+being watched, so the write path dominates completely. Every instinct says
+bandwidth; the arithmetic says requests.
+
+**"So should we argue about viewer counts?"**
+No — and it is worth saying so early to save the meeting. Tripling every viewer
+number adds about $7,000 to a $44,500 bill.
 
 **"Any way this costs more than expected?"**
-Three: cameras configured at higher bitrate than the ~110 kbps measured here
-(scales egress linearly); anyone putting 1080p in a grid (20×); and shift windows
-not enforced server-side, so an agent with a wrong clock publishes overnight.
-All three are guarded in the design; the third is the one that is load-bearing.
+Three: my calendar assumptions being wrong (above); anyone putting 1080p in a
+grid, which is 20× per tile; and shift windows not enforced server-side, so an
+agent with a wrong clock publishes overnight. The third is the one that is
+genuinely load-bearing, and it is one guard in the control plane.
+
+**"What is the cheapest thing we can do to reduce it?"**
+Synthesise the HLS playlist at read time with a CloudFront Function instead of
+rewriting it on every segment. Half of all PUTs are 1 KB playlist rewrites, so
+this removes **~$19,900 — about 45% of the entire bill** — and changes nothing
+an observer can perceive. One function, on the read path, at $0.10 per million
+invocations.
 
 **"What's the migration cost?"**
 Not modelled, and it is a programme cost rather than an infrastructure one.
@@ -137,7 +157,7 @@ real people. Budget it separately and honestly.
 It removes the operation. There is no sweep: the agent deletes its own objects
 as the 2-minute window rolls, S3 charges **nothing at all** for DELETE, and
 there is no queue to fall behind on. A one-day lifecycle rule catches anything
-orphaned by a crash. 41 GB resident across the whole estate.
+orphaned by a crash. 33 GB resident across the whole estate at peak.
 
 **"How do we know a centre is unwell before an exam?"**
 Agents heartbeat health — CPU, memory, disk, uplink throughput, per-task health,

@@ -29,12 +29,16 @@ of camera quirks is untouched.
 **The delete problem stops existing.** The single-threaded `find` that cannot
 keep up at peak has no equivalent here. The agent removes its own objects as the
 2-minute window rolls, S3 charges nothing for DELETE, and there is no queue to
-fall behind on. Fifty file systems become about 41 GB resident.
+fall behind on. Fifty file systems become about 33 GB resident.
 
-**Cost changes shape, not just size.** ~$59k–114k/year against an estimated
-~$314k — but the important part is that the current bill is identical in June and
-on exam morning, because it is provisioned capacity for a platform busy 60 days
-a year.
+**Cost changes shape, not just size.** ~$44,500/year against an estimated
+~$314k, or ~$24,600 with one read-path optimisation. The important part is that
+the current bill is identical in June and on exam morning, because it is
+provisioned capacity sized for two national exam days.
+
+**S3 PUT requests are 89% of the bill.** Not bandwidth, not storage. Viewing is
+8%. Every instinct about video platforms says bandwidth dominates; here it does
+not, and that redirects the entire optimisation conversation to the write path.
 
 **The security boundary is the thing name.** Every agent's credentials, topics
 and S3 prefix are scoped by `${credentials-iot:ThingName}`. A compromised centre

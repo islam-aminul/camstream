@@ -55,7 +55,7 @@ aws s3api put-bucket-lifecycle-configuration \
   --lifecycle-configuration file:///tmp/lifecycle.json
 ```
 
-**Cost:** storage only. At a 2-minute window across 25,000 cameras, ~41 GB
+**Cost:** storage only. At a 2-minute window across 20,000 cameras, ~33 GB
 resident ≈ $1/month. Ingest is free; DELETE is free.
 
 ---
