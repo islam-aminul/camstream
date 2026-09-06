@@ -1,6 +1,9 @@
 import { Construct } from 'constructs';
 import { CfnOutput, RemovalPolicy } from 'aws-cdk-lib';
 import * as kms from 'aws-cdk-lib/aws-kms';
+import * as events from 'aws-cdk-lib/aws-events';
+import * as targets from 'aws-cdk-lib/aws-events-targets';
+import * as sns from 'aws-cdk-lib/aws-sns';
 
 /**
  * The key that says a package is ours.
@@ -59,5 +62,67 @@ export class PackageSigning extends Construct {
     // only the public half, which is committed into the repository.
     new CfnOutput(this, 'ReleaseSigningKeyId', { value: this.key.keyId });
     new CfnOutput(this, 'ReleaseSigningKeyArn', { value: this.key.keyArn });
+  }
+
+  /**
+   * Says so, every time this key signs anything.
+   *
+   * Since agent 0.1.7 an unsigned package is refused outright, which is what
+   * the signing was for - and it means `kms:Sign` on this key is now the whole
+   * of the answer to "who decides what runs on the fleet". The key material
+   * cannot be copied, so the only interesting question is who asked it to sign,
+   * and nothing was watching that.
+   *
+   * Notification rather than a threshold alarm, deliberately. There is no
+   * suspicious *rate* of signing to detect: a release signs two bundles and
+   * then nothing happens for days, so any threshold high enough to be quiet
+   * would also be high enough to miss a single hostile signature - which is
+   * all it would take. Every use is worth one message, and every use is
+   * expected to be one somebody in this repository just caused.
+   *
+   * EventBridge on the default bus, so no CloudTrail trail is needed: KMS logs
+   * its cryptographic operations as management events, which are delivered
+   * there without one. A trail would mean an S3 bucket, a log group and a
+   * standing cost, for the same information.
+   */
+  public notifyOnUse(topic: sns.ITopic): void {
+    new events.Rule(this, 'SigningUse', {
+      description: 'A release bundle was signed with the CamStream release key',
+      eventPattern: {
+        source: ['aws.kms'],
+        detailType: ['AWS API Call via CloudTrail'],
+        detail: {
+          eventSource: ['kms.amazonaws.com'],
+          // Sign only. Verify is not interesting - the agents do that
+          // locally against the compiled-in public key and never call KMS -
+          // and GetPublicKey is how the key gets into a build in the first
+          // place, which is a read of something already public.
+          eventName: ['Sign'],
+          // Scoped to this key. Other keys in the account are symmetric and
+          // cannot be signed with at all, so this is belt and braces - but an
+          // unscoped rule would start paging about somebody else's key the
+          // day one is added.
+          resources: { ARN: [this.key.keyArn] },
+        },
+      },
+      targets: [
+        new targets.SnsTopic(topic, {
+          // Who and when, in the notification itself. An alert that only says
+          // "the key was used" sends somebody to CloudTrail to find out the
+          // one thing they actually wanted to know.
+          message: events.RuleTargetInput.fromText(
+            `The CamStream release signing key was used to sign a package.
+
+  who:   ${events.EventField.fromPath('$.detail.userIdentity.arn')}
+  when:  ${events.EventField.fromPath('$.detail.eventTime')}
+  from:  ${events.EventField.fromPath('$.detail.sourceIPAddress')}
+  agent: ${events.EventField.fromPath('$.detail.userAgent')}
+
+If this was not a release somebody just cut, treat it as a compromise of the
+fleet's update path: an agent installs any bundle this key has signed.`,
+          ),
+        }),
+      ],
+    });
   }
 }
