@@ -137,6 +137,20 @@ grid, which is 20× per tile; and shift windows not enforced server-side, so an
 agent with a wrong clock publishes overnight. The third is the one that is
 genuinely load-bearing, and it is one guard in the control plane.
 
+**"Your reference system uses 4-second segments. Are we switching to those?"**
+No — and this is the most expensive question in the document. Keep your 10 s.
+The 4 s default exists because that project publishes *on demand*, so segment
+length sits directly in the wait when a viewer opens a camera. You pre-roll with
+a margin, so that wait does not exist. Carrying the default across would cost
+**$89,424 a year** for nothing. (`20-cost.md` §3.1.)
+
+**"Is there anything in their settings worth taking?"**
+One thing: `-hls_init_time 1`, which cuts the *first* segment at the first
+keyframe instead of at the full target duration. Measured on a 2-second-GOP
+camera it took time-to-first-frame from 6.4 s to 3.0 s, and the effect is larger
+at a 10-second target. That is the lever on your **margin hours**, which are
+billable time. One ffmpeg flag.
+
 **"What is the cheapest thing we can do to reduce it?"**
 Synthesise the HLS playlist at read time with a CloudFront Function instead of
 rewriting it on every segment. Half of all PUTs are 1 KB playlist rewrites, so

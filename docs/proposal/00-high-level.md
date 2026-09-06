@@ -172,9 +172,11 @@ counter-intuitive enough that it is the first thing to say in a design review,
 because every instinct about video platforms says bandwidth dominates, and here
 it does not.
 
-It follows that the only optimisations worth discussing are on the write path.
-The best of them — synthesising playlists at read time — removes 45% of the
-entire bill and changes nothing an observer can see.
+It follows that the only optimisations worth discussing are on the write path,
+and the largest of them is **segment length**. Keeping your 10 seconds rather
+than adopting this project's 4-second default is worth $89,424 a year — more
+than every other optimisation combined. Synthesising playlists at read time is
+worth another 46%, and changes nothing an observer can see.
 
 ## Why this shape rather than MediaLive / IVS / a managed service
 

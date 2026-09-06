@@ -17,7 +17,7 @@ Not the one I assumed first. This is what you actually do:
 |---|---|
 | Exam shift hours are synced to agents | Publishing is bounded to shift + margin, not 24×7 |
 | Agents publish **continuously** through the shift | On-demand publishing is off the table — see §6 |
-| **10-second** segments | Halves request cost against a 4 s design |
+| **10-second** segments | Your choice, and the proposal keeps it — see §3.1. It is worth $89,000/year against the 4 s this project defaults to |
 | Margin hours pre-roll the feed | The reason on-demand is rejected: no start-up delay when an observer opens a camera |
 | Files deleted after **2 minutes** | There is no archive in this path. Storage is a rounding error |
 | Observers assigned to a few centres, overlapping on incidents | Viewer concurrency is the largest variable — §4 |
@@ -42,6 +42,14 @@ From the running system — real cameras, real network, stream-copied H.264:
 | Upload throughput | 484 KB/s, 122 ms per segment |
 | Agent CPU per stream | 2–5% of one core |
 | Start-up, click to first frame | ~3 s to first segment, ~9 s to picture |
+| Segment length **in this project** | 1 s first segment, then 4 s |
+| Segment length **in your platform** | 10 s throughout |
+
+The two projects chose differently and both were right for their own model. This
+project publishes **on demand**, so a viewer clicks and waits — short segments
+and a keyframe-aligned first segment are what make that bearable. You publish
+**continuously with a margin**, so nobody ever waits for a first segment, and
+short ones buy you nothing while costing a great deal. §3.1 has the numbers.
 
 **Assumed:** your streams are comparable at ~110 kbps. If your cameras are
 configured higher, scale every byte-based line proportionally — the request
@@ -76,6 +84,64 @@ Multiply it by your exam calendar in §5.
 Storage is a rounding error at a 2-minute window: `cameras × 110 kbps × 120 s`,
 so even the 20,000-camera peak is about **33 GB** resident across the estate —
 under a pound a month.
+
+### 3.1 Segment length is the single largest decision in this document
+
+Everything above assumes your 10 seconds. **This project defaults to 4**, and if
+that default were carried across unexamined it would cost $89,424 a year.
+
+| Segment | PUT per camera-hour | Publishing | **Total/year** | With dynamic playlists |
+|---|---|---|---|---|
+| 4 s *(this project's default)* | 1,800 | $149,040 | **$155,570** | $81,050 |
+| 6 s | 1,200 | $99,360 | **$105,263** | $55,583 |
+| 8 s | 900 | $74,520 | **$80,109** | $42,849 |
+| **10 s** *(yours — recommended)* | **720** | **$59,616** | **$65,016** | **$35,208** |
+
+**Keep 10 seconds.** Not as a compromise — it is the right choice for your
+model, and it is worth more than every other optimisation in this document
+combined.
+
+The reason the two projects differ is worth stating, because somebody will
+otherwise assume the reference implementation's default is the considered one:
+
+- **This project publishes on demand.** A viewer clicks a camera that is not
+  running, and waits for ffmpeg to start, a keyframe to arrive, and a segment to
+  be written. Segment length is directly in that wait, so 4 s is bought with
+  money to save the viewer time.
+- **You publish continuously with a margin.** By the time anyone opens a camera
+  the stream has been running for the whole pre-roll. Segment length is not in
+  the start-up path at all. Paying 2.5× the request cost to shorten a wait that
+  does not exist would be pure waste.
+
+The cost of 10 s is a few extra seconds of live delay — the viewer is further
+behind real time. For invigilation that is immaterial; for anything requiring
+interaction it would not be.
+
+### 3.2 The one thing worth taking from this project's settings
+
+The **first** segment, not the steady-state one.
+
+`-hls_init_time 1` makes ffmpeg cut the first segment at the first keyframe
+after one second rather than waiting for the full target duration. Measured here
+against a 2-second-GOP camera, three runs each:
+
+```
+  hls_time 4 alone      6.1, 6.5, 6.6  ->  6.4 s to first frame
+  + hls_init_time 2     4.7, 4.7, 5.7  ->  5.0 s
+  + hls_init_time 1     2.5, 3.1, 3.4  ->  3.0 s
+```
+
+At a 10-second target the effect is larger still, because the first segment
+would otherwise be a full ten seconds.
+
+**This is what could shorten your margin hours.** The margin exists to absorb
+the initial feed delay; more than half of that delay is the first segment. One
+ffmpeg flag, no architectural change, and it costs one extra short object per
+stream start — a rounding error against 720 per camera-hour.
+
+Worth measuring on your own cameras before assuming the saving, because the
+gain depends on GOP length. But it is a five-minute experiment on one centre and
+the margin is billable time.
 
 ### The delete problem disappears, and it disappears for free
 

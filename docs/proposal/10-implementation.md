@@ -74,9 +74,11 @@ exam calendar, which is **92% of the entire bill** (`20-cost.md` §5). It does
 not vary with viewers at all; all viewing together is 6%. Two things make that
 affordable:
 
-- **10-second segments.** Your existing choice, and a good one — it halves the
-  request cost against a 4-second design, at the price of a few seconds of
-  additional live delay that a monitoring workload can absorb.
+- **10-second segments, kept deliberately.** This project defaults to 4 s, and
+  carrying that default across unexamined would cost **$89,424 a year**. Short
+  segments exist here to shorten the wait when a viewer opens a camera that is
+  not running; you pre-roll with a margin, so that wait does not exist and the
+  money would buy nothing. `20-cost.md` §3.1.
 - **Shift-bounded publishing.** Already how you operate. It is the difference
   between 120–240 active days a year and 365.
 
@@ -84,6 +86,13 @@ Because publishing dominates so completely, the highest-value optimisation is on
 the write path and nowhere else: synthesising the playlist at read time removes
 half of all PUTs — **~$29,800, about 46% of the total** — and changes nothing an
 observer can perceive.
+
+**Take the first segment, not the steady-state one.** The one setting worth
+importing from this project is `-hls_init_time 1`, which cuts the *first*
+segment at the first keyframe rather than at the full target duration. Measured
+against a 2-second-GOP camera it took time-to-first-frame from 6.4 s to 3.0 s,
+and at a 10-second target the effect is larger. That is what could shorten your
+margin hours, and it costs one extra short object per stream start.
 
 **Enforce shift windows server-side as well as in the agent.** The agent
 stopping at the end of a shift is what bounds the bill; if that is the only
@@ -115,6 +124,17 @@ On S3 this operation does not exist as a problem:
 Resident storage across the whole estate at a 2-minute window is about **33 GB**
 at the 20,000-camera peak. Fifty EFS file systems are replaced by an
 object-storage line too small to appear on a bill.
+
+### Segment length
+
+| | This project | Your platform | Proposal |
+|---|---|---|---|
+| Steady state | 4 s | 10 s | **10 s** — yours |
+| First segment | 1 s (`hls_init_time`) | 10 s | **1 s** — ours |
+
+Both projects chose correctly for their own model, and the proposal takes one
+setting from each. The agent already supports both: `segmentDurationMs` is
+validated to 10,000 and `initialSegmentDurationMs` is independent of it.
 
 ### Renditions
 
