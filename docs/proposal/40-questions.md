@@ -219,6 +219,20 @@ design is *less* exposed in one respect: S3 and CloudFront have no instances to
 lose, and an agent that cannot reach S3 buffers locally and catches up, where a
 WildFly outage today drops the upload.
 
+**"Are we keeping the existing agent?"**
+No. It needs frequent restarts, leaks memory and sometimes does not run, and it
+is the least reliable component in the platform — keeping it would spend the
+migration on everything except the thing that fails. The Java 21 agent brings
+supervision with retry and back-off, a watchdog that dumps threads when a task
+hangs, resource telemetry that sheds work before a machine is exhausted, and
+signed remote update. What carries across is the operational knowledge about
+camera quirks, not the code.
+
+**"Why does it have to be Java 21?"**
+Virtual threads carry the per-camera concurrency, and the supervision model is
+built on modern concurrency primitives. It is a requirement, not a preference,
+and there is no plan to back-port to 8.
+
 ---
 
 ## From the integration team

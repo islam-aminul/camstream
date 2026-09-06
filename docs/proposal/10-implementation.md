@@ -21,9 +21,9 @@ the table.
 
 ## 2. The agent
 
-One process per centre, installed as a Windows service or a systemd unit. The
-reference implementation is Java 21; **yours is Java 1.8 and does not need to
-change** — see §2.1. Responsibilities either way:
+**Java 21**, one process per centre, installed as a Windows service or a systemd
+unit. It replaces the existing Java 1.8 agent rather than extending it — see
+§2.1 for why that is a benefit rather than a cost. Responsibilities:
 
 1. **Discover** cameras on the LAN — ONVIF WS-Discovery where available, then a
    bounded port sweep and RTSP path guessing where it is not. Recorder channels
@@ -38,30 +38,42 @@ change** — see §2.1. Responsibilities either way:
 5. **Update itself** on instruction, from a signed bundle it verifies before
    opening the archive.
 
-### 2.1 You do not need to rewrite the agent
+### 2.1 The agent is replaced, and that is a reason for the project
 
-The largest de-risking fact in this proposal, and the easiest to miss.
+An earlier draft of this document argued for keeping the existing Java 1.8
+agent, on the grounds that the AWS SDK supports Java 8 and the change would be
+small. **That was wrong, and it had the argument exactly backwards.**
 
-Your agent is Java 1.8 driving FFmpeg. Keep it. **AWS SDK for Java 2.x supports
-Java 8**, and so does the **AWS IoT Device SDK v2**. Everything this design asks
-of the agent is available to you without a language or runtime migration:
+The existing agent needs frequent restarts to keep working, leaks memory, and
+sometimes does not run at all. It is the least reliable component in the
+platform. Preserving it would preserve the problem and spend the migration
+budget on everything except the thing that actually fails.
 
-| Today | Becomes | Effort |
-|---|---|---|
-| Multipart HTTP upload to WildFly | `S3Client.putObject` to a prefix | Small — it is the same bytes to a different endpoint |
-| Long-lived credentials or none | `IotCredentialsProvider` from an X.509 cert | Small — one provider class, ~100 lines |
-| Short-polling relay for sync | MQTT subscription (or keep polling at first) | Optional — can be phased |
-| Local `find` delete sweep | `deleteObject` as the window rolls | Smaller than what it replaces |
+So the agent is replaced with the Java 21 one, and the supervision it brings is
+a headline benefit rather than an implementation detail:
 
-The FFmpeg invocation does not change at all, because the output is still HLS
-segments on local disk; only the uploader after it changes. That means the
-riskiest component — the one that talks to 25,000 heterogeneous cameras and has
-absorbed years of quirks — is not touched.
+| Failure today | What the new agent does |
+|---|---|
+| Needs frequent restarts | Every subsystem runs under a `Supervisor` that catches, logs, backs off and retries. A task that throws does not take the process with it |
+| Silently stops working | A watchdog on its own thread notices any task that has gone in and not come out, and logs a full thread dump. Its own thread, deliberately — a wedged task holds a pool thread, so a watchdog sharing that pool would go quiet with it |
+| Memory leaks | Heap, disk, CPU and uplink are sampled and reported on every heartbeat, with a resource assessment that sheds transcodes before the machine is exhausted rather than after |
+| "Sometimes doesn't work" and nobody knows | Per-task health — name, healthy, consecutive failures, last success — travels on the heartbeat and is visible per centre in the console |
+| Fixing it means visiting the site | Signed remote update. Bundles are signed with a KMS key whose private half never leaves KMS; the agent verifies before opening the archive and refuses anything unsigned |
+| Clock drift breaks S3 auth | Clock skew is measured and reported; the unit orders itself after time sync |
 
-**Phase the MQTT part.** The short-polling relay can stay initially: it is
-inefficient, not wrong. Moving segment upload to S3 is the change that removes
-the WildFly and EFS tiers, and it can ship on its own. Command-and-control over
-MQTT is a second, independent step.
+The reliability argument is the one to lead with in a review. Cost is the
+headline number, but an examination platform where a centre's agent "sometimes
+doesn't work" on exam morning is a different kind of problem, and it is the one
+this replaces.
+
+**What carries across is the operational knowledge, not the code.** The camera
+quirks, the RTSP paths that work on particular firmware, the recorders that need
+a channel walk — those are worth extracting from the old agent and folding into
+the new one's discovery, and that is where the migration effort should go.
+
+**Java 21 is a requirement, not a preference.** Virtual threads carry the
+per-camera concurrency, and the supervision model above is built on modern
+concurrency primitives. There is no plan to back-port it to 8.
 
 ### 2.2 Publishing is continuous, and that is costed honestly
 

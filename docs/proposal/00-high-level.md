@@ -154,16 +154,14 @@ the platform can say which of those it is.
 to the cameras, and produce HLS. That component stays, and it is the part most
 worth investing in.
 
-**It does not require rewriting your agent.** Yours is Java 1.8 driving FFmpeg,
-and that is fine — the AWS SDK for Java 2.x and the AWS IoT Device SDK v2 both
-support Java 8. The change is to where the agent *puts* the segment, not to how
-it makes one. See `10-implementation.md` §2.1; this is the largest single
-de-risking fact in the proposal and it is easy to miss.
-
-**It does not give you on-demand publishing.** You sync shift hours and publish
-continuously with a margin so that an observer opening a camera sees it
-instantly. That requirement survives this change unaltered, and the costing
-respects it rather than assuming it away.
+**It replaces the agent, and that is the point.** The existing one needs
+frequent restarts, leaks memory and sometimes does not run — it is the least
+reliable part of the platform. The Java 21 agent runs every subsystem under a
+supervisor that retries failures, a watchdog that detects a task which has hung
+and dumps its threads, resource telemetry that sheds work before a machine is
+exhausted, and signed remote update so a fix does not need a site visit. See
+`10-implementation.md` §2.1. Cost is the headline; this is the part that decides
+whether a centre is watchable on exam morning.
 
 **The request cost is the whole bill, and it is worth knowing that up front.**
 S3 `PUT` requests are **92%** of the projected cost — more than bandwidth,
@@ -218,5 +216,6 @@ is called out with what to test.
 | Document | Answers |
 |---|---|
 | `10-implementation.md` | What gets built, the data model, the integration API contract, the security model, and what is unproven at scale |
+| `15-segments.md` | Segment sizes, the playlist as it evolves, and the two very different things a viewer experiences |
 | `20-cost.md` | What it costs across your actual exam calendar, with the workings exposed and every assumption labelled |
 | `30-runbook.md` | The commands, in order, to stand the whole thing up by hand |

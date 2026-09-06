@@ -15,16 +15,19 @@ CloudFront serves them with signed-cookie authorisation.
 |---|---|---|
 | [`00-high-level.md`](00-high-level.md) | What is proposed and why | You have ten minutes |
 | [`10-implementation.md`](10-implementation.md) | What gets built, the data model, the integration contract, what is unproven | You will build it or review it |
+| [`15-segments.md`](15-segments.md) | Segment sizes, the playlist minute by minute, and what a viewer actually sees | You are choosing segment length or arguing about latency |
 | [`20-cost.md`](20-cost.md) | What it costs, with the workings exposed | You sign for it |
 | [`30-runbook.md`](30-runbook.md) | The commands, in order, end to end | You want to prove it yourself in an hour |
 | [`40-questions.md`](40-questions.md) | The questions you will be asked | You are presenting it |
 
 ## The four things that matter most
 
-**The agent does not need rewriting.** It is Java 1.8 driving FFmpeg. AWS SDK
-for Java 2.x and the IoT Device SDK v2 both support Java 8. The change is where
-the segment is *put*, not how it is made — the component that has absorbed years
-of camera quirks is untouched.
+**The agent is replaced, and that is a reason for the project rather than a
+risk.** The existing one needs frequent restarts, leaks memory and sometimes
+does not run. The Java 21 agent supervises every subsystem, detects a hung task
+and dumps its threads, reports per-task health and machine resources on every
+heartbeat, and takes signed updates remotely. What carries across is the
+operational knowledge about cameras, not the code.
 
 **The delete problem stops existing.** The single-threaded `find` that cannot
 keep up at peak has no equivalent here. The agent removes its own objects as the
