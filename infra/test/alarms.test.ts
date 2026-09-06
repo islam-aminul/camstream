@@ -15,7 +15,30 @@ import { resolveConfig } from '../lib/config';
  * in the stack rather than clicked into the console, or the next deploy is one
  * `cdk destroy` away from silence again.
  */
+/**
+ * Synthesised once per distinct context, not once per assertion.
+ *
+ * Synthesising this app takes seconds - it bundles every lambda - and these
+ * tests were doing it a dozen times over. That is fine until it is not: adding
+ * one construct pushed this file past the default timeout and failed a test
+ * that had nothing wrong with it. The template is a pure function of the
+ * context, so caching it is safe and the file goes from a minute to a few
+ * seconds.
+ */
+const templates = new Map<string, Template>();
+
 function synth(extra: Record<string, unknown> = {}) {
+  const cacheKey = JSON.stringify(extra);
+  const cached = templates.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+  const template = synthesise(extra);
+  templates.set(cacheKey, template);
+  return template;
+}
+
+function synthesise(extra: Record<string, unknown> = {}) {
   // The same context the deployed stack uses, so the alarms under test are the
   // alarms that ship.
   const app = new App({
@@ -53,7 +76,11 @@ describe('alarms', () => {
     synth().resourceCountIs('AWS::SNS::Subscription', 0);
     synth({ alarmEmail: 'alerts@example.com' })
       .resourceCountIs('AWS::SNS::Subscription', 0);
-  });
+    // Two distinct contexts, so two synths, and a synth bundles every lambda.
+    // The default thirty seconds was not chosen with that in mind - it started
+    // failing when a construct was added elsewhere in the stack, which is a
+    // slow test rather than a broken one.
+  }, 90_000);
 
   it('lets the admin function manage who is subscribed, and nothing else', () => {
     // Publishing to the topic is CloudWatch's job. The API only reads and

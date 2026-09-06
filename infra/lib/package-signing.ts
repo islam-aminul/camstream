@@ -1,9 +1,12 @@
 import { Construct } from 'constructs';
 import { CfnOutput, RemovalPolicy } from 'aws-cdk-lib';
 import * as kms from 'aws-cdk-lib/aws-kms';
-import * as events from 'aws-cdk-lib/aws-events';
-import * as targets from 'aws-cdk-lib/aws-events-targets';
 import * as sns from 'aws-cdk-lib/aws-sns';
+import * as cloudtrail from 'aws-cdk-lib/aws-cloudtrail';
+import * as logs from 'aws-cdk-lib/aws-logs';
+import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
+import * as cloudwatchActions from 'aws-cdk-lib/aws-cloudwatch-actions';
+import { Duration } from 'aws-cdk-lib';
 
 /**
  * The key that says a package is ours.
@@ -68,61 +71,75 @@ export class PackageSigning extends Construct {
    * Says so, every time this key signs anything.
    *
    * Since agent 0.1.7 an unsigned package is refused outright, which is what
-   * the signing was for - and it means `kms:Sign` on this key is now the whole
+   * the signing was for — and it means `kms:Sign` on this key is now the whole
    * of the answer to "who decides what runs on the fleet". The key material
    * cannot be copied, so the only interesting question is who asked it to sign,
    * and nothing was watching that.
    *
-   * Notification rather than a threshold alarm, deliberately. There is no
-   * suspicious *rate* of signing to detect: a release signs two bundles and
-   * then nothing happens for days, so any threshold high enough to be quiet
-   * would also be high enough to miss a single hostile signature - which is
-   * all it would take. Every use is worth one message, and every use is
-   * expected to be one somebody in this repository just caused.
+   * A trail into CloudWatch Logs, and not EventBridge, which was tried first
+   * and does not work. `kms:Sign` is a management event — it appears in
+   * CloudTrail with the key's ARN in `resources` — but it is flagged
+   * `readOnly: true`, and EventBridge does not deliver read-only management
+   * events. The rule was deployed, the key was signed with, and thirty minutes
+   * later `TriggeredRules` had no data points at all. An alarm that cannot
+   * fire is worse than no alarm, because somebody believes they have one.
    *
-   * EventBridge on the default bus, so no CloudTrail trail is needed: KMS logs
-   * its cryptographic operations as management events, which are delivered
-   * there without one. A trail would mean an S3 bucket, a log group and a
-   * standing cost, for the same information.
+   * A metric filter on the log group sees everything the trail writes,
+   * read-only included.
+   *
+   * Cost: the first copy of management events in a region is free, so this is
+   * the S3 storage for a very low-volume trail plus a small log group with a
+   * short retention. The events are kept a fortnight here because this is an
+   * alerting path — the trail's own S3 copy is the record.
    */
   public notifyOnUse(topic: sns.ITopic): void {
-    new events.Rule(this, 'SigningUse', {
-      description: 'A release bundle was signed with the CamStream release key',
-      eventPattern: {
-        source: ['aws.kms'],
-        detailType: ['AWS API Call via CloudTrail'],
-        detail: {
-          eventSource: ['kms.amazonaws.com'],
-          // Sign only. Verify is not interesting - the agents do that
-          // locally against the compiled-in public key and never call KMS -
-          // and GetPublicKey is how the key gets into a build in the first
-          // place, which is a read of something already public.
-          eventName: ['Sign'],
-          // Scoped to this key. Other keys in the account are symmetric and
-          // cannot be signed with at all, so this is belt and braces - but an
-          // unscoped rule would start paging about somebody else's key the
-          // day one is added.
-          resources: { ARN: [this.key.keyArn] },
-        },
-      },
-      targets: [
-        new targets.SnsTopic(topic, {
-          // Who and when, in the notification itself. An alert that only says
-          // "the key was used" sends somebody to CloudTrail to find out the
-          // one thing they actually wanted to know.
-          message: events.RuleTargetInput.fromText(
-            `The CamStream release signing key was used to sign a package.
-
-  who:   ${events.EventField.fromPath('$.detail.userIdentity.arn')}
-  when:  ${events.EventField.fromPath('$.detail.eventTime')}
-  from:  ${events.EventField.fromPath('$.detail.sourceIPAddress')}
-  agent: ${events.EventField.fromPath('$.detail.userAgent')}
-
-If this was not a release somebody just cut, treat it as a compromise of the
-fleet's update path: an agent installs any bundle this key has signed.`,
-          ),
-        }),
-      ],
+    const trailLogs = new logs.LogGroup(this, 'SigningTrailLogs', {
+      retention: logs.RetentionDays.TWO_WEEKS,
+      removalPolicy: RemovalPolicy.DESTROY,
     });
+
+    // Management events only, and no data events: this exists to watch one
+    // key, not to audit the account. Data events are the expensive ones.
+    new cloudtrail.Trail(this, 'SigningTrail', {
+      cloudWatchLogGroup: trailLogs,
+      sendToCloudWatchLogs: true,
+      managementEvents: cloudtrail.ReadWriteType.ALL,
+      includeGlobalServiceEvents: false,
+      isMultiRegionTrail: false,
+    });
+
+    // Anchored on this key's ARN as well as the event name, so another
+    // asymmetric key added later cannot quietly start paging this topic.
+    const signings = new logs.MetricFilter(this, 'SigningUse', {
+      logGroup: trailLogs,
+      metricNamespace: 'CamStream',
+      metricName: 'ReleaseKeySignings',
+      filterPattern: logs.FilterPattern.all(
+        logs.FilterPattern.stringValue('$.eventName', '=', 'Sign'),
+        logs.FilterPattern.stringValue('$.eventSource', '=', 'kms.amazonaws.com'),
+        logs.FilterPattern.stringValue('$.resources[0].ARN', '=', this.key.keyArn),
+      ),
+      metricValue: '1',
+      // Absent means nothing signed, which is the ordinary state. Without
+      // this the alarm sits in INSUFFICIENT_DATA between releases and gets
+      // muted by whoever is tired of looking at it.
+      defaultValue: 0,
+    });
+
+    new cloudwatch.Alarm(this, 'ReleaseKeyUsed', {
+      alarmDescription:
+        'The CamStream release signing key signed a package. An agent installs '
+        + 'any bundle this key has signed, so if this was not a release somebody '
+        + 'just cut, treat it as a compromise of the fleet update path.',
+      metric: signings.metric({ statistic: 'Sum', period: Duration.minutes(5) }),
+      // One signature is the whole event. There is no suspicious *rate* to
+      // detect: a release signs two bundles and then nothing for days, so any
+      // threshold quiet enough to live with would miss the single signature
+      // that matters.
+      threshold: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      evaluationPeriods: 1,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    }).addAlarmAction(new cloudwatchActions.SnsAction(topic));
   }
 }
