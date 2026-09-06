@@ -268,6 +268,43 @@ Two adjacent options, cheaper than they sound and worth considering together:
 Found on 2026-09-06 while answering a question about whether synthesising the
 playlist would help start-up. It would, a little — but far less than this.
 
+### Segment names should carry a wall clock, not a per-run counter
+
+`FfmpegHls` names segments `<runId>_%06d.m4s`, where the run id is a base-36
+timestamp taken when ffmpeg starts. That is unique per run, but the counter
+resets every restart, so nothing about a name says *when* the media in it
+happened.
+
+Wall-clock naming via ffmpeg's `-strftime 1` is better for four reasons, none of
+which is the one that prompted the question:
+
+- **Restart continuity** — names cannot collide across restarts, because the
+  clock does not go back.
+- **Idempotent retries** — re-uploading after a network blip writes the same
+  key rather than a second copy.
+- **Deletion by time** — "older than T" rather than tracking indices, which is
+  what an uploader wants after a crash.
+- **Forensics** — `20260906T103215.m4s` says what it is with no cross-reference.
+  On a platform where incidents carry timestamps, that matters at 2 a.m.
+
+**Keep the run id, in the path rather than the leaf**:
+`…/sub/<runId>/20260906T103215.m4s` with `<runId>/init.mp4` beside it. The run
+id exists so a segment can never be paired with an init segment from a different
+ffmpeg run — codec parameters change and the decoder fails on the join — and
+that property must survive the rename.
+
+**Second resolution is not enough on its own.** Two segments can start within
+the same second once keyframe drift is involved, so use sub-second precision or
+ffmpeg's `second_level_segment_index`, or the names are not unique after all.
+
+What this does *not* buy, despite appearances: it does not let a CloudFront
+Function synthesise the playlist without network I/O. Segment boundaries are
+quantised to the camera GOP and drift, so computed names are right for a while
+and then quietly wrong; a computable name still says nothing about whether the
+object exists; and a restart — which needs `EXT-X-DISCONTINUITY` and a new
+`EXT-X-MAP` — is invisible to a clock. Reasoning in `docs/proposal/15-segments.md`
+§7.
+
 ### The restart gap, and why the obvious fix is wrong
 
 An agent answers "ignoring request for unknown camera" for the first 15-30

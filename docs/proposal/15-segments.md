@@ -360,6 +360,82 @@ than during testing. Writing a small file to S3 has no such failure mode.
 
 **Revisit it once the platform is boring**, not while it is being built.
 
+### Would wall-clock segment names make a CloudFront Function viable?
+
+The obvious way around "functions cannot do I/O": name segments with `strftime`
+so the names are globally predictable, and let the function compute them from
+the clock instead of looking them up.
+
+```
+-strftime 1 -hls_segment_filename 'cam_%Y%m%d%H%M%S.m4s'
+```
+
+**Adopt the naming. It does not rescue the synthesis.** Three reasons, and the
+first is the one that decides it.
+
+**1. Predictable is not the same as periodic.** ffmpeg cuts at the first
+keyframe *past* the target, so boundaries are quantised to the camera's GOP —
+they land on exact wall-clock multiples only when the GOP divides the target
+exactly, and stay there only if nothing drifts:
+
+```
+  nominal 2 s GOP             0.000   2.000   4.000   6.000   8.000  10.000
+  2 s GOP, 0.1% clock drift   0.000   2.002   4.004   6.006   8.008  10.010
+  measured CP Plus camera     0.000   3.274   6.548   9.822  13.096  16.370
+```
+
+A tenth of a percent of drift is 3.6 seconds an hour of accumulated offset. The
+real camera measured on this project is not close at any point. A function
+computing names from the clock would be right for a while and then quietly
+wrong, which is the worst failure shape available.
+
+**2. A computable name is not an existing object.** Even with perfect
+alignment, "the segment for 12:00:04 should be there by now" can be false: the
+camera dropped, the uplink stalled, ffmpeg is restarting, or the stream started
+three seconds ago and 12:00:00 never existed. Emitting a reference to a segment
+that is not there gives the player a 404 mid-stream, which is a stall. The
+naming fixes the *name*; the uncertainty was never about the name.
+
+**3. Restarts are invisible to a clock.** The fMP4 init segment carries codec
+parameters and belongs to one ffmpeg run — which is exactly why the run id is in
+both the init filename and the segment names today. A time-only synthesiser
+cannot see that a restart happened, so it would list pre- and post-restart
+segments under a single `EXT-X-MAP` and the decoder would fail on the join.
+Getting that right needs `EXT-X-DISCONTINUITY` and a fresh `EXT-X-MAP` at a
+boundary the clock does not know about.
+
+So the thing that makes synthesis safe is still *knowing what exists*, and that
+still needs I/O — Lambda@Edge at ~$711/year, as above.
+
+### But adopt the naming anyway
+
+It is worth doing on its own merits, none of which involve playlists:
+
+| Benefit | Why it matters |
+|---|---|
+| **Restart continuity** | Today's `<runId>_%06d` resets its counter every restart. Wall-clock names never collide across restarts |
+| **Idempotent retries** | Re-uploading after a network blip writes the same key rather than a duplicate |
+| **Deletion by time** | "Older than T" instead of tracking indices — simpler, and correct after a crash |
+| **Forensic legibility** | `cam_20260906T103215.m4s` says what it is without cross-referencing anything. On a platform where incidents are timestamped, that is worth real money at 2 a.m. |
+
+Two practical notes if it is adopted:
+
+- **Second resolution can collide.** Two segments can start within the same
+  second once drift is involved. Use sub-second precision, or ffmpeg's
+  `second_level_segment_index` flag, or the name is not unique after all.
+- **Keep the run id in the path, not the leaf**:
+  `…/sub/<runId>/20260906T103215.m4s` with `<runId>/init.mp4` beside it. That
+  preserves the property the run id exists for — a segment can never be paired
+  with an init from a different run — while still giving every leaf a
+  wall-clock name.
+
+**And note the standard mechanism already does the useful half.** This project
+already emits `EXT-X-PROGRAM-DATE-TIME` on every segment, which maps media time
+to wall-clock time inside the playlist. That is what "show me 10:32:15 at centre
+4021" should key off — it is what players and tooling understand, and it works
+regardless of how the files happen to be named. Filename timestamps are for the
+humans reading the bucket, not for the player.
+
 ### The real latency version of this idea is LL-HLS
 
 If synthesis is wanted specifically for start-up latency, the standardised form
